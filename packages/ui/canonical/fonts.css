@@ -1,0 +1,16 @@
+/* Self-hosted Inter variable font — the design system's `--font-sans` (canonical/tokens.css)
+ * names "Inter" first and the component stylesheet uses fractional weights (560/620/640/680)
+ * that only render correctly against the variable font. Without this face registered, the
+ * browser falls back to the platform system font and every fractional weight rounds to its
+ * nearest static step, reading visibly thinner/muddier than intended. Served by the console at
+ * /ui-fonts/InterVariable.woff2 (packages/console/src/server.ts) — this file must load before
+ * ui-tokens.css / ui-components.css so the face is registered before anything paints text. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src:
+    url("/ui-fonts/InterVariable.woff2") format("woff2-variations"),
+    url("/ui-fonts/InterVariable.woff2") format("woff2");
+}

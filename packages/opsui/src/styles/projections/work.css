@@ -1,0 +1,32 @@
+/* Work projection styles — workforce fold (console consolidation
+ * 1/4). Token vars only: dark root is :root {…} in canonical/tokens.css; light override
+ * is html[data-theme="light"] {…}. Both themes adapt automatically via CSS custom
+ * properties — no raw colour values here (enforced by scripts/lint-raw-colors.mjs).
+ *
+ * The rules below are carried over verbatim from the retired workforce.css — same
+ * EventRow spacing inside cards, rescoped from .opsui-workforce to
+ * .opsui-work since the workforce sections now render inside the Work page's root. */
+
+.opsui-work .opsui-card__body > .opsui-eventrow {
+  margin-bottom: 8px;
+}
+
+.opsui-work .opsui-card__body > .opsui-eventrow:last-child {
+  margin-bottom: 0;
+}
+
+/* Groomable backlog section (console consolidation 4/4) — carried over verbatim from
+ * the retired planner.css, rescoped from .opsui-planner__backlog to .opsui-work__backlog
+ * since the backlog section now renders inside the Work page's root. The generic
+ * `.opsui-work .opsui-card__body > .opsui-eventrow` rule above already covers spacing
+ * for `.opsui-work__backlog`'s EventRows; no extra selector needed. */
+
+/* Engine — collapsed scheduling/beats/breakers (nav collapse 9→5, WI-350). Zero-JS
+ * <details>, same collapse pattern as .opsui-acceptance__auto-summary: plain marker
+ * hidden, cursor signals it's interactive. Formerly workers.css's rules (in-flight run
+ * cards, Worker sessions, Breakers) now render inside this page's root too — reused
+ * verbatim via the .opsui-work .opsui-card__body > .opsui-eventrow rule above, no new
+ * selector needed for spacing. */
+.opsui-work__engine-summary { cursor: pointer; list-style: none; }
+.opsui-work__engine-summary::-webkit-details-marker { display: none; }
+.opsui-work__engine-body { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }

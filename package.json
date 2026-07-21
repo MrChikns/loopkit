@@ -1,0 +1,13 @@
+{
+  "name": "loopkit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event-sourced agent plane framework — workspace root",
+  "license": "MIT",
+  "workspaces": [
+    "packages/core",
+    "packages/ui",
+    "packages/opsui",
+    "packages/console"
+  ]
+}

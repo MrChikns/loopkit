@@ -1,0 +1,7 @@
+# The ledger is append-only JSONL — two branches that both append lines are never a
+# real conflict, but the default 3-way merge can still resolve the file to only one side's
+# committed tree (an approve-merge can check out over minutes of live in-flight ops appends).
+# git's built-in `union` driver instead takes lines from both sides. Pairs with the
+# id-dedupe-on-read in ledger.ts's loadAllEvents (belt-and-suspenders for a union merge
+# echoing one line into both hunks).
+.ai/ledger/*.jsonl merge=union

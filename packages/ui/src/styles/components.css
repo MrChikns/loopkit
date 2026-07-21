@@ -1,0 +1,998 @@
+/* Component styles for the @loopkit/ui components. Colours come exclusively
+ * from the generated token variables (see ../tokens/css.ts). No raw colour
+ * values live here — that invariant is enforced by scripts/lint-raw-colors.mjs. */
+
+.opsui-root {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---- Global baseline reset ------------------------------------------------- */
+.opsui-root a {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* ---- Button ---------------------------------------------------------------- */
+.opsui-btn {
+  font-family: inherit;
+  font-weight: 560;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.opsui-btn--sm { padding: 6px 10px; font-size: 12px; min-height: 30px; }
+.opsui-btn--md { padding: 9px 14px; font-size: 13px; min-height: 38px; }
+.opsui-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.opsui-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.opsui-btn--primary { background: var(--accent); color: var(--inverse); }
+.opsui-btn--primary:hover:not(:disabled) { background: var(--accent-hover); }
+.opsui-btn--secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--line);
+}
+.opsui-btn--secondary:hover:not(:disabled) { border-color: var(--line-strong); }
+.opsui-btn--ghost { background: transparent; color: var(--text-2); }
+.opsui-btn--ghost:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+.opsui-btn--danger {
+  background: var(--critical-bg);
+  color: var(--critical-fg);
+  border-color: var(--critical-border);
+}
+
+/* ---- StatusBadge ------------------------------------------------------------ */
+.opsui-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+.opsui-status--sm { padding: 2px 8px; font-size: 11px; }
+.opsui-status--md { padding: 3px 10px; font-size: 12px; }
+.opsui-status__marker { width: 8px; height: 8px; display: inline-block; background: currentColor; }
+.opsui-status__marker--dot { border-radius: 999px; }
+.opsui-status__marker--diamond { transform: rotate(45deg); border-radius: 1px; }
+.opsui-status__marker--star {
+  clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+}
+.opsui-status--blocking { font-weight: 640; }
+
+.opsui-status--critical { color: var(--critical-fg); background: var(--critical-bg); border-color: var(--critical-border); }
+.opsui-status--warning  { color: var(--warning-fg);  background: var(--warning-bg);  border-color: var(--warning-border); }
+.opsui-status--success  { color: var(--success-fg);  background: var(--success-bg);  border-color: var(--success-border); }
+.opsui-status--progress { color: var(--progress-fg); background: var(--progress-bg); border-color: var(--progress-border); }
+.opsui-status--info     { color: var(--info-fg);     background: var(--info-bg);     border-color: var(--info-border); }
+.opsui-status--neutral  { color: var(--neutral-fg);  background: var(--neutral-bg);  border-color: var(--neutral-border); }
+
+/* ---- Card -------------------------------------------------------------------- */
+.opsui-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.opsui-card--glance { background: var(--surface-2); }
+.opsui-card--inset { background: var(--sunken); box-shadow: none; }
+.opsui-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.opsui-card__title { margin: 0; font-size: 14px; font-weight: 620; color: var(--text); }
+.opsui-card__subtitle { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }
+.opsui-card__body { padding: 16px; }
+
+/* ---- MetricTile -------------------------------------------------------------- */
+.opsui-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 104px;
+  padding: 14px 16px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  cursor: pointer;
+  font-family: inherit;
+}
+.opsui-metric:hover { border-color: var(--line-strong); }
+.opsui-metric:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opsui-metric__label { font-size: 12px; color: var(--text-2); }
+.opsui-metric__value {
+  font-size: 28px;
+  font-weight: 640;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.opsui-metric__footnote { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+.opsui-metric--critical .opsui-metric__value { color: var(--critical-fg); }
+.opsui-metric--warning .opsui-metric__value { color: var(--warning-fg); }
+.opsui-metric--success .opsui-metric__value { color: var(--success-fg); }
+
+/* ---- EventRow ----------------------------------------------------------------- */
+.opsui-eventrow {
+  display: flex;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  padding: 12px 14px 12px 0;
+  overflow: hidden;
+}
+.opsui-eventrow__rail { flex: 0 0 3px; align-self: stretch; border-radius: 999px; }
+.opsui-eventrow__content { flex: 1 1 auto; padding-left: 2px; }
+.opsui-eventrow__head { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.opsui-eventrow__title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.opsui-eventrow__badges { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.opsui-eventrow__meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.opsui-eventrow__metaitem { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+.opsui-eventrow__summary { margin: 6px 0 0; font-size: 12px; color: var(--text-2); }
+.opsui-eventrow__actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+/* The zero-JS verb forms wrap their submit button in a <form>; as a block it adds a
+   baseline strut below the inline-flex button, making the form taller than the button —
+   sibling buttons then flex-stretched past it (operator-reported height mismatch). Flex
+   removes the strut; align-items: center above stops any future stretch mismatch. */
+.opsui-eventrow__actionform { display: flex; }
+
+.opsui-eventrow--critical .opsui-eventrow__rail { background: var(--critical-tab); }
+.opsui-eventrow--warning .opsui-eventrow__rail { background: var(--warning-tab); }
+.opsui-eventrow--success .opsui-eventrow__rail { background: var(--success-tab); }
+.opsui-eventrow--progress .opsui-eventrow__rail { background: var(--progress-tab); }
+.opsui-eventrow--info .opsui-eventrow__rail { background: var(--info-tab); }
+.opsui-eventrow--neutral .opsui-eventrow__rail { background: var(--neutral-tab); }
+
+/* ---- Decision block — truncated 2-field WHAT+WHY for Command's decision desk
+   (truncated to a one-liner + link to the item hub's full detail) --- */
+.opsui-decisionblock { margin: 8px 0 0; }
+.opsui-decisionblock__fields { margin: 0; padding: 0; display: grid; gap: 5px; list-style: none; }
+.opsui-decisionblock__field { display: grid; grid-template-columns: 110px 1fr; gap: 6px; align-items: baseline; }
+.opsui-decisionblock__label { font-size: 10px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; margin: 0; }
+.opsui-decisionblock__value { font-size: 12px; color: var(--text-2); margin: 0; line-height: 1.4; }
+
+/* ---- Active ops-parks card note — explains the button-less list ---- */
+.opsui-opsparks__note { margin: 0 0 8px; font-size: 12px; color: var(--text-3); }
+.opsui-opsparks__note-link { color: var(--accent); text-decoration: none; }
+.opsui-opsparks__note-link:hover { text-decoration: underline; }
+
+/* ==== Shell ================================================================ */
+
+/* ---- AppShell ------------------------------------------------------------- */
+.opsui-shell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  /* viewport-fit=cover: keep content clear of the notch/rounded corners. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.opsui-shell__column { display: flex; flex-direction: column; min-width: 0; }
+.opsui-shell__workspace { flex: 1 1 auto; padding: 16px; min-width: 0; }
+.opsui-shell__workspace:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---- NavigationRail -------------------------------------------------------- */
+.opsui-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 8px;
+  padding-top: calc(12px + env(safe-area-inset-top));
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  width: var(--rail-expanded-width);
+  transition: width 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Stay on screen while the workspace scrolls — otherwise a long feed leaves
+   * a rail-wide empty gutter once the items scroll away. */
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+.opsui-rail--compact,
+.opsui-shell[data-rail="compact"] .opsui-rail { width: var(--rail-compact-width); }
+.opsui-rail--expanded,
+.opsui-shell[data-rail="expanded"] .opsui-rail { width: var(--rail-expanded-width); }
+
+.opsui-rail__toggle {
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.opsui-rail__toggle:hover { color: var(--text); border-color: var(--line-strong); }
+.opsui-rail__toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opsui-rail__items { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+
+.opsui-rail__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--r-control);
+  border-left: 3px solid transparent;
+  color: var(--text-2);
+  text-decoration: none;
+  min-height: 44px;
+}
+.opsui-rail__item:hover { background: var(--surface-2); color: var(--text); }
+.opsui-rail__item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.opsui-rail__item--active {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.opsui-rail__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-weight: 620;
+}
+.opsui-rail__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.opsui-rail__title { font-size: 13px; font-weight: 560; }
+.opsui-rail__purpose { font-size: 11px; color: var(--text-3); line-height: 1.3; }
+/* Compact rail collapses to icons only. */
+.opsui-rail--compact .opsui-rail__text,
+.opsui-shell[data-rail="compact"] .opsui-rail__text { display: none; }
+
+/* ---- TopBar ----------------------------------------------------------------- */
+.opsui-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  /* viewport-fit=cover: extend the surface under the status bar. */
+  padding-top: calc(10px + env(safe-area-inset-top));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.opsui-topbar__lead { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.opsui-topbar__crumb { font-size: 12px; color: var(--text-3); text-decoration: none; }
+.opsui-topbar__crumb[href]:hover { color: var(--text-2); }
+.opsui-topbar__sep { font-size: 12px; color: var(--text-3); margin: 0 2px; }
+.opsui-topbar__title { margin: 0; font-size: 15px; font-weight: 620; color: var(--text); }
+.opsui-topbar__actions { display: flex; align-items: center; gap: 8px; }
+.opsui-topbar__palette,
+.opsui-topbar__intent {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  min-height: 34px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  color: var(--text-2);
+  cursor: pointer;
+  font-family: inherit;
+}
+.opsui-topbar__palette:hover,
+.opsui-topbar__intent:hover { border-color: var(--line-strong); color: var(--text); }
+.opsui-topbar__palette-hint,
+.opsui-topbar__intent-hint { font-size: 12px; }
+/* The intent affordance is the write peer of read-only Search — lead with an
+ * accent "+" so it reads as "add", not "search". */
+.opsui-topbar__intent-icon { font-size: 15px; line-height: 1; color: var(--accent); font-weight: 600; }
+.opsui-topbar__kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.opsui-topbar__theme {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.opsui-topbar__theme:hover { color: var(--text); border-color: var(--line-strong); }
+.opsui-topbar__palette:focus-visible,
+.opsui-topbar__intent:focus-visible,
+.opsui-topbar__theme:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- ContextBar --------------------------------------------------------------- */
+.opsui-contextbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--sunken);
+  border-bottom: 1px solid var(--line);
+}
+.opsui-contextbar__lead { display: flex; align-items: center; gap: 10px; }
+.opsui-contextbar__freshness { font-size: 12px; color: var(--text-2); font-family: var(--font-mono); }
+.opsui-contextbar__meta { display: flex; gap: 10px; }
+.opsui-contextbar__metaitem { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+
+/* ---- BottomNav ----------------------------------------------------------------- */
+/* Phones in either orientation: narrow (portrait) OR short (landscape, where a
+ * 278px rail would eat a third of the screen) collapse to one column + bottom nav. */
+.opsui-bottomnav { display: none; }
+@media (max-width: 640px), (max-height: 500px) {
+  .opsui-shell { grid-template-columns: 1fr; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .opsui-rail { display: none; }
+  .opsui-bottomnav {
+    /* fixed, not sticky: sticky inside a grid track clamps to the nav's own grid
+     * area (zero slack) on some engines — the bar floats mid-page instead of
+     * pinning. Fixed to the viewport is the boring, always-correct mobile bar. */
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 30;
+    display: flex;
+    justify-content: space-around;
+    gap: 4px;
+    padding: 6px 8px;
+    /* viewport-fit=cover: keep items above the home indicator. */
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+  }
+  .opsui-shell__workspace { padding: 12px; }
+}
+.opsui-bottomnav__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: var(--r-control);
+  color: var(--text-3);
+  text-decoration: none;
+}
+.opsui-bottomnav__item--active { color: var(--accent); }
+.opsui-bottomnav__item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opsui-bottomnav__icon { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; }
+.opsui-bottomnav__label { font-size: 10px; }
+/* "More" trigger — a bar-item-shaped button (reset native button chrome). */
+.opsui-bottomnav__more {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ---- Bottom sheet — palette-only overflow -------------------------- */
+.opsui-bottomsheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.opsui-bottomsheet[hidden] { display: none; }
+.opsui-bottomsheet__backdrop { position: absolute; inset: 0; background: var(--overlay); }
+.opsui-bottomsheet__panel {
+  position: relative;
+  width: 100%;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 12px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line-strong);
+  border-top-left-radius: var(--r-card);
+  border-top-right-radius: var(--r-card);
+  box-shadow: var(--shadow);
+}
+.opsui-bottomsheet__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.opsui-bottomsheet__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-radius: var(--r-control);
+  border-left: 3px solid transparent;
+  color: var(--text-2);
+  text-decoration: none;
+  min-height: 44px;
+}
+.opsui-bottomsheet__item:hover { background: var(--surface-2); color: var(--text); }
+.opsui-bottomsheet__item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.opsui-bottomsheet__item--active {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.opsui-bottomsheet__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-weight: 620;
+}
+.opsui-bottomsheet__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.opsui-bottomsheet__title { font-size: 13px; font-weight: 560; }
+.opsui-bottomsheet__purpose { font-size: 11px; color: var(--text-3); line-height: 1.3; }
+
+/* ---- CommandPalette --------------------------------------------------------- */
+.opsui-palette {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.opsui-palette[hidden] { display: none; }
+.opsui-palette__backdrop { position: absolute; inset: 0; background: var(--overlay); }
+.opsui-palette__panel {
+  position: relative;
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.opsui-palette__input {
+  padding: 14px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 15px;
+}
+.opsui-palette__input:focus-visible { outline: none; }
+.opsui-palette__scroll { overflow-y: auto; padding: 6px; }
+.opsui-palette__results { list-style: none; margin: 0; padding: 0; }
+.opsui-palette__options { list-style: none; margin: 0; padding: 0; }
+.opsui-palette__heading {
+  margin: 8px 8px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+.opsui-palette__optionbtn {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  min-height: 40px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+.opsui-palette__optionbtn:hover { background: var(--surface-2); }
+.opsui-palette__optionbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Keyboard-highlighted option (↑/↓ nav). */
+.opsui-palette__option--active > .opsui-palette__optionbtn { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+.opsui-palette__option[hidden] { display: none; }
+.opsui-palette__meta { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); }
+.opsui-palette__empty { margin: 0; padding: 16px; font-size: 13px; color: var(--text-3); }
+
+/* ==== Command projection =================================================== */
+
+/* The projection workspace: a vertical stack of region cards. */
+.opsui-command,
+.opsui-acceptance { display: flex; flex-direction: column; gap: 12px; }
+
+/* Origin filter toggle — zero-JS query-param links, active one highlighted. */
+.opsui-acceptance__filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.opsui-acceptance__filter-label {
+  font-size: 12px;
+  color: var(--neutral-fg);
+  margin-right: 4px;
+}
+.opsui-acceptance__filter-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.opsui-acceptance__filter-btn:hover { border-color: var(--line-strong); }
+.opsui-acceptance__filter-btn--active {
+  color: var(--inverse);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.opsui-acceptance__filter-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.opsui-acceptance__filter-count {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+
+/* The captured-as chip resolves into the recent-intents strip — it links to the
+ *  item timeline (the recent-intents strip itself is styled as .opsui-intent-strip below). */
+.opsui-composer__captured-link { color: var(--accent); text-decoration: none; }
+.opsui-composer__captured-link:hover { text-decoration: underline; }
+
+/* Zero-JS pager — prev/next anchors + page info; edges disable to inert spans. */
+.opsui-pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.opsui-pager__edge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 12px;
+  color: var(--accent);
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.opsui-pager__edge:hover { border-color: var(--line-strong); }
+.opsui-pager__edge:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.opsui-pager__edge--disabled {
+  color: var(--neutral-fg);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.opsui-pager__info { color: var(--neutral-fg); }
+
+/* Glance metric grid. */
+.opsui-glancegrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+/* The All-clear collapse + pulse teaser that
+ * replace the five alarm tiles when Decisions/To test/Stuck are all zero. */
+.opsui-glance-allclear {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--r-control);
+}
+.opsui-glance-allclear__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success-fg);
+  flex-shrink: 0;
+}
+.opsui-glance-allclear__label {
+  font-size: 13px;
+  color: var(--success-fg);
+}
+.opsui-glance-pulse {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.opsui-glance-pulse__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.opsui-glance-pulse__row:hover { border-color: var(--line-strong); }
+.opsui-glance-pulse__row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* The leading chip keeps its own size; the body takes the rest and may shrink (min-width: 0
+   lets the clamped text ellipsize instead of forcing the row wider). */
+.opsui-glance-pulse__row > .opsui-status { flex: none; margin-top: 1px; }
+.opsui-glance-pulse__body { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.opsui-glance-pulse__head { display: flex; align-items: baseline; gap: 8px; }
+.opsui-glance-pulse__id { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--text-2); }
+.opsui-glance-pulse__age { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
+.opsui-glance-pulse__text { font-size: 12px; line-height: 1.35; color: var(--text); }
+/* Building rows carry the full spec — clamp to 2 lines so a long work-item description never
+   floods the operating picture. */
+.opsui-glance-pulse__text--clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- WindowPicker (shared component) --------------------------------------
+ * Zero-JS time-window filter (promoted from a Glance-local one-off).
+ * Lives in a Card's headerAside slot — the title row, right-aligned — so a
+ * region's filter never pushes its content down. Same query-param-link pattern
+ * as the acceptance origin filter. */
+.opsui-window {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.opsui-window__label {
+  font-size: 12px;
+  color: var(--neutral-fg);
+  margin-right: 4px;
+}
+.opsui-window__btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.opsui-window__btn:hover { border-color: var(--line-strong); }
+.opsui-window__btn--active {
+  color: var(--inverse);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.opsui-window__btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Region event lists stack their EventRows. */
+.opsui-command .opsui-card__body > .opsui-eventrow,
+.opsui-acceptance .opsui-card__body > .opsui-eventrow { margin-bottom: 8px; }
+.opsui-command .opsui-card__body > .opsui-eventrow:last-child,
+.opsui-acceptance .opsui-card__body > .opsui-eventrow:last-child { margin-bottom: 0; }
+
+/* Collapsed "Auto-accepting soon" section (optional/auto tiers) — a zero-JS
+ * <details> styled with the same .opsui-card classes as every other region. */
+.opsui-acceptance__auto-summary { cursor: pointer; list-style: none; }
+.opsui-acceptance__auto-summary::-webkit-details-marker { display: none; }
+
+/* ==== Work ledger projection =============================================== */
+.opsui-work { display: flex; flex-direction: column; gap: 12px; }
+
+/* Work item: EventRow + inline drill block stacked together. */
+.opsui-work__item { margin-bottom: 8px; }
+.opsui-work__item:last-child { margin-bottom: 0; }
+
+/* Evidence drawer drill — server-rendered <details> approximation (a later slice wires
+ * the ghost button to a real overlay; this makes the content available now). */
+.opsui-work__drill {
+  margin: 0 0 0 5px; /* indent under the rail offset */
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.opsui-work__drill-summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  list-style: none;
+  padding: 4px 0;
+  user-select: none;
+}
+.opsui-work__drill-summary::-webkit-details-marker { display: none; }
+.opsui-work__drill[open] .opsui-work__drill-summary { color: var(--text-2); }
+.opsui-work__drill-body {
+  padding: 6px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.opsui-work__drill-spec {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.opsui-work__drill-park {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+/* Timeline drill-through — demoted to a small secondary link BELOW the details block
+ * (operator feedback: details are primary, timeline is the secondary drill, not the lead). */
+.opsui-work__timeline-link {
+  display: inline-block;
+  margin: 2px 0 0 15px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+  text-decoration: none;
+}
+.opsui-work__timeline-link:hover { color: var(--accent); text-decoration: underline; }
+/* Decision-park pointer note under a board row — the same item is also on the decision desk. */
+.opsui-work__park-note {
+  margin: 4px 0 0 5px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.opsui-work__park-note a { color: var(--accent); }
+/* parkKind-aware "what unblocks this" line under a parked row — same
+   idiom as the decision-desk pointer note above (opsui-work__park-note). */
+.opsui-work__unblock-note {
+  margin: 4px 0 0 5px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.opsui-empty { margin: 0; font-size: 13px; color: var(--text-3); }
+
+/* Feature A — context manifest (the assembled scout brief) inside the evidence drawer. */
+.opsui-work__drill-context { display: flex; flex-direction: column; gap: 2px; }
+.opsui-work__drill-context-label {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.opsui-work__drill-context-body {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.opsui-work__drill-context--none {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* In-flight run-card polish (touches chips + phase checklist) — same visual
+ * vocabulary as the provenance chips, scoped so a run-card tweak never ripples there. */
+.opsui-inflight__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.opsui-inflight__chip {
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: 2px 7px;
+}
+.opsui-inflight__phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.opsui-inflight__phase { color: var(--text-3); }
+.opsui-inflight__phase--done { color: var(--success-fg); }
+.opsui-inflight__phase--active { color: var(--progress-fg); }
+.opsui-inflight__phase--pending { color: var(--text-3); }
+
+/* Pipeline stages — the build lane end to end. */
+.opsui-pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.opsui-pipeline__stage { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.opsui-pipeline__count {
+  font-size: 22px;
+  font-weight: 640;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The Pipeline region — preparing → queued → building, each stage an EventRow list. */
+.opsui-pipelineflow { display: flex; flex-direction: column; gap: 16px; }
+.opsui-pipelineflow__stage-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 640;
+  color: var(--text-2);
+}
+.opsui-pipelineflow__stage-count {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+}
+.opsui-pipelineflow__stage .opsui-eventrow { margin-bottom: 8px; }
+.opsui-pipelineflow__stage .opsui-eventrow:last-child { margin-bottom: 0; }
+
+/* Provenance strip. */
+.opsui-provenance__meta { margin: 0; font-size: 12px; color: var(--text-2); font-family: var(--font-mono); }
+.opsui-provenance__chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.opsui-provenance__chip {
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.opsui-provenance__chip:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* ProjectionFailure — loud, never mistaken for content. */
+.opsui-projfail {
+  background: var(--critical-bg);
+  border: 1px solid var(--critical-border);
+  border-radius: var(--r-card);
+  padding: 16px;
+}
+.opsui-projfail__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.opsui-projfail__title { margin: 0; font-size: 15px; font-weight: 640; color: var(--critical-fg); }
+.opsui-projfail__facts { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.opsui-projfail__row { display: flex; gap: 10px; }
+.opsui-projfail__key {
+  flex: 0 0 84px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.opsui-projfail__val { margin: 0; font-size: 13px; color: var(--text); font-family: var(--font-mono); }
+.opsui-projfail__evidence {
+  display: inline-block;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--critical-fg);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .opsui-btn { transition: none; }
+  .opsui-rail { transition: none; }
+}
+
+/* ── IntentComposer — the one door in ────────────────────────────────────────── */
+.opsui-composer { display: flex; flex-direction: column; gap: var(--space-2, 8px); background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius, 12px); padding: var(--card-padding, 16px); margin-bottom: var(--space-4, 16px); }
+.opsui-composer__label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+.opsui-composer__input { background: var(--sunken); color: var(--text-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: inherit; resize: vertical; min-height: 64px; }
+.opsui-composer__input:focus { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.opsui-composer__row { display: flex; align-items: center; gap: 12px; }
+.opsui-composer__captured { margin: 0; font-size: 13px; color: var(--text-2); }
+.opsui-composer__attach-row { display: flex; align-items: center; gap: 8px; }
+.opsui-composer__file-label { display: inline-flex; align-items: center; font-size: 12px; color: var(--text-2); cursor: pointer; border: 1px dashed var(--border); border-radius: 6px; padding: 3px 10px; }
+.opsui-composer__file-label:hover { border-color: var(--focus-ring); color: var(--text-1); }
+.opsui-composer__file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.opsui-composer__count { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.opsui-composer__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.opsui-composer__chip { display: inline-flex; align-items: center; gap: 4px; background: var(--sunken); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--text-2); }
+.opsui-composer__chip-remove { background: none; border: none; padding: 0 0 0 2px; cursor: pointer; color: var(--text-3); font-size: 14px; line-height: 1; }
+.opsui-composer--drag-over { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* ── IntentComposer modal — global "drop intent" entry point ──────── */
+.opsui-composer-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.opsui-composer-modal[hidden] { display: none; }
+.opsui-composer-modal__backdrop { position: absolute; inset: 0; background: var(--overlay); }
+.opsui-composer-modal__panel {
+  position: relative;
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+}
+/* The panel is the card now — flatten the inner composer so we don't double up
+ * border/background/padding inside the dialog. */
+.opsui-composer-modal__panel .opsui-composer {
+  margin-bottom: 0;
+  border: 0;
+  background: transparent;
+  padding: 18px;
+}
+.opsui-composer-modal__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.opsui-composer-modal__close:hover { color: var(--text); border-color: var(--line-strong); }
+.opsui-composer-modal__close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── IntentStrip — recent-captures durable trail ─────────────────── */
+.opsui-intent-strip { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-card); padding: 8px 14px 10px; margin-bottom: 16px; }
+.opsui-intent-strip__heading { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+.opsui-intent-strip__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.opsui-intent-strip__item { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.opsui-intent-strip__id { font-size: 11px; font-family: var(--font-mono); color: var(--text-3); flex-shrink: 0; }
+.opsui-intent-strip__id-wi { font-size: 10px; font-family: var(--font-mono); color: var(--text-3); opacity: 0.65; flex-shrink: 0; }
+.opsui-intent-strip__caption { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: 0.7; }
+.opsui-intent-strip__text { font-size: 12px; color: var(--text-2); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opsui-intent-strip__links { display: flex; gap: 6px; flex-shrink: 0; }
+.opsui-intent-strip__link { font-size: 11px; color: var(--text-3); text-decoration: none; }
+.opsui-intent-strip__link:hover { color: var(--text); text-decoration: underline; }

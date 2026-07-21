@@ -1,0 +1,15 @@
+{
+  "//": "loopkit as a target of its own plane (ADR-005): the plane builds, gates, and locally merges framework changes; publishing the public remote stays operator-gated.",
+  "name": "loopkit",
+  "defaultBranch": "main",
+  "gateCommand": "npm run build --workspaces --if-present && npm test --workspaces --if-present",
+  "gateWorkdir": ".",
+  "deployCommand": "npm run build --workspaces --if-present",
+  "worktreePrefix": "loopkit-",
+  "touches": {
+    "conflictMode": "prefix"
+  },
+  "depsWorkdirs": [
+    "."
+  ]
+}

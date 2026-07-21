@@ -1,0 +1,10 @@
+{
+  "name": "notes-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal demo target for the loopkit plane — a tiny pure notes module the plane can drive.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/notes.test.js"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schemaVersion": "1.0.0",
+  "components": {
+    "metric": {
+      "canonicalComponent": "MetricTile",
+      "allowedActions": ["open-evidence", "open-projection"]
+    },
+    "event-stream": {
+      "canonicalComponent": "EventRow",
+      "allowedActions": ["open-evidence", "open-entity", "submit-command"]
+    },
+    "decision": {
+      "canonicalComponent": "DecisionCard",
+      "allowedActions": ["answer-decision", "open-evidence"]
+    },
+    "acceptance": {
+      "canonicalComponent": "AcceptanceCard",
+      "allowedActions": ["accept", "report-problem", "open-evidence"]
+    },
+    "slo-table": {
+      "canonicalComponent": "SloTable",
+      "allowedActions": ["open-evidence", "start-watch"]
+    },
+    "chart": {
+      "canonicalComponent": "ChartFrame",
+      "allowedActions": ["open-query", "open-evidence", "change-range"]
+    },
+    "query": {
+      "canonicalComponent": "QuerySurface",
+      "allowedActions": ["run-query", "open-evidence", "create-proposal"]
+    },
+    "proposal": {
+      "canonicalComponent": "ProposalCard",
+      "allowedActions": ["approve", "decline", "open-evidence"]
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@loopkit/ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canonical design-system package (tokens, semantic states, primitives, components). Projections own data and hierarchy; this package owns every visual decision.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./tokens.css": "./canonical/tokens.css",
+    "./fonts.css": "./canonical/fonts.css",
+    "./fonts/InterVariable.woff2": "./canonical/fonts/InterVariable.woff2",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepare": "tsc",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --test test/*.test.ts",
+    "lint:tokens": "node scripts/lint-raw-colors.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^5.5.0"
+  }
+}

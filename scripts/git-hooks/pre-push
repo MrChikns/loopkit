@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pre-push leak tripwire — scans the committed HEAD tree AND the commit-message
+# range about to be pushed (tree scans never see commit-subject-only residue —
+# see scripts/leak-scan.sh --range), and refuses to push under a non-noreply
+# author identity. Installed via `scripts/install-hooks.sh`.
+ROOT=$(git rev-parse --show-toplevel)
+if [ -x "$ROOT/scripts/leak-scan.sh" ]; then
+  sh "$ROOT/scripts/leak-scan.sh" --head || {
+    echo "pre-push BLOCKED by leak-scan (tree). Override (after review) with: git push --no-verify" >&2
+    exit 1
+  }
+  ZERO=0000000000000000000000000000000000000000
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_sha" ] && continue
+    [ "$local_sha" = "$ZERO" ] && continue  # branch delete — nothing to scan
+    if [ "$remote_sha" = "$ZERO" ]; then
+      RANGE="$local_sha --not --remotes"    # new ref — scan whatever isn't on any remote yet
+    else
+      RANGE="$remote_sha..$local_sha"
+    fi
+    sh "$ROOT/scripts/leak-scan.sh" --range $RANGE || {
+      echo "pre-push BLOCKED by leak-scan (commit log for $local_ref). Override (after review) with: git push --no-verify" >&2
+      exit 1
+    }
+  done
+fi
+EMAIL=$(git config user.email)
+case "$EMAIL" in
+  *users.noreply.github.com) ;;
+  *) echo "pre-push BLOCKED — non-noreply author email configured: $EMAIL" >&2; exit 1 ;;
+esac
+exit 0

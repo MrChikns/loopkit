@@ -1,0 +1,17 @@
+/* Workers projection styles — nav IA rewire. Token
+ * vars only: dark root is :root {…} in canonical/tokens.css; light override is
+ * html[data-theme="light"] {…}. Both themes adapt automatically via CSS custom
+ * properties — no raw colour values here (enforced by scripts/lint-raw-colors.mjs).
+ *
+ * The relocated in-flight/beats/breaker regions carry their own classes from
+ * components.css (.opsui-inflight__*, .opsui-eventrow) unscoped — this file only adds
+ * the same EventRow-spacing rule work.css carries for .opsui-work, rescoped to
+ * .opsui-workers's Queue section. */
+
+.opsui-workers .opsui-card__body > .opsui-eventrow {
+  margin-bottom: 8px;
+}
+
+.opsui-workers .opsui-card__body > .opsui-eventrow:last-child {
+  margin-bottom: 0;
+}

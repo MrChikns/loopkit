@@ -1,0 +1,545 @@
+/* console.css — thin console-local overrides layered on top of `@loopkit/ui`'s
+ * ui-tokens.css + ui-components.css (served from /ui-tokens.css + /ui-components.css). Every
+ * shell/nav/card/badge/button/metric-tile class comes from the design system; this file only
+ * covers what the design system doesn't own — page-level headings, tables, the evidence block
+ * (acceptance desk), and the raw event timeline — plus the couple of `opsui-*`-namespaced
+ * classes this reshell adds for pieces the components don't ship yet (page status chip, the
+ * no-JS TopBar action fallbacks). Token values only, no ad-hoc colours. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--font-sans);
+}
+
+a { color: inherit; }
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+/* ---- Page heading + status chip (Command's "Lane healthy/…" + "Updated …") ------------- */
+
+.opsui-page-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  margin: 4px 0;
+  font-weight: 640;
+}
+
+.opsui-page-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.opsui-page-status--ok {
+  color: var(--success-fg);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+}
+
+.opsui-page-status--attn {
+  color: var(--critical-fg);
+  background: var(--critical-bg);
+  border: 1px solid var(--critical-border);
+}
+
+.opsui-page-updated { color: var(--text-3); font-size: 12px; margin-bottom: 16px; }
+
+h2 {
+  font-size: 12px;
+  color: var(--text-2);
+  margin: 24px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 640;
+}
+
+/* ---- Status strip (per-state counts + last-event age) ---------------------------------- */
+
+.statusstrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 8px 0 16px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.statusstrip__item { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.statusstrip__count { font-weight: 640; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* Execution-mode pill (attended vs. away) — leads the status strip so the operator always knows whether CLI
+   intents run attended (live conductor, fast) or away (background beats). */
+.statusstrip__mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: 640;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.statusstrip__mode--attended { color: var(--success-fg); background: var(--success-bg); border-color: var(--success-border); }
+.statusstrip__mode--away { color: var(--text-3); background: var(--sunken); border-color: var(--border); }
+
+/* ---- Tables (system segments/event-type breakdown) -------------------------------------- */
+
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+th { color: var(--text-2); font-weight: 560; font-size: 12px; }
+.empty { color: var(--text-3); font-style: italic; padding: 10px 0; }
+
+/* ---- Evidence block (acceptance desk merge evidence, rendered as an EventRow body) ------- */
+
+.evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  font-size: 12px;
+}
+
+.evidence__row { display: flex; gap: 8px; flex-wrap: wrap; }
+.evidence__key { color: var(--text-3); min-width: 90px; }
+.evidence__val { color: var(--text-2); font-family: var(--font-mono); word-break: break-all; }
+
+.filelist {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* ---- Thread card (per-item message thread + inline reply — Command's decision desk rows
+ * render it compact via EventRow's `body`, the item timeline renders it full-size) ---------- */
+
+.thread-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  font-size: 12px;
+}
+
+.thread__title { margin: 0; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.thread__empty { color: var(--text-3); font-style: italic; margin: 0; }
+
+.thread { display: flex; flex-direction: column; gap: 6px; }
+
+.thread-message { padding: 6px 8px; border-radius: var(--r-control); background: var(--surface); }
+.thread-message--out { background: var(--surface-2); }
+.thread-message__meta { display: block; color: var(--text-3); font-size: 11px; margin-bottom: 2px; }
+.thread-message__text { margin: 0; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+
+.thread-reply-form { display: flex; flex-direction: column; gap: 6px; }
+.thread-reply-form__input {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: 8px 10px;
+  resize: vertical;
+}
+.thread-reply-form__file { font-size: 12px; color: var(--text-2); }
+
+/* ---- Conversations card (Command) — collapsed per-thread <details> + a compact recent-
+ * captures strip, both zero-JS -------------------------------------------------------------- */
+
+.opsui-conversations__thread { margin-bottom: 8px; }
+.opsui-conversations__thread:last-child { margin-bottom: 0; }
+.opsui-conversations__summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  cursor: pointer;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  list-style: none;
+}
+.opsui-conversations__summary::-webkit-details-marker { display: none; }
+.opsui-conversations__id { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); }
+.opsui-conversations__title { flex: 1 1 auto; font-size: 13px; color: var(--text); }
+.opsui-conversations__age { font-size: 11px; color: var(--text-3); }
+
+.opsui-captures-strip { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.opsui-captures-strip__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  font-size: 12px;
+}
+.opsui-captures-strip__id { font-family: var(--font-mono); color: var(--accent); text-decoration: none; }
+.opsui-captures-strip__id:hover { text-decoration: underline; }
+.opsui-captures-strip__summary { flex: 1 1 auto; color: var(--text-2); }
+.opsui-captures-strip__age { font-size: 11px; color: var(--text-3); }
+
+/* ---- Recent work items strip (Command, top of page) — the last ~5 recently-worked (merged/
+ * accepted) items, newest-first, each rendered as a normal EventRow so it gets the same
+ * badge/metadata-link/evidence treatment as every other card. Hidden entirely (no wrapper
+ * markup at all) when nothing has shipped yet — see recentWorkItemsStrip in views.ts. ------- */
+
+.opsui-recentwork { margin-bottom: 16px; }
+.opsui-recentwork__heading { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text); }
+.opsui-recentwork__caption { font-weight: 400; color: var(--text-3); }
+
+/* ---- Command glance grid — collapse the five tiles (Decisions/To test/Stuck/Flow/Reliability)
+ * onto one row on wide viewports; degrade to the shared auto-fit wrap (packages/ui) below that,
+ * never overflow. The base .opsui-glancegrid rule (auto-fit minmax) lives in @loopkit/ui —
+ * this is a console-local, Command-page-only override, not a change to the shared component. */
+@media (min-width: 960px) {
+  .opsui-command-glance { grid-template-columns: repeat(5, 1fr); }
+}
+
+/* ---- Intent-capture target selector (only rendered with 2+ registered targets) ----------- */
+
+.opsui-composer__target-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-top: 8px;
+}
+
+.opsui-composer__target-label select {
+  font: inherit;
+  color: var(--text);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: 9px 10px;
+}
+
+/* ---- TopBar no-JS fallbacks / progressive-enhancement swap ------------------------------
+ * The design system's own Search/Drop-intent/theme-toggle buttons stay in the markup
+ * (unclickable without JS — `type="button"`, no listener until console-shell.js runs) so the
+ * client module binds to the exact same classes/data-attributes unchanged; the server renders a
+ * real anchor/form twin immediately after each one, carrying the identical visual classes plus
+ * an `opsui-topbar__nojs` marker. Hidden by default (below); once console-shell.js finishes
+ * wiring, it adds `opsui-js-ready` to <html> — that flips the swap: the real buttons appear,
+ * the no-JS twins hide. Without JS (or if the script 404s/fails), <html> never gets the class
+ * and every no-JS twin keeps working exactly as slice 2 built it.
+ *
+ * The rail-collapse toggle (NavigationRail's own `data-opsui-shell="rail-toggle"`) has no
+ * server-side equivalent to fall back to — collapsing the rail is a pure client-side visual
+ * state, so unlike the three above it stays visible whether or not JS has loaded (matching the
+ * original: without JS it's simply inert, same as any other button before its listener attaches;
+ * the rail itself just always renders at its server-side expanded default). */
+
+button[data-opsui-shell="palette-open"],
+button[data-opsui-shell="composer-open"],
+button[data-opsui-shell="theme-toggle"] {
+  display: none;
+}
+
+.opsui-topbar__theme-form { display: inline-flex; }
+/* The theme twin keeps the full button chrome — stripping it left a floating glyph. */
+
+html.opsui-js-ready button[data-opsui-shell="palette-open"],
+html.opsui-js-ready button[data-opsui-shell="composer-open"],
+html.opsui-js-ready button[data-opsui-shell="theme-toggle"] {
+  display: inline-flex;
+}
+
+html.opsui-js-ready .opsui-topbar__nojs {
+  display: none;
+}
+
+/* ---- Nav overflow ("More" disclosure) ----------------------------------------------------
+ * NAV_DESTINATIONS entries beyond html.ts's NAV_RAIL_LIMIT (five) render inside this native
+ * <details> instead of crowding the rail/bottom nav — expands/collapses with zero JS, and
+ * reuses the rail/bottom-nav item classes so overflow entries look identical to the
+ * destinations sitting above them in the bar. */
+
+.opsui-more__summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-2);
+}
+.opsui-more__summary::-webkit-details-marker,
+.opsui-more__summary::marker { display: none; }
+.opsui-more__summary:hover { color: var(--text); }
+
+.opsui-rail__items .opsui-more { margin-top: 2px; }
+.opsui-rail__items .opsui-more__summary {
+  padding: 8px 10px;
+  border-radius: var(--r-control);
+  font-size: 13px;
+  font-weight: 560;
+}
+.opsui-rail__items .opsui-more__items { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+
+.opsui-bottomnav .opsui-more { position: relative; }
+.opsui-bottomnav .opsui-more__summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 10px;
+}
+.opsui-bottomnav .opsui-more__summary::before { content: "\22EF"; font-size: 16px; }
+.opsui-bottomnav .opsui-more__items {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+}
+.opsui-bottomnav .opsui-more__items .opsui-bottomnav__item {
+  flex-direction: row;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* ---- Analytics page (spend/quota/judge/latency panes) ------------------------------------
+ * Console-local classes for the observability widgets — tables reuse the global table rules
+ * above; these only add numeric alignment, interval captions, quota bars, tags, and the
+ * zero-JS SVG sparkline. Token values only, no ad-hoc colours. */
+
+.analytics-num { text-align: right; font-variant-numeric: tabular-nums; }
+.analytics-caption { color: var(--text-3); font-size: 12px; margin: 0 0 10px; }
+.analytics-muted { color: var(--text-3); font-size: 12px; margin: 4px 0 0; }
+.analytics-total { font-weight: 620; font-size: 13px; margin: 0 0 8px; }
+.analytics-subhead {
+  font-size: 12px;
+  color: var(--text-2);
+  margin: 16px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 640;
+}
+
+.analytics-stats { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; margin: 0 0 10px; }
+
+.analytics-tag {
+  display: inline-flex;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 620;
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+.analytics-tag--ok { color: var(--success-fg); background: var(--success-bg); border-color: var(--success-border); }
+.analytics-tag--warn { color: var(--warning-fg); background: var(--warning-bg); border-color: var(--warning-border); }
+.analytics-tag--muted { color: var(--text-3); }
+.analytics-tag--advisory { color: var(--info-fg); background: var(--info-bg); border-color: var(--info-border); }
+
+.analytics-verdict { font-weight: 620; }
+.analytics-verdict--pass { color: var(--success-fg); }
+.analytics-verdict--fail { color: var(--critical-fg); }
+.analytics-verdict--unparseable { color: var(--warning-fg); }
+
+/* Quota utilization bars */
+.analytics-quota-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.analytics-quota-row:last-child { border-bottom: none; }
+.analytics-quota-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.analytics-quota-label { font-size: 13px; font-weight: 620; }
+.analytics-quota-pct { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.analytics-quota-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.analytics-quota-fill { height: 100%; border-radius: 999px; }
+.analytics-quota-fill--neutral { background: var(--success-border); }
+.analytics-quota-fill--warning { background: var(--warning-border); }
+.analytics-quota-fill--critical { background: var(--critical-border); }
+
+/* SLO row (pipeline latency card) */
+.analytics-slo-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  padding: 8px 0 12px;
+  font-size: 13px;
+}
+.analytics-slo-label { font-weight: 620; }
+.analytics-slo-target { color: var(--text-3); font-size: 12px; }
+
+/* Cost-trend sparkline (inline SVG, no JS) */
+.analytics-chart { margin: 4px 0 12px; }
+.analytics-svg { width: 100%; height: 48px; display: block; }
+.analytics-svg-line { fill: none; stroke: var(--info-border); stroke-width: 1.5; }
+.analytics-svg-area { fill: var(--info-bg); }
+.analytics-chart-dates { display: flex; justify-content: space-between; color: var(--text-3); font-size: 11px; }
+
+/* ---- Conditional quota surfacing on Command (chip 60–85%, banner ≥85%) ------------------- */
+
+.opsui-glance-quota { margin: 10px 0 0; }
+
+.quota-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 620;
+  text-decoration: none;
+}
+.quota-chip--warning {
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+}
+
+.quota-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border-radius: var(--r-control);
+  color: var(--critical-fg);
+  background: var(--critical-bg);
+  border: 1px solid var(--critical-border);
+  font-size: 13px;
+}
+.quota-banner__headline { font-weight: 680; }
+.quota-banner__detail { color: var(--text-2); }
+.quota-banner__pause { font-weight: 620; }
+.quota-banner__link { font-weight: 620; white-space: nowrap; }
+
+/* ---- Knowledge page (/knowledge — operator-configured markdown sources as cards) --------- */
+
+.knowledge-doc {
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+
+.knowledge-doc__title { margin: 0 0 4px; font-size: 14px; font-weight: 640; }
+.knowledge-doc__anchor { color: var(--text-3); text-decoration: none; }
+.knowledge-doc__anchor:hover { color: var(--text); }
+.knowledge-doc__path { margin: 0 0 8px; font-size: 12px; color: var(--text-3); }
+
+.knowledge-doc__excerpt {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.knowledge-doc__truncated { margin: 6px 0 0; font-size: 12px; color: var(--text-3); }
+.knowledge-hint { font-size: 13px; color: var(--text-2); margin: 12px 0 8px; }
+.knowledge-unmatched { font-size: 12px; color: var(--warning-fg); margin: 8px 0 0; }
+
+.knowledge-example {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-x: auto;
+}
+
+/* ---- More disclosure inside the FIXED bottom nav (mobile) --------------------
+ * The <details> lives inside the position:fixed bar; without these rules its open
+ * list rendered in flow beneath the bar — invisible, so the tap read as dead.
+ * The summary styles as a sixth bar item; the open list floats ABOVE the bar. */
+@media (max-width: 640px), (max-height: 500px) {
+  .opsui-bottomnav .opsui-more { position: relative; display: flex; align-items: center; }
+  .opsui-bottomnav .opsui-more__summary {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 4px 10px; font-size: 11px; color: var(--text-2); cursor: pointer;
+  }
+  .opsui-bottomnav .opsui-more__summary::before { content: '⋯'; font-size: 18px; line-height: 1.2; }
+  .opsui-bottomnav .opsui-more[open] .opsui-more__summary { color: var(--accent); }
+  .opsui-bottomnav .opsui-more[open] > *:not(summary) {
+    position: absolute; bottom: calc(100% + 10px); right: 0; min-width: 200px;
+    display: flex; flex-direction: column; gap: 2px; padding: 8px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--r-card, 12px); box-shadow: 0 8px 28px rgba(0,0,0,.45);
+  }
+  .opsui-bottomnav .opsui-more .opsui-bottomnav__item { flex-direction: row; gap: 8px; padding: 8px 10px; }
+}
+
+/* ---- Acceptance desk composition (reference-console parity) ------------------- */
+.found-problem__summary { display: inline-flex; align-items: center; cursor: pointer; list-style: none; }
+.found-problem__summary::-webkit-details-marker, .found-problem__summary::marker { display: none; }
+.found-problem[open] { display: block; width: 100%; }
+.found-problem[open] > form { margin-top: 8px; }
+.thread-reply-form__filewrap { display: block; font-size: 12px; color: var(--text-2); margin: 6px 0; }
+.thread-reply-form__file { display: block; margin-top: 4px; font-size: 12px; color: var(--text-2); }
+.thread-reply-form__file::file-selector-button {
+  background: var(--surface-2); color: var(--text-2); border: 1px solid var(--line);
+  border-radius: var(--r-control); padding: 4px 10px; margin-right: 8px; cursor: pointer; font-size: 12px;
+}
+.evidence-details__summary {
+  cursor: pointer; list-style: none; font-size: 12px; color: var(--text-2);
+  padding: 6px 0;
+}
+.evidence-details__summary::-webkit-details-marker, .evidence-details__summary::marker { display: none; }
+.evidence-details__summary::before { content: '▸ '; }
+.evidence-details[open] > .evidence-details__summary::before { content: '▾ '; }

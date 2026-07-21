@@ -1,0 +1,10 @@
+/* Artifacts projection — nav IA rewire. Token
+ * vars only: dark root is :root {…} in canonical/tokens.css; light override is
+ * html[data-theme="light"] {…}. No raw colour values here (enforced by
+ * scripts/lint-raw-colors.mjs). */
+
+.opsui-artifacts { display: flex; flex-direction: column; gap: 12px; }
+
+/* EventRow spacing inside the artifact list card. */
+.opsui-artifacts .opsui-card__body > .opsui-eventrow { margin-bottom: 8px; }
+.opsui-artifacts .opsui-card__body > .opsui-eventrow:last-child { margin-bottom: 0; }

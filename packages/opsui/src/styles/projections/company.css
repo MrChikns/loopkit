@@ -1,0 +1,10 @@
+/* Knowledge projection — decision cards. Colours via token vars only — no raw
+ * values. Both themes handled by the :root (dark) / html[data-theme="light"] token
+ * override in canonical/tokens.css. */
+
+.opsui-company { display: flex; flex-direction: column; gap: 12px; }
+
+/* EventRow bottom spacing inside each section card. */
+.opsui-company__decisions .opsui-card__body > .opsui-eventrow { margin-bottom: 8px; }
+
+.opsui-company__decisions .opsui-card__body > .opsui-eventrow:last-child { margin-bottom: 0; }

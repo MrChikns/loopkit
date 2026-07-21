@@ -1,0 +1,37 @@
+{
+  "name": "@loopkit/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Event-sourced agent plane kernel — append-only ledger, fold, doctor, board, CLI",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cli": "./dist/cli.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "loopctl": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "build:test": "tsc --project tsconfig.test.json",
+    "test": "npm run build && npm run build:test && node --test dist-test/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-test/
+*.log
+.DS_Store
+
+# Operator-private leak-scan denylist — real names/paths/emails to block on
+# commit+push. Never committed; the scanner (scripts/leak-scan.sh) reads it if present.
+.leakpatterns.local

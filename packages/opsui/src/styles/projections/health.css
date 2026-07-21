@@ -1,0 +1,134 @@
+/* Health projection styles — WI-160. SLO board: row layout, status dots, labels.
+ * All colours via token vars only (no raw values). Both themes handled by the
+ * :root (dark) / html[data-theme="light"] token override in canonical/tokens.css. */
+
+.opsui-health {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* SLO table ───────────────────────────────────────────────────────────────── */
+
+.opsui-health__table {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* dot · label · value · target [ · grad ] on one line */
+.opsui-health__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.opsui-health__row:first-child {
+  border-top: none;
+}
+
+/* Status dot ─────────────────────────────────────────────────────────────── */
+
+.opsui-health__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--neutral-border);
+}
+
+.opsui-health__dot--met      { background: var(--success-fg); }
+.opsui-health__dot--at-risk  { background: var(--warning-fg); }
+.opsui-health__dot--breached { background: var(--critical-fg); }
+.opsui-health__dot--unknown  { background: var(--neutral-border); }
+.opsui-health__dot--paused   { background: var(--neutral-border); }
+
+/* Row cells ──────────────────────────────────────────────────────────────── */
+
+.opsui-health__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  font-weight: 560;
+  color: var(--text);
+  text-decoration: none;
+}
+
+a.opsui-health__label:hover { color: var(--accent); }
+
+.opsui-health__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  color: var(--text-2);
+  text-align: right;
+}
+
+.opsui-health__target {
+  flex: none;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* Heal graduation indicator (eligible rows only) ─────────────────────────── */
+
+.opsui-health__grad {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--success-fg);
+}
+
+/* Self-heal activity feed (WI-326) ───────────────────────────────────────────
+ * Reuses .opsui-health__row cell classes (label/value/target) plus a kind chip
+ * and a timestamp; dot colour reuses the SLO status palette above. */
+
+.opsui-health__healfeed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.opsui-health__healrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.opsui-health__healrow:first-child {
+  border-top: none;
+}
+
+.opsui-health__healkind {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.opsui-health__healts {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* Artifacts region (nav collapse 9→5, WI-350) — carried over verbatim from the retired
+ * artifacts.css (the Artifacts registry entry folds into System, id="artifacts"). */
+
+.opsui-artifacts { display: flex; flex-direction: column; gap: 12px; }
+
+/* EventRow spacing inside the artifact list card. */
+.opsui-artifacts .opsui-card__body > .opsui-eventrow { margin-bottom: 8px; }
+.opsui-artifacts .opsui-card__body > .opsui-eventrow:last-child { margin-bottom: 0; }

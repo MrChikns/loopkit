@@ -1,0 +1,50 @@
+name: CI
+
+# Runs the full workspace test suite — this is what backs the "tests are the arbiter" claim
+# with a green badge instead of an assertion. Builds every package, then runs each package's
+# own `npm test` (build + node --test), matching the commands documented in AGENTS.md.
+#
+# Node version note: packages/ui and packages/opsui run `node --test test/*.test.ts` directly,
+# relying on Node's native TypeScript type-stripping (unflagged from Node 23.6+, backported to
+# later Node 22.x). Each package.json declares "engines": { "node": ">=20" }, but that floor is
+# unverified against a real Node 20 runtime — Node 20 has no native .ts execution and no
+# ts-node/tsx dependency is present to cover the gap. This workflow therefore pins Node 22
+# (the version actually proven to run the suite), not 20, until that engines floor is either
+# verified or corrected.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      - name: core — build + test
+        run: npm test --workspace=packages/core
+
+      - name: console — build + test
+        run: npm test --workspace=packages/console
+
+      - name: ui — build + test
+        run: npm test --workspace=packages/ui
+
+      - name: opsui — build + test
+        run: npm test --workspace=packages/opsui

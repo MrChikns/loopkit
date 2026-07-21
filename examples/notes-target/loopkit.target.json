@@ -1,0 +1,15 @@
+{
+  "name": "notes",
+  "defaultBranch": "main",
+  "gateCommand": "npm test",
+  "gateWorkdir": ".",
+  "deployCommand": "",
+  "worktreePrefix": "loop-",
+  "touches": { "conflictMode": "prefix" },
+  "boundaries": {
+    "planePrefixes": [],
+    "surfacePrefixes": [],
+    "escalationPatterns": ["src/auth", "src/payments", "migrations/"]
+  },
+  "buildTimeoutMinutes": 15
+}

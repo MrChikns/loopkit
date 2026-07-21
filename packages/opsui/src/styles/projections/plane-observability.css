@@ -1,0 +1,394 @@
+/* Plane-observability projection styles — WI-235. Ops-plane instrumentation:
+ * spend, judge, context packs, repairs, trajectory, token usage.
+ * All colours via token vars only (no raw values).
+ * Both themes handled by the :root (dark) / html[data-theme="light"] override. */
+
+.opsui-plane-obs {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* How-to-read disclosure ─────────────────────────────────────────────────── */
+
+.opsui-plane-obs__howto {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: transparent;
+}
+
+.opsui-plane-obs__howto > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 560;
+  color: var(--text-2);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.opsui-plane-obs__howto > summary::-webkit-details-marker { display: none; }
+
+.opsui-plane-obs__howto[open] > summary {
+  margin-bottom: 12px;
+}
+
+.opsui-plane-obs__howto-body {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.55;
+}
+
+.opsui-plane-obs__howto-body h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 560;
+  color: var(--text-3);
+  margin: 12px 0 4px;
+}
+
+.opsui-plane-obs__howto-body p,
+.opsui-plane-obs__howto-body ul,
+.opsui-plane-obs__howto-body ol {
+  margin: 0 0 8px;
+}
+
+.opsui-plane-obs__howto-body li {
+  margin-left: 16px;
+  margin-bottom: 2px;
+}
+
+.opsui-plane-obs__howto-body code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: var(--surface-2);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+/* Section caption ────────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__caption {
+  font-size: 12px;
+  color: var(--text-3);
+  margin: 0 0 10px;
+  line-height: 1.4;
+}
+
+/* Ceiling / budget row ───────────────────────────────────────────────────── */
+
+.opsui-plane-obs__ceiling {
+  font-size: 13px;
+  color: var(--text);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+.opsui-plane-obs__ceiling--unset {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* Total summary row ──────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__total-row {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 0 0 10px;
+}
+
+/* Generic table ─────────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.opsui-plane-obs__table th {
+  text-align: left;
+  font-weight: 560;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.opsui-plane-obs__table td {
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.opsui-plane-obs__table tbody tr:first-child td {
+  border-top: none;
+}
+
+/* Right-aligned numeric columns */
+.opsui-plane-obs__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.opsui-plane-obs__table th.opsui-plane-obs__num {
+  text-align: right;
+}
+
+/* Empty-state message ────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__empty {
+  font-size: 13px;
+  color: var(--text-3);
+  padding: 8px 0;
+  margin: 0;
+}
+
+/* Unavailable / muted note ───────────────────────────────────────────────── */
+
+.opsui-plane-obs__unavailable,
+.opsui-plane-obs__muted {
+  font-size: 12px;
+  color: var(--text-3);
+  font-style: italic;
+  margin: 0;
+  padding: 4px 0;
+}
+
+/* Section heading (sub-table labels) ─────────────────────────────────────── */
+
+.opsui-plane-obs__sub-heading {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 560;
+  color: var(--text-3);
+  margin: 14px 0 6px;
+}
+
+/* Judge summary stats ─────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__judge-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 13px;
+  color: var(--text-2);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+/* Verdict chip ───────────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__verdict {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 1px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.opsui-plane-obs__verdict--pass {
+  background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+  color: var(--success-fg);
+}
+
+.opsui-plane-obs__verdict--fail {
+  background: color-mix(in srgb, var(--critical-fg) 12%, transparent);
+  color: var(--critical-fg);
+}
+
+/* Inline tag chips ───────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__tag {
+  display: inline-block;
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-weight: 560;
+}
+
+.opsui-plane-obs__tag--ok {
+  background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+  color: var(--success-fg);
+}
+
+.opsui-plane-obs__tag--warn {
+  background: color-mix(in srgb, var(--warning-fg) 12%, transparent);
+  color: var(--warning-fg);
+}
+
+.opsui-plane-obs__tag--missing {
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.opsui-plane-obs__tag--advisory {
+  background: color-mix(in srgb, var(--info-fg) 12%, transparent);
+  color: var(--info-fg);
+}
+
+/* Reasons disclosure ─────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__reasons {
+  margin-top: 4px;
+}
+
+.opsui-plane-obs__reasons > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-3);
+  list-style: none;
+}
+
+.opsui-plane-obs__reasons > summary::-webkit-details-marker { display: none; }
+
+.opsui-plane-obs__reasons ul {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.opsui-plane-obs__reasons li {
+  margin-bottom: 2px;
+}
+
+/* Context packs stats ────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__context-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+
+/* SVG sparkline (token trend, reused from observability) ──────────────────── */
+
+.opsui-plane-obs__chart {
+  width: 100%;
+}
+
+.opsui-plane-obs__svg {
+  display: block;
+  width: 100%;
+  height: 60px;
+  overflow: visible;
+}
+
+.opsui-plane-obs__svg-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.opsui-plane-obs__svg-area {
+  fill: var(--accent);
+  opacity: 0.12;
+}
+
+.opsui-plane-obs__chart-dates {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* Token sizes list ───────────────────────────────────────────────────────── */
+
+.opsui-plane-obs__sizes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.opsui-plane-obs__size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.opsui-plane-obs__sizes li:first-child.opsui-plane-obs__size-row {
+  border-top: none;
+}
+
+.opsui-plane-obs__size-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.opsui-plane-obs__size-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* Quota utilization panel (WI-314) */
+
+.opsui-plane-obs__quota-row {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.opsui-plane-obs__quota-row:first-of-type {
+  border-top: none;
+}
+
+.opsui-plane-obs__quota-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.opsui-plane-obs__quota-label {
+  font-weight: 560;
+  color: var(--text);
+}
+
+.opsui-plane-obs__quota-pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.opsui-plane-obs__quota-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.opsui-plane-obs__quota-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+
+.opsui-plane-obs__quota-bar-fill--neutral  { background: var(--progress-fg); }
+.opsui-plane-obs__quota-bar-fill--warning  { background: var(--warning-fg); }
+.opsui-plane-obs__quota-bar-fill--critical { background: var(--critical-fg); }

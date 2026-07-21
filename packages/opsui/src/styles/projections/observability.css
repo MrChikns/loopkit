@@ -1,0 +1,131 @@
+/* Observability projection styles — WI-161. Token spend, cost table, SVG sparkline.
+ * All colours via token vars only (no raw values). Both themes handled by the
+ * :root (dark) / html[data-theme="light"] token override in canonical/tokens.css. */
+
+.opsui-observability {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Token cost table ────────────────────────────────────────────────────────── */
+
+.opsui-obs__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.opsui-obs__table th {
+  text-align: left;
+  font-weight: 560;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.opsui-obs__table td {
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.opsui-obs__table tbody tr:first-child td {
+  border-top: none;
+}
+
+/* Right-aligned numeric columns */
+.opsui-obs__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.opsui-obs__table th.opsui-obs__num {
+  text-align: right;
+}
+
+/* Total footer row */
+.opsui-obs__total {
+  font-weight: 600;
+  color: var(--text);
+  border-top: 1px solid var(--line-strong) !important;
+  padding-top: 8px;
+}
+
+/* SVG sparkline chart ─────────────────────────────────────────────────────── */
+
+.opsui-obs__chart {
+  width: 100%;
+}
+
+.opsui-obs__svg {
+  display: block;
+  width: 100%;
+  height: 60px;
+  overflow: visible;
+}
+
+.opsui-obs__svg-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.opsui-obs__svg-area {
+  fill: var(--accent);
+  opacity: 0.12;
+}
+
+/* Date labels below the sparkline */
+.opsui-obs__chart-dates {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* Transcript sizes list ───────────────────────────────────────────────────── */
+
+.opsui-obs__sizes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.opsui-obs__size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.opsui-obs__sizes li:first-child.opsui-obs__size-row {
+  border-top: none;
+}
+
+.opsui-obs__size-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.opsui-obs__size-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}

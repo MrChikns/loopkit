@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-commit leak tripwire — scans STAGED content before it enters history.
+# Installed via `scripts/install-hooks.sh` (sets core.hooksPath). Safe to publish:
+# the real denylist lives in the git-ignored .leakpatterns.local, not here.
+ROOT=$(git rev-parse --show-toplevel)
+if [ -x "$ROOT/scripts/leak-scan.sh" ]; then
+  sh "$ROOT/scripts/leak-scan.sh" --staged || {
+    echo "pre-commit BLOCKED by leak-scan. Override (after review) with: git commit --no-verify" >&2
+    exit 1
+  }
+fi
+exit 0

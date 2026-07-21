@@ -1,0 +1,55 @@
+{
+  "$schemaVersion": "1.0.0",
+  "projections": [
+    {
+      "id": "command",
+      "title": "Command",
+      "description": "Glance, act and drill without leaving the operating picture",
+      "icon": "command",
+      "route": "/command",
+      "mobilePriority": 1,
+      "commandKeywords": ["home", "pulse", "intents"],
+      "staleAfterSeconds": 45
+    },
+    {
+      "id": "work",
+      "title": "Work",
+      "description": "Workers, queues, throughput, cost and human touches",
+      "icon": "workforce",
+      "route": "/work",
+      "mobilePriority": 3,
+      "commandKeywords": ["workers", "agents", "cost", "tokens", "build"],
+      "staleAfterSeconds": 45
+    },
+    {
+      "id": "decisions",
+      "title": "Decisions",
+      "description": "Parked operator choices and deterministic consequences",
+      "icon": "decision",
+      "route": "/decisions",
+      "mobilePriority": 2,
+      "commandKeywords": ["parked", "blocking", "answer"],
+      "staleAfterSeconds": 45
+    },
+    {
+      "id": "health",
+      "title": "Ops health",
+      "description": "Loop probes, SLOs, deploys and evidence",
+      "icon": "health",
+      "route": "/health",
+      "mobilePriority": 4,
+      "commandKeywords": ["slo", "probe", "deploy", "backup"],
+      "staleAfterSeconds": 45
+    },
+    {
+      "id": "observability",
+      "title": "Analytics",
+      "description": "Plane spend, judge and trajectory telemetry",
+      "icon": "observe",
+      "route": "/observability",
+      "mobilePriority": 5,
+      "commandKeywords": ["trace", "latency", "spend", "trajectory"],
+      "staleAfterSeconds": 60
+    }
+  ]
+}

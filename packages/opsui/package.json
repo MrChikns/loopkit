@@ -1,0 +1,30 @@
+{
+  "name": "@loopkit/opsui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canonical console design-system package (tokens, semantic states, primitives, components, projections). Projections own data and hierarchy; this package owns every visual decision.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./tokens.css": "./canonical/tokens.css",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepare": "tsc",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^5.5.0"
+  }
+}

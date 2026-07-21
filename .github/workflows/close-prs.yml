@@ -1,0 +1,45 @@
+name: Close pull requests
+
+# This repository does not accept pull requests. Any PR opened by someone other
+# than the repository owner is closed automatically with a friendly note.
+# Fork, clone, and star are all welcome — see CONTRIBUTING.md.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    # Skip PRs opened by the repo owner (so you can still self-PR if you want).
+    if: github.event.pull_request.user.login != github.repository_owner
+    steps:
+      - name: Comment and close
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: [
+                "Thanks for your interest in loopkit! 🙏",
+                "",
+                "This repository is published read-only as a reference / build-in-public",
+                "project, so it **doesn't accept pull requests**. This PR is being closed",
+                "automatically — nothing personal.",
+                "",
+                "You're very welcome to **fork**, **clone**, and build on it, and to open a",
+                "**Discussion** or **Issue** if you spot something. Cheers!",
+              ].join("\n"),
+            });
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              state: "closed",
+            });

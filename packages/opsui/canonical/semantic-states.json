@@ -1,0 +1,30 @@
+{
+  "$schemaVersion": "1.0.0",
+  "precedence": ["critical", "warning", "progress", "success", "info", "neutral"],
+  "states": {
+    "critical": {
+      "meaning": "Blocking, failed, destructive, or immediate human attention",
+      "examples": ["blocked decision", "projection failure", "stale dispatch", "destructive confirmation"]
+    },
+    "warning": {
+      "meaning": "Degraded, needs testing, approaching threshold, or non-blocking risk",
+      "examples": ["needs test", "acceptance saturation", "recovered failure", "partial gate"]
+    },
+    "success": {
+      "meaning": "Healthy, accepted, verified, shipped, or completed",
+      "examples": ["healthy SLO", "delivered slice", "accepted test", "verified backup"]
+    },
+    "progress": {
+      "meaning": "Actively changing or running",
+      "examples": ["building", "testing", "streaming", "watching", "syncing"]
+    },
+    "info": {
+      "meaning": "Informational guidance or recommendation",
+      "examples": ["recommended option", "query result", "armed policy", "suggested next step"]
+    },
+    "neutral": {
+      "meaning": "Queued, waiting, parked without urgency, metadata, unavailable, or unknown",
+      "examples": ["backlog", "waiting gate", "disabled action", "unknown state"]
+    }
+  }
+}
