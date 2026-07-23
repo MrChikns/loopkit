@@ -1322,7 +1322,7 @@ export function renderAcceptance(
   });
 
   // "Waiting on your test" — must + review only, oldest first, always visible (no pagination:
-  // this is the one region the founder must not have to click past).
+  // this is the one region the operator must not have to click past).
   const waitingBody = waiting.length
     ? waiting.map(({ rec, tier }) => acceptanceRow(rec, tier, now, events)).join('')
     : `<p class="opsui-empty">Nothing waiting on your test.</p>`;
