@@ -1505,9 +1505,6 @@ async function stepRoute(
         return out;
       }
 
-      // A valid decision — clear any prior failure stamp so the counter reflects consecutive failures only.
-      clearProviderFail(resolveRunDir(opts), rec.id);
-
       // TARGET items: ground the routed Touches against the target repo's REAL tree
       // (deterministic wall post-processing — resolves the target through the same
       // registration rule as the build lanes, then drops prefixes whose top-level segment
@@ -1590,6 +1587,14 @@ async function stepRoute(
           ...(storedSpec ? { storedSpec } : {}),
         }));
       }
+
+      // The route was ACCEPTED here (build queued, park accepted, or answer) — every path
+      // that rejects the decision (garbled route above, re-park-no-new-evidence below)
+      // returns before this point. Clear the failure stamp only now: clearing it right after
+      // parsing (the old location) reset the counter on every same-reason re-park attempt,
+      // which meant the rejection branch's bumpProviderFail() always bumped from a
+      // just-cleared 0 → 1 and the MAX_PROVIDER_FAILURES cap at line ~1447 never tripped.
+      clearProviderFail(resolveRunDir(opts), rec.id);
 
       // The reply is durable as item.routed.reply + a msg.out event, rendered from the
       // fold — threads render from the fold directly, so there is no external message-file
