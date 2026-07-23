@@ -1125,7 +1125,7 @@ function shortSha(sha: string | undefined): string {
 
 /** must/review vs optional/auto — the only split the attended acceptance desk cares about.
  *  Attended mode has no auto-accept, so there is no timer to name; the split exists purely to
- *  keep the founder's attention on what actually needs a verdict. */
+ *  keep the operator's attention on what actually needs a verdict. */
 function isWaitingTier(tier: AcceptanceTier): boolean {
   return tier === 'must' || tier === 'review';
 }
@@ -1287,7 +1287,7 @@ export function renderAcceptance(
     if (rec.mergedAt && (!oldestWaitingAt || rec.mergedAt < oldestWaitingAt)) oldestWaitingAt = rec.mergedAt;
   }
 
-  // Glance strip: what needs the founder now, what doesn't, how stale the oldest test is.
+  // Glance strip: what needs the operator now, what doesn't, how stale the oldest test is.
   const glanceTiles = [
     MetricTile({
       href: '/acceptance',

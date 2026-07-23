@@ -24,7 +24,7 @@ export type EventAction = {
   form?: { action: string; intent: string; confirm?: string };
   /** Composer action: render a button that opens the global "drop intent" composer
    *  pre-filled with this text (via opsui-shell.js `composer-open` + `data-opsui-prefill`).
-   *  Used where the verdict needs free-text detail the founder finishes typing — e.g. the
+   *  Used where the verdict needs free-text detail the operator finishes typing — e.g. the
    *  acceptance desk's "Found a problem" → describe it → captured as a new repair item.
    *  Mutually exclusive with `form`; `form` takes precedence if both are set. */
   composer?: { prefill: string };
