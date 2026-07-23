@@ -1463,9 +1463,18 @@ async function stepRoute(
       // against the wrong tree and read false "file does not exist here" evidence — the exact
       // bug that drove correct target items to park. Resolve the cwd through THE one
       // registration rule (target.ts lookupRegisteredTarget), the SAME rule the Touches-
-      // grounding post-processing below already uses; fall open to opts.repoRoot when the
-      // item is untargeted or its target is unregistered (never silently the wrong repo).
+      // grounding post-processing below already uses; fall open to opts.repoRoot ONLY when the
+      // item is genuinely untargeted (rec.target unset). A target-stamped item whose target
+      // does NOT resolve must never route at all — falling back to opts.repoRoot would still
+      // classify/queue it grounded in the plane's own files (same defect family as WI-122's
+      // Touches-grounding fix). Short-circuit to an ops park instead.
       const routingReg = rec.target ? lookupRegisteredTarget(foldResult.targets, rec) : undefined;
+      if (rec.target && !routingReg) {
+        const reason = `routing: target '${rec.target}' is not a registered target — cannot ground routing in its repo, parking instead of routing against the plane checkout`;
+        out.push(makeEvent('reactor', rec.id, 'item.parked', { reason, parkKind: 'ops' }));
+        out.push(makeEvent('reactor', rec.id, 'msg.out', { text: reason }));
+        return out;
+      }
       const routingCwd = routingReg?.repoPath || opts.repoRoot;
 
       const result = await itemProvider.run({

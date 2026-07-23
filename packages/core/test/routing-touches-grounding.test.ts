@@ -136,6 +136,56 @@ test('reactor routing: a target item\'s fictional Touches prefix is dropped and 
   }
 });
 
+test('reactor routing: a target item whose target is unregistered parks for ops instead of routing against the plane checkout', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'route-ground-unreg-'));
+  try {
+    const repoRoot = join(base, 'plane');
+    const ledgerDir = join(base, 'ledger');
+    mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+
+    // No target.registered event for 'ghost' — the item is target-stamped but unresolved.
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'WI-401', 'item.captured', { source: 'cli', text: 'fix ghost thing', target: 'ghost' }, '2026-01-01T00:01:00Z'),
+    ]);
+
+    // Track only ROUTING calls (identified by the routing prompt's marker text) — the beat's
+    // later pathology step legitimately spawns its own diagnosis pass on a freshly-parked item,
+    // which also calls the provider; that is unrelated to whether routing itself was skipped.
+    const routingCalls: ProviderRequest[] = [];
+    const provider: LlmProvider = {
+      name: 'fake-router',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        if (req.prompt.includes('ROUTE THIS ITEM ONLY')) routingCalls.push(req);
+        return { ok: true, text: 'ROUTE: build\nSPEC: x\nTOUCHES: src\nMODEL: sonnet\nPRIORITY: medium\nREPLY: x', usage: { in: 0, out: 1, usd: 0 } };
+      },
+    };
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider,
+      config: testConfig(),
+    });
+
+    assert.equal(routingCalls.length, 0,
+      'an item whose target is unregistered must never reach the routing LLM call (would ground it in opts.repoRoot)');
+
+    const events = await loadAllEvents(ledgerDir);
+    const parked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-401');
+    assert.equal(parked.length, 1, 'the item must be parked, not queued or routed');
+    const data = parked[0].data as { reason?: string; parkKind?: string };
+    assert.equal(data.parkKind, 'ops');
+    assert.ok(data.reason?.includes('ghost'), `park reason must name the unresolved target (got: ${data.reason})`);
+
+    const queued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-401');
+    assert.equal(queued.length, 0, 'must never be queued/routed grounded in the plane repo');
+    const routed = events.filter(e => e.type === 'item.routed' && e.item === 'WI-401');
+    assert.equal(routed.length, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('reactor routing: an untargeted item\'s Touches pass through ungrounded', async () => {
   const base = mkdtempSync(join(tmpdir(), 'route-ground-legacy-'));
   try {
