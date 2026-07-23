@@ -1,8 +1,8 @@
 // Acceptance fold adapter — the typed boundary between the loopkit fold substrate
 // and the acceptance projection. It reads the SAME `loopctl summary --json` shape
 // the command adapter reads (validated through the one `isFoldSummary` parser) and
-// projects `recentMerged` — slices that shipped in the last 7 days and now await a
-// founder verdict — into a typed `ProjectionEnvelope<AcceptanceData>`. Malformed
+// projects `recentMerged` — slices that shipped in the last 7 days and now await an
+// operator verdict — into a typed `ProjectionEnvelope<AcceptanceData>`. Malformed
 // input folds to a LOUD failure envelope, never a calm empty
 // queue that reads as "all caught up".
 //
@@ -72,7 +72,7 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
   };
 }
 
-/** Does an item's origin pass the founder's all/target/plane/other filter (WI-180)? An item
+/** Does an item's origin pass the operator's all/target/plane/other filter (WI-180)? An item
  *  with no derivable origin (no code touches — a question/feedback item) shows under 'all'
  *  and 'other'. 'plane' also matches 'mixed' work (it touches the plane); 'target' also
  *  matches 'mixed' (it touches the target). Every item lands in at least one sub-filter, so the
@@ -85,7 +85,7 @@ function passesFilter(origin: ItemOrigin | undefined, filter: AcceptanceFilter):
   return origin === 'target' || origin === 'mixed';
 }
 
-// Acceptance-tier tiering (WI-341): the chip must match what the founder actually needs to act on —
+// Acceptance-tier tiering (WI-341): the chip must match what the operator actually needs to act on —
 // only must/review items are "to test"; optional/auto auto-accept on a timer and are a
 // side mention, not part of the headline count (they already have their own collapsed
 // "Auto-accepting soon" section below).
@@ -167,8 +167,8 @@ export function acceptanceProjectionFromFold(
   const orderedFiltered = ordered.filter((_m, i) => passesFilter(origins[i], filter));
   const queue = orderedFiltered.map((m) => toItem(m, nowMs, fold.tierWindows));
   // The glance's "Oldest" tile mirrors the "Waiting on your test" section (acceptance-tier
-  // tiering, WI-341): an old optional/auto item that's about to auto-accept isn't founder debt, so
-  // it must not be reported as the oldest thing waiting on the founder.
+  // tiering, WI-341): an old optional/auto item that's about to auto-accept isn't operator debt, so
+  // it must not be reported as the oldest thing waiting on the operator.
   const waitingFiltered = orderedFiltered.filter((m) => !isAutoAcceptTier(m.tier));
   const oldestAgeMs = waitingFiltered.length ? nowMs - mergedAtMs(waitingFiltered[0]!) : NaN;
 

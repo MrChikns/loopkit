@@ -30,7 +30,7 @@ test('decision parks sort above in-flight, blocked, queued, and plane-owned park
     { id: 'WI-2', state: 'queued', spec: 'queued item' },
     { id: 'WI-3', state: 'blocked', spec: 'blocked item' },
     { id: 'WI-4', state: 'building', spec: 'in-flight item' },
-    { id: 'WI-5', state: 'parked', parkKind: 'decision', spec: 'needs the founder' },
+    { id: 'WI-5', state: 'parked', parkKind: 'decision', spec: 'needs the operator' },
   ];
   const env = workProjectionFromFold(fold(active), { ledgerSequence: 1 });
   assert.deepEqual(ids(env), ['WI-5', 'WI-4', 'WI-3', 'WI-2', 'WI-1'],

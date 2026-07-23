@@ -32,8 +32,8 @@ export type FoldActiveItem = {
   touches?: string;
   spec?: string;
   parkReason?: string;
-  /** Park INTENT kind (ops parks are plane-owned — never a founder action target): 'decision'
-   *  reaches the founder's needs-you desk; 'ops' is a mechanical/infra failure the plane owns
+  /** Park INTENT kind (ops parks are plane-owned — never an operator action target): 'decision'
+   *  reaches the operator's needs-you desk; 'ops' is a mechanical/infra failure the plane owns
    *  → health lane, never the desk. */
   parkKind?: string;
   /** Leader-leader escalation-with-intent payload (item.parked.escalation), when the emitter
@@ -82,7 +82,7 @@ export type FoldMergedItem = {
   /** Acceptance tier the item classified into ('auto'|'optional'|'review'|'must'),
    *  emitted by `loopctl summary --json` for non-accepted items. Drives the desk's tier badge. */
   tier?: string;
-  /** Whether the founder has accepted this shipped slice (WI-213). */
+  /** Whether the operator has accepted this shipped slice (WI-213). */
   accepted?: boolean;
   acceptedAt?: string;
   /** Capture timestamp (loopkit ItemRecord.createdAt), carried through for the FLOW glance
@@ -134,9 +134,9 @@ export type FoldSummary = {
     id: string;
     spec?: string;
     /** Who/what closed the item (loopkit ItemRecord.rejectedBy, WI-331): 'founder' for an
-     *  actual founder decline; a machine actor (e.g. 'reactor') for an autonomous closure
+     *  actual operator decline; a machine actor (e.g. 'reactor') for an autonomous closure
      *  (duplicate-of-merged, decomposition supersede). Absent on pre-WI-331 replays — treated
-     *  as founder-equivalent by threads-adapter.ts, matching the CLI's own default. */
+     *  as operator-equivalent by threads-adapter.ts, matching the CLI's own default. */
     rejectedBy?: string;
   }>;
   /** Terminal-routed items (route=answer|question|duplicate|merged) — WI-196. */
@@ -399,7 +399,7 @@ function buildDecisionBlock(item: FoldActiveItem): DecisionBlock {
     case 'spine':
       recommendation = 'Spine changes always need review — check the listed files before approving';
       break;
-    // conflict / no-commit are ops-parks (plane-owned — never a founder action target) — they never reach this desk, and the
+    // conflict / no-commit are ops-parks (plane-owned — never an operator action target) — they never reach this desk, and the
     // old "Decline to re-queue" text lied (Decline → item.rejected is terminal, no re-queue path).
     default:
       recommendation = undefined;
@@ -423,14 +423,14 @@ function buildDecisionBlock(item: FoldActiveItem): DecisionBlock {
   };
 }
 
-// ─── Park-kind routing (ops parks are plane-owned — never a founder action target) ──
-// A parked item is a *decision* the founder must call (conductor park, product-spine,
+// ─── Park-kind routing (ops parks are plane-owned — never an operator action target) ──
+// A parked item is a *decision* the operator must call (conductor park, product-spine,
 // touches-overstep) only when tagged parkKind:'decision'. Everything else parked
 // (no-commit, merge conflict, tests-red, infra:*, breaker) is an *ops* failure the plane
 // owns; it never reaches the needs-you desk, it surfaces on the health lane and
 // auto-requeues.
 /** Exported so threads-adapter.ts can join a thread's parked work item against the SAME
- *  decision-vs-ops predicate (ops parks are plane-owned — never a founder action target)
+ *  decision-vs-ops predicate (ops parks are plane-owned — never an operator action target)
  *  rather than re-deriving it — a second copy of this classification is the drift smell
  *  the fold layer exists to avoid.
  *  Strict predicate: every emitter now stamps `parkKind`, so the
@@ -483,7 +483,7 @@ export function unblockNote(parkKind: string | undefined, parkReason: string | u
  * Interim-status predicate (WI-362): mirrors @loopkit/core src/fold.ts's
  * `isInterimApprovedStatus` formula on the FoldActiveItem shape — ops-ui never imports
  * loopkit directly (same cross-package-boundary reason isDecisionPark/isOpsPark carry their
- * own local copies of the loopkit formula). True in the narrow window between a founder verb
+ * own local copies of the loopkit formula). True in the narrow window between an operator verb
  * landing (approved / a fresh unpark) and the reactor's follow-up (merged / a fresh dispatch):
  * 'approved' is always this window; 'queued' only counts when it's the direct result of the
  * most recent unpark (lastUnparkedAt fresher than parkedAt).
@@ -522,7 +522,7 @@ export function approveActionLabel(branch: string | undefined, branchAlive?: boo
 /** Shipped-but-still-needs-a-verdict predicate — must/review tier, not yet accepted. Shared
  *  by the Glance "To test" tile's count (buildGlance) and Command's own To-test region
  *  (buildToTest below) so the two can never disagree on how many items are awaiting a
- *  founder works/found-a-problem call. */
+ *  operator works/found-a-problem call. */
 function isAwaitingVerdict(m: FoldMergedItem): boolean {
   return !m.accepted && (m.tier === 'must' || m.tier === 'review');
 }
@@ -602,7 +602,7 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
         });
 
   // ── NEEDS YOU: decision parks + must/review-tier slices awaiting acceptance ──
-  // These are two DIFFERENT founder actions (approve/decline a park vs.
+  // These are two DIFFERENT operator actions (approve/decline a park vs.
   // test a shipped slice), so they render as two separately-linked tiles — a single
   // combined count that always opened the decision desk hid the to-test half entirely.
   const decisionParks = fold.active.filter(isDecisionPark);
@@ -662,19 +662,19 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   // to "clean landing" (WI-108 lifetime counters, one outcome per WI): a merged item is clean
   // iff it never parked/crashed/gate-failed/escalated ANYWHERE on its road to merge — a WI that
   // gate-failed once then passed on attempt 2 is not "first try" but it's also not the rough
-  // landing the founder actually cares about catching, so this reads truer than attempts alone.
+  // landing the operator actually cares about catching, so this reads truer than attempts alone.
   const isCleanLanding = (m: FoldMergedItem): boolean =>
     !m.lifetimeParkCount && !m.lifetimeCrashCount && !m.lifetimeGateRedCount && !m.lifetimeEscalationCount;
   // WI-129: the headline (and its denominator) now read from the SAME window-filtered merged set
   // the picker drives on every other tile (mergedInWindow(reliabilityWindow) — shared with the
   // "this try" secondary below), instead of hardcoding fold.recentMerged (a fixed 7d slice). It
-  // used to never move when the founder changed the Glance window filter.
+  // used to never move when the operator changed the Glance window filter.
   const reliabilityWindow: GlanceWindow = opts.window ?? DEFAULT_GLANCE_WINDOW;
   const reliabilityMerged = mergedInWindow(reliabilityWindow);
   const cleanHeadline = reliabilityMerged.filter(isCleanLanding).length;
   const totalHeadline = reliabilityMerged.length;
   const cleanPctHeadline = totalHeadline > 0 ? Math.round((cleanHeadline / totalHeadline) * 100) : undefined;
-  // Fixed 30d reference point, independent of the picker, so the founder keeps a longer-horizon
+  // Fixed 30d reference point, independent of the picker, so the operator keeps a longer-horizon
   // comparison even while scrubbing the headline window narrower (24h/7d). fold.recentMerged30d
   // is already pre-trimmed to 30d upstream (WI-360).
   const merged30d = fold.recentMerged30d ?? fold.recentMerged;
@@ -805,7 +805,7 @@ function buildDecisionDesk(fold: FoldSummary): CommandEvent[] {
  *  Command (the WI-348 incident: parked 3.5h at attempts=1, Glance read "none stuck", the
  *  desk read "Clear"). This lists every OTHER active ops-park — id/age/attempts/retry
  *  state — visibility only, no actions (ops parks are plane-owned — never a
- *  founder action target). `unblockNote` is reused (not re-derived, one-parser rule)
+ *  operator action target). `unblockNote` is reused (not re-derived, one-parser rule)
  *  for the retry-state line, so it can never read differently than the health card's own
  *  "auto-retries; escalates on breaker" narrative for the same park class. */
 function buildOpsParks(fold: FoldSummary): CommandEvent[] {
@@ -889,7 +889,7 @@ function buildPreparing(fold: FoldSummary): CommandEvent[] {
  *  (one-predicate rule). `buildQueueBlocking` also appends parked items
  *  (`reason: "parked: …"`) to explain why the queue is stuck; those are filtered out here so
  *  they never duplicate the decision desk / Active ops-parks card (ops parks are plane-owned
- *  — never a founder action target). */
+ *  — never an operator action target). */
 function buildQueuedPipelineStage(fold: FoldSummary): CommandEvent[] {
   const activeById = new Map(fold.active.map((i) => [i.id, i]));
   const nowMs = new Date(fold.generatedAt).getTime();
@@ -966,8 +966,8 @@ function mergedEventFor(m: FoldMergedItem, fold: FoldSummary): CommandEvent {
   const origin = deriveOrigin(m.touches);
   const post = '/intent?next=/command';
   const acceptIntent = `✅ accept ${m.id}`;
-  // Only must/review tiers need a founder verdict at all — optional/auto
-  // auto-accept on their own (a timer, or immediately) with nothing for the founder to do,
+  // Only must/review tiers need an operator verdict at all — optional/auto
+  // auto-accept on their own (a timer, or immediately) with nothing for the operator to do,
   // so neither gets the urgent Accept affordance (mirrors the badge split above).
   const needsAcceptAction = !m.accepted && (m.tier === 'must' || m.tier === 'review' || m.tier === undefined);
   return {
@@ -993,7 +993,7 @@ function buildDeliveryStream(fold: FoldSummary): CommandEvent[] {
 }
 
 /** Command's "To test" region (WI-128): the actual shipped-awaiting-verdict rows, oldest
- *  first — the longest-waiting slice needs the founder's attention soonest. Reuses the SAME
+ *  first — the longest-waiting slice needs the operator's attention soonest. Reuses the SAME
  *  `isAwaitingVerdict` predicate the Glance "To test" tile counts and the SAME `mergedEventFor`
  *  mapper the delivery stream renders with, so this region's row count and each row's badge
  *  can never drift from what Glance/the delivery stream say about the same merged item. */
@@ -1017,7 +1017,7 @@ function buildPipeline(fold: FoldSummary): PipelineStage[] {
 function buildHealth(fold: FoldSummary): CommandData['opsHealth'] {
   const blocked = count(fold.counts, 'blocked');
   if (blocked > 0) return { headline: `${blocked} blocked`, state: 'critical' };
-  // Non-decision parks (plane-owned — never a founder action target) surface here, never on the founder's needs-you desk.
+  // Non-decision parks (plane-owned — never an operator action target) surface here, never on the operator's needs-you desk.
   // They further split by parkKind: 'decomposition' is an approved item waiting on the
   // planner lane, 'hold' is a deliberate deferral, and everything else is a plain 'ops'
   // mechanical/infra failure — 'stuck' if the breaker tripped, otherwise mid-recovery (the
@@ -1074,10 +1074,10 @@ function deriveRecentIntentState(
   if (activeItem) return activeItem.state;
   if (mergedIds.has(id)) return 'merged';
   if (rejectedById.has(id)) {
-    // WI-331: split a real founder decline from a machine-driven closure — a bare
-    // 'rejected' state read as a founder reject even when the reactor closed it
+    // WI-331: split a real operator decline from a machine-driven closure — a bare
+    // 'rejected' state read as an operator reject even when the reactor closed it
     // autonomously (duplicate-of-merged, decomposition supersede). Absent `rejectedBy`
-    // (pre-WI-331 replays) reads as founder-equivalent, matching threads-adapter.ts.
+    // (pre-WI-331 replays) reads as operator-equivalent, matching threads-adapter.ts.
     const rejectedBy = rejectedById.get(id);
     const isMachineClosed = !!rejectedBy && rejectedBy !== 'founder';
     return isMachineClosed ? 'superseded' : 'rejected';
@@ -1124,7 +1124,7 @@ function buildRecentIntents(fold: FoldSummary, nowFn: () => number = Date.now): 
   const mergedIds = new Set(mergedById.keys());
   const threadById = new Map((fold.threads ?? []).map((t) => [t.id, t]));
   // rejectedBy (WI-331): a machine-closed item (e.g. reactor duplicate-of-merged /
-  // decomposition supersede) must never read as a founder rejection on the strip —
+  // decomposition supersede) must never read as an operator rejection on the strip —
   // mirrors threads-adapter.ts's deriveThreadState split.
   const rejectedById = new Map((fold.recentRejected ?? []).map((r) => [r.id, r.rejectedBy]));
   const answeredIds = new Set((fold.recentAnswered ?? []).map((a) => a.id));

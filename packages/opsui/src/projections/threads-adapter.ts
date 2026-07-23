@@ -23,15 +23,15 @@ export type ThreadMessage = {
 };
 
 /** Where a thread's underlying work item stands, joined against fold.active/recentMerged/
- *  recentRejected (WI-307). A mechanical/ops park (plane-owned — never a founder action
+ *  recentRejected (WI-307). A mechanical/ops park (plane-owned — never an operator action
  *  target) never surfaces as
- *  'needs-you' — only a genuine founder decision park does; 'unknown' covers a thread with
+ *  'needs-you' — only a genuine operator decision park does; 'unknown' covers a thread with
  *  no matching work item at all (answered/duplicate route, or not yet picked up).
  *  'rejected' vs 'superseded' (WI-331): both fold from item.rejected, split by
- *  recentRejected[].rejectedBy — 'rejected' is a real founder decline, 'superseded' is a
+ *  recentRejected[].rejectedBy — 'rejected' is a real operator decline, 'superseded' is a
  *  machine-driven closure (reactor duplicate-of-merged / decomposition supersede) that the
- *  founder never actually rejected. Absent `rejectedBy` (pre-WI-331 replays) reads as
- *  founder-equivalent, i.e. 'rejected' — never silently reclassified.
+ *  operator never actually rejected. Absent `rejectedBy` (pre-WI-331 replays) reads as
+ *  operator-equivalent, i.e. 'rejected' — never silently reclassified.
  *  'awaiting-planner' and 'on-hold' (WI-127) split out of the old blanket ops-park→'building'
  *  collapse: a decomposition park is queued for the planner (not being actively built), and a
  *  hold park is a deliberate pause — both deserve their own catalog-backed reading rather than
@@ -194,7 +194,7 @@ const PARKED_STATUS_TO_THREAD_STATE: Partial<Record<StatusId, ThreadState>> = {
 };
 
 /** Join a thread against its work item's lifecycle (fold.active / recentMerged /
- *  recentRejected) to derive the founder-facing state, plus the joined item's `spec`
+ *  recentRejected) to derive the operator-facing state, plus the joined item's `spec`
  *  when one exists (feeds the {@link shortTitle} fallback). Absent from all three ⇒
  *  'unknown' (settled/not-yet-started), never a guess. */
 function deriveThreadState(
@@ -224,7 +224,7 @@ function deriveThreadState(
   if (merged) return { state: merged.accepted ? 'accepted' : 'merged', ...(merged.spec ? { spec: merged.spec } : {}) };
   const rejected = (fold.recentRejected ?? []).find((r) => r.id === threadId);
   if (rejected) {
-    // A real founder decline vs a machine-driven closure — see the ThreadState doc comment.
+    // A real operator decline vs a machine-driven closure — see the ThreadState doc comment.
     const isMachineClosed = !!rejected.rejectedBy && rejected.rejectedBy !== 'founder';
     return { state: isMachineClosed ? 'superseded' : 'rejected' };
   }

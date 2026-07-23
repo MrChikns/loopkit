@@ -12,9 +12,9 @@ import type { ProjectionId } from '../projections/projection-types.ts';
 // One payload per semantic action a component can raise. Kept minimal and typed;
 // arbitrary strings are never accepted at the dispatcher boundary.
 
-/** Founder drops intent from the composer. */
+/** Operator drops intent from the composer. */
 export type SubmitIntent = { text: string; thread?: string };
-/** Accept a deployed slice awaiting founder eyes. */
+/** Accept a deployed slice awaiting operator eyes. */
 export type AcceptSlice = { workItem: string; note?: string };
 /** Reject a slice back into the queue with a reason. */
 export type FailSlice = { workItem: string; reason: string };

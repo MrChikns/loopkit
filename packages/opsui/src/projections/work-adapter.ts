@@ -104,7 +104,7 @@ export function buildRunControlActions(
       ];
     }
     if (parkKind === 'ops') {
-      // Plane-owned mechanical/infra park (never a founder action target) — requeue re-tries it, dismiss is
+      // Plane-owned mechanical/infra park (never an operator action target) — requeue re-tries it, dismiss is
       // a terminal no-action close (RESOLVE_VERB_RE) so it needs a confirm gate.
       return [
         { id: `work.resume:${id}`, label: 'Requeue now', emphasis: 'primary', form: { action, intent: `▶ resume ${id}` } },
@@ -120,7 +120,7 @@ export function buildRunControlActions(
         },
       ];
     }
-    // decomposition parks need nothing from the founder (queued for planner decomposition) —
+    // decomposition parks need nothing from the operator (queued for planner decomposition) —
     // no buttons, the projection renders a calm neutral badge instead.
     return [];
   }
@@ -167,9 +167,9 @@ export type WorkItem = {
    *  in-flight run cards, Hold/Escalate/Retry on queued rows, Resume on hold-parked rows,
    *  Approve/Decline (decision) or Requeue/Dismiss (ops) on parked rows.
    *  Absent/empty for states with no applicable verb (merged, accepted, rejected, answered,
-   *  and decomposition parks — those need nothing from the founder). */
+   *  and decomposition parks — those need nothing from the operator). */
   actions?: WorkItemAction[];
-  /** Park INTENT kind (ops parks are plane-owned — never a founder action target) —
+  /** Park INTENT kind (ops parks are plane-owned — never an operator action target) —
    *  'decision' | 'ops' | 'hold' | 'decomposition' — set
    *  only when `state === 'parked'`. Drives which actions render and the row's honest
    *  classification — a bare 'parked' badge for every kind would be misleading. */
@@ -418,7 +418,7 @@ export function workProjectionFromFold(
         }
       : undefined;
 
-    // WI-362: interim routing status overrides the plain state label/color while a founder
+    // WI-362: interim routing status overrides the plain state label/color while an operator
     // verb has landed (approved / a fresh unpark) but the reactor hasn't yet followed up
     // (merged / dispatched) — isInterimApprovedStatus is the ONE formula (fold-adapter.ts),
     // fed into the ONE status deriver (status-catalog.ts deriveItemStatus, WI-086/WI-087) so
