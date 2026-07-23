@@ -1937,6 +1937,13 @@ async function stepPathology(
     const nowMs = opts.now ?? Date.now();
     for (const rec of foldResult.items.values()) {
       if (rec.state !== 'parked' || !rec.blockedOn) continue;
+      // WI-099: the wait-timeout re-park below sets parkKind:'decision' but (like every
+      // item.parked event, see fold.ts) leaves blockedOn in place as a forensic breadcrumb —
+      // only item.queued clears it. Once this item has already been escalated to the decision
+      // desk, it belongs to the operator, not to this release loop: skip it so a later blocker
+      // merge cannot silently auto-requeue past the operator's park, and so the timeout check
+      // below cannot re-fire the escalation on every subsequent beat.
+      if (rec.parkKind === 'decision') continue;
       const blockerId = rec.blockedOn;
       const blocker = foldResult.items.get(blockerId);
       if (blocker && blocker.state === 'merged') {
