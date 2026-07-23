@@ -327,7 +327,7 @@ export interface ItemRecord {
    * this record from scratch on an item with no prior certification at all — only `portability`
    * is guaranteed set in that minimal shape.
    */
-  mergeCertification?: { couldBreak?: string; detection?: string; rollback?: string; portability?: string };
+  mergeCertification?: { couldBreak?: string; detection?: string; rollback?: string; portability?: string; targetIds?: string[] };
   /** True when the item was accepted provisionally by reactor:oc6-provisional. */
   provisionalAccept?: boolean;
 
@@ -421,10 +421,14 @@ export class TargetsProjection extends Map<string, TargetRecord> {
   byId(targetId: string): TargetRecord | undefined {
     return super.get(targetId);
   }
-  /** Display-name scan (first match in registration order). Names are mutable and MAY
-   *  collide across targets — use only for operator-facing handles, never identity. */
+  /** Display-name scan (first match in registration order), case-insensitive per ADR-009 (the
+   *  portability-note grammar lower-cases target names for storage/comparison — a lookup here
+   *  must fold case the same way or a registered "Acme-Web" would never resolve a "acme-web"
+   *  note). Names are mutable and MAY collide across targets — use only for operator-facing
+   *  handles, never identity. */
   byName(name: string): TargetRecord | undefined {
-    for (const rec of this.values()) if (rec.name === name) return rec;
+    const lower = name.toLowerCase();
+    for (const rec of this.values()) if (rec.name.toLowerCase() === lower) return rec;
     return undefined;
   }
   /** repoPath scan — the stable identity-revival key (one project, one id, forever). */
@@ -647,6 +651,30 @@ function foldMergeEvidence(rec: ItemRecord, d: Record<string, unknown>): void {
   if (typeof d['gateCommand'] === 'string') rec.mergeGateCommand = d['gateCommand'];
   const cert = parseCertification(d);
   if (cert) rec.mergeCertification = cert;
+}
+
+/**
+ * ADR-009 — apply one `item.certification-amended` onto the item's existing certification.
+ * `portability` always replaces (last-writer-wins); `targetIds` (this event's resolved ids, if
+ * any) REPLACES rather than merges with a prior amendment's ids — carrying stale ids forward
+ * from an earlier amendment would misattribute them to a portability note that superseded them.
+ * `couldBreak`/`detection`/`rollback` are untouched (amendment-owned fields are only portability
+ * + targetIds). Never sets a `targetIds` key at all when this event carries none, so a
+ * once-only amendment's fold result has no stray `targetIds: undefined` property.
+ */
+function mergeAmendedPortability(
+  prev: ItemRecord['mergeCertification'],
+  portability: string,
+  rawTargetIds: unknown,
+): ItemRecord['mergeCertification'] {
+  const targetIds = Array.isArray(rawTargetIds)
+    ? rawTargetIds.filter((x): x is string => typeof x === 'string')
+    : undefined;
+  const carried: ItemRecord['mergeCertification'] = {};
+  if (prev?.couldBreak !== undefined) carried.couldBreak = prev.couldBreak;
+  if (prev?.detection !== undefined) carried.detection = prev.detection;
+  if (prev?.rollback !== undefined) carried.rollback = prev.rollback;
+  return { ...carried, portability, ...(targetIds ? { targetIds } : {}) };
 }
 
 /**
@@ -965,7 +993,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           const field = d['field'];
           const portability = d['portability'];
           if (field === 'portability' && typeof portability === 'string') {
-            rec.mergeCertification = { ...rec.mergeCertification, portability };
+            rec.mergeCertification = mergeAmendedPortability(rec.mergeCertification, portability, d['targetIds']);
           }
           break;
         }
@@ -1129,7 +1157,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         const field = d['field'];
         const portability = d['portability'];
         if (field !== 'portability' || typeof portability !== 'string') break;
-        rec.mergeCertification = { ...rec.mergeCertification, portability };
+        rec.mergeCertification = mergeAmendedPortability(rec.mergeCertification, portability, d['targetIds']);
         break;
       }
 

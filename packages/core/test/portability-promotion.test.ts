@@ -29,6 +29,13 @@ import { parseManifest } from '../src/beats/dispatch.js';
 import { fold } from '../src/fold.js';
 import { runReactor } from '../src/beats/reactor.js';
 import { LoopkitConfig, CONFIG_DEFAULTS, loadConfig } from '../src/config.js';
+import { fallbackTargetId } from '../src/target.js';
+
+// Promotion-dedup keys on the target's immutable id, not its mutable name (see
+// stepPortabilityPromotion in reactor.ts) — these merge-time-certification fixtures never went
+// through amendPortability (no cert.targetIds), so the id is the same deterministic fallback the
+// fold derives from the registration's repoPath.
+const acmeWebTargetId = fallbackTargetId('/tmp/acme-web');
 
 function makeTestConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
   return {
@@ -205,7 +212,7 @@ test('reactor (WI-098): a mechanical merged item with a portability note QUEUES 
 
     const events = await loadAllEvents(ledgerDir);
     const folded = fold(events);
-    const sibling = [...folded.items.values()].find(r => r.source === 'portability:WI-010:acme-web');
+    const sibling = [...folded.items.values()].find(r => r.source === `portability:WI-010:${acmeWebTargetId}`);
     assert.ok(sibling, 'a sibling item was captured for the named target');
     assert.equal(sibling!.target, 'acme-web', 'sibling is stamped against the named target');
     assert.equal(sibling!.state, 'queued', 'mechanical source ⇒ the sibling is queued to build');
@@ -213,7 +220,7 @@ test('reactor (WI-098): a mechanical merged item with a portability note QUEUES 
     // Idempotent: a second beat must not capture a second sibling for the same (source, target).
     await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
     const events2 = await loadAllEvents(ledgerDir);
-    const siblings2 = [...fold(events2).items.values()].filter(r => r.source === 'portability:WI-010:acme-web');
+    const siblings2 = [...fold(events2).items.values()].filter(r => r.source === `portability:WI-010:${acmeWebTargetId}`);
     assert.equal(siblings2.length, 1, 'exactly one sibling across two beats (idempotent)');
   } finally {
     cleanup();
@@ -238,7 +245,7 @@ test('reactor (WI-098): a product-shaped merged item PARKS the sibling as a deci
     await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
 
     const folded = fold(await loadAllEvents(ledgerDir));
-    const sibling = [...folded.items.values()].find(r => r.source === 'portability:WI-011:acme-web');
+    const sibling = [...folded.items.values()].find(r => r.source === `portability:WI-011:${acmeWebTargetId}`);
     assert.ok(sibling, 'sibling captured');
     assert.equal(sibling!.state, 'parked', 'product-shaped source ⇒ the sibling parks');
     assert.equal(sibling!.parkKind, 'decision', 'parked as a decision (operator must ratify)');
@@ -269,7 +276,7 @@ test('reactor (WI-098): portabilityPromotion.enabled defaults false — the step
     assert.equal(step!.eventsWritten, 0, 'disabled step writes nothing');
 
     const folded = fold(await loadAllEvents(ledgerDir));
-    const sibling = [...folded.items.values()].find(r => r.source === 'portability:WI-020:acme-web');
+    const sibling = [...folded.items.values()].find(r => r.source === `portability:WI-020:${acmeWebTargetId}`);
     assert.equal(sibling, undefined, 'no sibling captured while the flag is off');
   } finally {
     cleanup();
