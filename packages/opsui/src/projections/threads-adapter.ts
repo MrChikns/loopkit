@@ -84,9 +84,9 @@ export type ThreadCard = {
   messages: ThreadMessage[];
   /** Display label: externalRef when available, otherwise id. */
   label: string;
-  /** Joined work-item lifecycle state — drives the founder-facing status badge. */
+  /** Joined work-item lifecycle state — drives the operator-facing status badge. */
   state: ThreadState;
-  /** Present only when state is 'needs-you' — why a founder decision is pending. */
+  /** Present only when state is 'needs-you' — why an operator decision is pending. */
   parkReason?: string;
   /** Present only when state is 'superseded' — the WI id that closed this one, extracted
    *  from the reactor's "Closed — superseded by WI-NNN" msg.out trail (WI-331). Absent when
@@ -165,7 +165,7 @@ function deriveThreadState(
       return isDecisionPark(active)
         ? { state: 'needs-you', ...(active.parkReason ? { parkReason: active.parkReason } : {}), ...spec }
         // Ops-parks are mechanical/infra failures the plane auto-recovers from (plane-owned
-        // — never a founder decision), so the card still reads as in motion.
+        // — never an operator decision), so the card still reads as in motion.
         : { state: 'building', ...spec };
     }
     if (active.state === 'queued' || active.state === 'routed') return { state: 'queued', ...spec };

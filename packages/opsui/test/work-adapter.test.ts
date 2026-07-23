@@ -1,7 +1,7 @@
-// WI-102 — Missions board (/work) founder-attention ordering. workProjectionFromFold's primary
-// sort must surface the rows that actually need the founder first: decision parks lead, then
+// WI-102 — Missions board (/work) operator-attention ordering. workProjectionFromFold's primary
+// sort must surface the rows that actually need the operator first: decision parks lead, then
 // in-flight work, then blocked, then queued/routed/captured, with plane-owned parks (ops/hold/
-// decomposition — the plane resolves these itself, never a founder decision) sinking to the
+// decomposition — the plane resolves these itself, never an operator decision) sinking to the
 // bottom. Priority (blocker > high > medium > low > unset) is the secondary key within every
 // group; relative order otherwise holds (stable sort).
 

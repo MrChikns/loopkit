@@ -291,9 +291,9 @@ function decisionDeskRegion(events: CommandEvent[]): string {
   });
 }
 
-/** WI-354: visibility-only card for ops-parks that are neither a founder decision (decision
+/** WI-354: visibility-only card for ops-parks that are neither an operator decision (decision
  *  desk) nor yet flagged Stuck — the blind window that hid WI-348 for 3.5h. No actions
- *  (ops parks are plane-owned — never a founder action target). */
+ *  (ops parks are plane-owned — never an operator action target). */
 function opsParksRegion(events: OpsParksCard): string {
   // Command-vs-Missions split: this card stays button-less (ops parks are plane-owned —
   // never a founder action target here), but says so explicitly with a link to where they
