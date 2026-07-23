@@ -2,7 +2,7 @@
 # leak-scan.sh — tripwire for the PUBLIC repo. Fails (exit 1) if a scan target
 # contains secrets, credentials, or operator-private residue.
 #
-# Three pattern sources:
+# Four pattern sources:
 #   1. GENERIC classes below — safe to publish (no real names), catch the usual
 #      leak shapes: private keys, cloud/CI/chat tokens, and `secret = "…"` literals.
 #   2. DECISIONID below — a concrete `D-NNN` operator-private decision-log citation
@@ -14,10 +14,19 @@
 #      `ADR-`) and ids immediately followed by a comma, which is how this repo's own
 #      docs/tests illustrate the generic `PREFIX-NNN` convention with bare example ids
 #      (`D-10, D-100, etc.`) rather than citing a real decision.
+#      DECISIONID_CONCAT alongside it catches the same id assembled at runtime instead
+#      of written as a literal token — `['D', '000'].join('-')`, `'D-' + n`, a template
+#      literal `` `D-${n}` ``, or `.concat(...)` — shapes the literal-token check
+#      above cannot see. A line that needs to build a `D-`-shaped
+#      string for a legitimate reason (documenting or exercising the detector regex
+#      itself, e.g. in a test) can carry the id anyway by appending the marker comment
+#      `leak-scan:allow-decision-id` to that line.
 #   3. An OPTIONAL, git-ignored `.leakpatterns.local` at the repo root — one
 #      extended-regex per line (`#` comments allowed). This is where the operator's
 #      real private terms live (product names, personal email, this host's home
 #      path). It is NEVER committed, so the denylist itself can't leak.
+#   4. `leak-scan:allow-decision-id` — the per-line escape hatch from #2, opt-in
+#      and reviewable in the diff, unlike a blanket file exclude.
 #
 # Modes:  --staged  scan the git index (pre-commit)   [default: --worktree]
 #         --head    scan the committed HEAD tree (pre-push)
@@ -63,6 +72,16 @@ EMAIL='[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!lo
 # doesn't trip it either.
 DECISIONID='\bD-\d{2,}(-[A-Z0-9]+)?\b(?!,)'
 
+# Same private decision id, assembled at runtime instead of written as a literal
+# token — shapes the literal-token check above cannot see. Four join/
+# concat idioms, high-signal because each requires a quoted `D` or `D-` literal
+# right next to a concat operator, not just any string containing the letter D:
+#   1. array + join:  ['D', '000']            (join('-') call itself isn't required)
+#   2. plus-concat:   'D-' + n   /   n + 'D-'
+#   3. template lit:  `D-${n}`
+#   4. .concat():     'D-'.concat(n)
+DECISIONID_CONCAT='\[\s*["\x27]D["\x27]\s*,\s*["\x27][0-9]{2,}[A-Za-z0-9-]*["\x27]|["\x27]D-?["\x27]\s*\+|\+\s*["\x27]D-?["\x27]|`D-?\$\{|["\x27]D-?["\x27]\s*\.concat\('
+
 # --- build the -e argument list ----------------------------------------------
 set --
 # generic classes
@@ -73,6 +92,12 @@ IFS=$OLDIFS
 # email + decision-id classes (PCRE: negative lookahead)
 EMAIL_ARG="$EMAIL"
 DECISIONID_ARG="$DECISIONID"
+DECISIONID_CONCAT_ARG="$DECISIONID_CONCAT"
+# inline escape hatch for a legitimate `D-`-shaped example (fixtures/docs/tests
+# exercising the detector itself): a line carrying this marker is exempt from
+# BOTH decision-id checks above. Opt-in and per-line — unlike a whole-file
+# EXCLUDES entry, a real leak can't hide behind "this file is just examples".
+DECISIONID_ALLOW_MARKER='leak-scan:allow-decision-id'
 
 # operator-private denylist (git-ignored, optional)
 LOCAL_PATTERNS=""
@@ -107,8 +132,11 @@ if [ "$MODE" = "--range" ]; then
     E=$(printf '%s\n' "$LOG" | grep -inP "$EMAIL_ARG" 2>/dev/null || true)
     [ -n "$E" ] && HITS="$HITS$E
 "
-    D=$(printf '%s\n' "$LOG" | grep -inP "$DECISIONID_ARG" 2>/dev/null || true)
+    D=$(printf '%s\n' "$LOG" | grep -inP "$DECISIONID_ARG" 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
     [ -n "$D" ] && HITS="$HITS$D
+"
+    C=$(printf '%s\n' "$LOG" | grep -inP "$DECISIONID_CONCAT_ARG" 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
+    [ -n "$C" ] && HITS="$HITS$C
 "
     if [ -n "$LOCAL_PATTERNS" ]; then
       LOCAL_HITS=$(printf '%s\n' "$LOCAL_PATTERNS" | while IFS= read -r pat; do
@@ -129,8 +157,12 @@ else
   [ -n "$E" ] && HITS="$HITS$E
 "
   # decision-id pass (PCRE)
-  D=$($GREP_P "$DECISIONID_ARG" $REV -- $EXCLUDES 2>/dev/null || true)
+  D=$($GREP_P "$DECISIONID_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
   [ -n "$D" ] && HITS="$HITS$D
+"
+  # decision-id-via-concatenation pass (PCRE) — same escape hatch
+  C=$($GREP_P "$DECISIONID_CONCAT_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
+  [ -n "$C" ] && HITS="$HITS$C
 "
   # operator-private denylist pass, one regex at a time (case-insensitive).
   # Pipe→`while IFS= read` so only the read splits on newline — inside the body IFS stays
