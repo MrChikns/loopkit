@@ -662,6 +662,20 @@ export interface LoopkitConfig {
      */
     detachedDispatch?: boolean;
   };
+
+  /**
+   * Cross-target pattern promotion (WI-098's stepPortabilityPromotion in reactor.ts) — a
+   * staged flag per method.md's "the rollback is written before the flip" discipline. Multi-
+   * target portability isn't yet exercised (see README's "Honest scope"), so this ships
+   * dormant: default `enabled: false` is byte-for-byte "the step never runs" — rollback is
+   * simply leaving the flag off. A merged item's certification naming other registered
+   * targets otherwise queues/parks a sibling item there every beat regardless of whether
+   * multi-target promotion has been proven for this plane.
+   */
+  portabilityPromotion?: {
+    /** Enable cross-target pattern promotion + its advisory nudge. Default: false. */
+    enabled?: boolean;
+  };
 }
 
 /**
@@ -868,6 +882,9 @@ const DEFAULTS: LoopkitConfig = {
   execution: {
     detachedDispatch: false,
   },
+  portabilityPromotion: {
+    enabled: false,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -956,6 +973,10 @@ export function loadConfig(repoRoot: string): LoopkitConfig {
       : undefined,
     knowledge: mergeKnowledge((raw as Partial<LoopkitConfig>).knowledge),
     execution: mergeExecution((raw as Partial<LoopkitConfig>).execution, DEFAULTS.execution as Required<NonNullable<LoopkitConfig['execution']>>),
+    portabilityPromotion: mergePortabilityPromotion(
+      (raw as Partial<LoopkitConfig>).portabilityPromotion,
+      DEFAULTS.portabilityPromotion as Required<NonNullable<LoopkitConfig['portabilityPromotion']>>,
+    ),
   };
 }
 
@@ -1618,6 +1639,20 @@ function mergeExecution(
   }
   return {
     detachedDispatch: typeof r['detachedDispatch'] === 'boolean' ? r['detachedDispatch'] : defaults.detachedDispatch,
+  };
+}
+
+function mergePortabilityPromotion(
+  raw: LoopkitConfig['portabilityPromotion'] | undefined,
+  defaults: Required<NonNullable<LoopkitConfig['portabilityPromotion']>>,
+): LoopkitConfig['portabilityPromotion'] {
+  if (!raw) return { ...defaults };
+  const r = raw as Record<string, unknown>;
+  if ('enabled' in r && typeof r['enabled'] !== 'boolean') {
+    throw new Error(`loopkit.config.json: portabilityPromotion.enabled must be a boolean (got ${JSON.stringify(r['enabled'])})`);
+  }
+  return {
+    enabled: typeof r['enabled'] === 'boolean' ? r['enabled'] : defaults.enabled,
   };
 }
 
