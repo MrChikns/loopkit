@@ -32,7 +32,7 @@ import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
 import { runDoctor, defaultPidProbe, detectDistDrift, DistDriftResult } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
-import { captureIntent, approveOrReject, acceptItem, VerbError } from './verbs.js';
+import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
 import {
   startSession, heartbeatSession, endSession, claimItems, releaseItems,
   readCurrentSession, writeCurrentSession, clearCurrentSession,
@@ -132,6 +132,7 @@ Commands:
   slo [--json]                         Print SLO board
   brief [--json]                       Deterministic daily ops brief
   approve|reject <item> [--trail "<text>"]  Operator approve/reject a parked spine item
+  portability <item> "<reply>" [--by <actor>] [--trail "<text>"]  Confirm a portability-nudge reply ("applies to: <targets> | none")
   costs [--by loop|provider|day] [--json]   Per-loop/provider/day spend (cost.usage)
   quota [--json]                       Unified subscription-quota view: utilization + capacity/runway
   verdicts [--json]                    Judge calibration: verdict rows + agreement stats
@@ -556,6 +557,36 @@ async function cmdAccept(rest: string[]): Promise<void> {
   } catch (e) {
     if (e instanceof VerbError) {
       console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
+
+async function cmdPortability(rest: string[]): Promise<void> {
+  const positionalArgs = positionals(rest, ['--by', '--trail']);
+  const rawId = positionalArgs[0];
+  const replyBody = positionalArgs[1];
+  if (!rawId || replyBody === undefined) {
+    console.error('Usage: loopctl portability <WI-NNN> "<reply body>" [--by <actor>] [--trail "<text>"]');
+    process.exit(1);
+  }
+  const by = getFlag(rest, '--by');
+  const trailText = getFlag(rest, '--trail');
+
+  try {
+    const { outcome, message } = await amendPortability(LEDGER_DIR, rawId, replyBody, {
+      ...(by !== undefined ? { by } : {}),
+      ...(trailText !== undefined ? { trail: trailText } : {}),
+    });
+    if (outcome === 'rejected') {
+      console.error(message);
+      process.exit(1);
+    }
+    console.log(message);
+  } catch (e) {
+    if (e instanceof VerbError) {
+      console.error(`Error: ${e.message}`);
       process.exit(1);
     }
     throw e;
@@ -1592,6 +1623,10 @@ async function main(): Promise<void> {
 
     case 'accept':
       await cmdAccept(rest);
+      break;
+
+    case 'portability':
+      await cmdPortability(rest);
       break;
 
     case 'compact':

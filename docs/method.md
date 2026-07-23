@@ -75,6 +75,13 @@ it back. The [operating-model](operating-model.md) makes this the sequencing rul
 own growth — contracts land early because they are expensive to change, runtime lands only when
 its posture is actually needed, and *nothing claims to exist before it survives its own gate.*
 
+The certification's fourth line — *does this pattern apply anywhere else?* — used to be a nudge
+into the void: the reactor asked, but no event ever closed the loop, so a typed reply just sat
+unparsed in the thread. ADR-009 gives it a real completion path (`loopctl portability`, an
+appended `item.certification-amended`), the same verb-appends-an-event shape as every other
+operator write — so "harvest portable patterns at boundaries" is now a deterministic write, not a
+hope that someone reads the thread.
+
 ## Parks and intent-format escalations
 
 The whole point of routing attention is that the plane **stops** for the calls a human should make

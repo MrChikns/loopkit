@@ -81,14 +81,21 @@ test('isPortabilityRequired: ADR-bearing (decision-id / ADR-NNN) and incident-fi
 });
 
 test('parsePortabilityTargets: extracts named targets, treats none/blank/absent as empty', () => {
-  assert.deepEqual(parsePortabilityTargets('applies to: acme-web, acme-mobile'), ['acme-web', 'acme-mobile']);
-  assert.deepEqual(parsePortabilityTargets('applies to: acme-web'), ['acme-web']);
-  assert.deepEqual(parsePortabilityTargets('applies to: none'), []);
-  assert.deepEqual(parsePortabilityTargets('none'), []);
-  assert.deepEqual(parsePortabilityTargets(''), []);
-  assert.deepEqual(parsePortabilityTargets(undefined), []);
+  // ADR-009: parsePortabilityTargets is now the single strict validating parser, returning
+  // {targets, none, errors} rather than a bare array — see the dedicated ADR-009 parser suite
+  // (portability-parser.test.ts) for the full grammar coverage. This test just pins the
+  // pre-existing lenient/back-compat reads the reactor relies on.
+  assert.deepEqual(parsePortabilityTargets('applies to: acme-web, acme-mobile').targets, ['acme-web', 'acme-mobile']);
+  assert.deepEqual(parsePortabilityTargets('applies to: acme-web').targets, ['acme-web']);
+  assert.deepEqual(parsePortabilityTargets('applies to: none').targets, []);
+  assert.equal(parsePortabilityTargets('applies to: none').none, true);
+  assert.deepEqual(parsePortabilityTargets('none').targets, []);
+  assert.deepEqual(parsePortabilityTargets('').targets, []);
+  assert.deepEqual(parsePortabilityTargets('').errors, ['empty body']);
+  assert.deepEqual(parsePortabilityTargets(undefined).targets, []);
+  assert.deepEqual(parsePortabilityTargets(undefined).errors, []);
   // Tolerates a bare comma list without the marker.
-  assert.deepEqual(parsePortabilityTargets('acme-web , acme-ops'), ['acme-web', 'acme-ops']);
+  assert.deepEqual(parsePortabilityTargets('acme-web , acme-ops').targets, ['acme-web', 'acme-ops']);
 });
 
 // ---------------------------------------------------------------------------
