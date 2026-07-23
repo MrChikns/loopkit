@@ -277,6 +277,12 @@ export interface AmendPortabilityOptions {
   by?: string;
   /** Overrides the msg.in trail text; defaults to the raw reply body. */
   trail?: string;
+  /**
+   * Caller-supplied idempotency key (e.g. a bridge's outbound message id). A retry that submits
+   * the SAME commandId for the SAME item no-ops — no duplicate `item.certification-amended` /
+   * `msg.in` pair is appended — instead of returning the original result verbatim.
+   */
+  commandId?: string;
 }
 
 export type AmendPortabilityOutcome = 'amended' | 'no-op' | 'rejected';
@@ -289,6 +295,9 @@ export interface AmendPortabilityResult {
   portability?: string;
   /** The parsed target names, present only when outcome === 'amended'. */
   targets?: string[];
+  /** True when this call short-circuited on a `commandId` already seen for this item — nothing
+   *  was appended; the returned fields mirror the original successful amendment. */
+  replay?: boolean;
 }
 
 /**
@@ -317,6 +326,27 @@ export async function amendPortability(
 
   return withLock(ledgerDir, async (tx) => {
     const allEvents = await tx.loadAll();
+
+    // Idempotency replay: a retry carrying the SAME commandId as an already-applied amendment
+    // on this item no-ops rather than appending a second [amendedEv, msgIn] pair — checked
+    // before anything else so a replay never re-runs precondition/parse/registration work.
+    if (opts.commandId) {
+      const prior = allEvents.find(e => e.type === 'item.certification-amended' && e.item === wiId
+        && typeof (e.data as { commandId?: unknown }).commandId === 'string'
+        && (e.data as { commandId?: string }).commandId === opts.commandId);
+      if (prior) {
+        const pd = prior.data as { portability?: string; targets?: string[] };
+        return {
+          wiId,
+          outcome: 'amended',
+          message: `${wiId}: portability amendment already applied for commandId ${opts.commandId} (replay no-op)`,
+          portability: pd.portability,
+          targets: pd.targets,
+          replay: true,
+        };
+      }
+    }
+
     const result = fold(allEvents);
 
     const rec: ItemRecord | undefined = result.items.get(wiId);
@@ -360,13 +390,22 @@ export async function amendPortability(
     }
 
     const portability = parsed.targets.length === 0 ? 'applies to: none' : `applies to: ${parsed.targets.join(', ')}`;
+    // Persist the RESOLVED targetId alongside each name (never just the mutable name) — this is
+    // what lets the reactor's promotion-dedup key on (source item, target id): a target rename
+    // followed by a re-amendment under the new name still carries the SAME id here, so it can
+    // never mint a second sibling promotion for what is really the same target. Safe to assert
+    // non-null: every entry in parsed.targets just passed the unknown-target check above against
+    // this same `result` snapshot.
+    const targetIds = parsed.targets.map(t => result.targets.byName(t)!.targetId);
     const msgIn = makeEvent('cli', wiId, 'msg.in', { text: opts.trail ?? replyBody });
     const amendedEv = makeEvent('cli', wiId, 'item.certification-amended', {
       field: 'portability',
       portability,
       targets: parsed.targets,
+      targetIds,
       by,
       inReplyTo: msgIn.id,
+      ...(opts.commandId ? { commandId: opts.commandId } : {}),
     });
     await tx.append([amendedEv, msgIn]);
     return { wiId, outcome: 'amended', message: `Amended ${wiId} portability: ${portability}`, portability, targets: parsed.targets };

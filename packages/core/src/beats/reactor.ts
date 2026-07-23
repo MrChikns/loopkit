@@ -939,17 +939,27 @@ async function stepPortabilityPromotion(
         if (targets.length === 0) continue;
 
         const productShaped = isProductShapedSource(rec);
-        for (const targetName of targets) {
+        for (const [idx, targetName] of targets.entries()) {
           // Never promote onto the item's OWN target (that's not cross-target).
           const ownTarget = rec.target;
           if (ownTarget && targetName === ownTarget) continue;
 
-          // Resolve against the registered targets — an unregistered name captures nothing
-          // (surfaced in the detail; the operator can register it and the promotion fires next beat).
-          const targetRec = foldResult.targets.byName(targetName);
+          // Resolve against the registered targets — prefer the id the amend verb persisted
+          // (cert.targetIds, same order as the parsed name list) over a fresh byName scan, since
+          // an id survives a target rename that a name-only lookup wouldn't. Legacy amendments
+          // (written before targetIds existed) fall back to the name scan. Either way, an
+          // unregistered name captures nothing (surfaced in the detail; the operator can
+          // register it and the promotion fires next beat).
+          const persistedId = cert?.targetIds?.[idx];
+          const targetRec = (persistedId ? foldResult.targets.byId(persistedId) : undefined)
+            ?? foldResult.targets.byName(targetName);
           if (!targetRec) { skippedUnregistered.push(`${rec.id}→${targetName}`); continue; }
 
-          const sourceStamp = `portability:${rec.id}:${targetName}`;
+          // Keyed on the target's immutable id, NOT its mutable name — a rename followed by a
+          // re-amendment under the new name resolves to the same id here, so it can never mint a
+          // duplicate sibling promotion for what is really the same target (once-per-(source,
+          // target-id), not once-per-(source, target-name)).
+          const sourceStamp = `portability:${rec.id}:${targetRec.targetId}`;
           if (promotedPairs.has(sourceStamp)) continue;
           promotedPairs.add(sourceStamp);
 

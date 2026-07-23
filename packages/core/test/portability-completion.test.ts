@@ -19,12 +19,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
-import { makeEvent, LedgerEvent, ItemCertificationAmendedData, parsePortabilityTargets } from '../src/schema.js';
+import {
+  makeEvent, LedgerEvent, ItemCertificationAmendedData, parsePortabilityTargets,
+  MAX_PORTABILITY_BODY_LEN, MAX_PORTABILITY_TARGETS,
+} from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { fold } from '../src/fold.js';
 import { amendPortability, VerbError } from '../src/verbs.js';
 import { runReactor } from '../src/beats/reactor.js';
 import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
+import { fallbackTargetId } from '../src/target.js';
 
 function withTempLedger<T>(fn: (ledgerDir: string) => Promise<T>): Promise<T> {
   const base = mkdtempSync(join(tmpdir(), 'loopkit-adr009-'));
@@ -100,6 +104,22 @@ test('parsePortabilityTargets: duplicates are de-duplicated silently (no error)'
   assert.deepEqual(r.errors, []);
 });
 
+test('parsePortabilityTargets: an oversized body is rejected before any splitting/looping', () => {
+  const oversized = 'a'.repeat(MAX_PORTABILITY_BODY_LEN + 1);
+  const r = parsePortabilityTargets(oversized);
+  assert.deepEqual(r.targets, []);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0]!, /body too long/);
+});
+
+test('parsePortabilityTargets: more than MAX_PORTABILITY_TARGETS entries is rejected as an error', () => {
+  const many = Array.from({ length: MAX_PORTABILITY_TARGETS + 1 }, (_, i) => `t${i}`).join(', ');
+  const r = parsePortabilityTargets(many);
+  assert.deepEqual(r.targets, []);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0]!, /too many targets/);
+});
+
 test('parsePortabilityTargets: back-compat — pre-ADR-009 merge-time lenient notes still parse cleanly', () => {
   // This is the exact shape existing item.merged.certification.portability fixtures use
   // (see portability-promotion.test.ts) — the rewrite must not regress the reactor's tolerant read.
@@ -170,6 +190,92 @@ test('amendPortability: unknown target rejects the whole amendment — no amendm
 
     const rec = fold(events).items.get('WI-101')!;
     assert.equal(rec.mergeCertification?.portability, undefined, 'no partial amendment leaked onto the record');
+  }));
+
+test('amendPortability: target-name resolution is case-insensitive (ADR-009)', () =>
+  withTempLedger(async (ledgerDir) => {
+    await appendEvents(ledgerDir, [
+      // Registered under a mixed-case display name.
+      makeEvent('cli', 'Acme-Web', 'target.registered', {
+        name: 'Acme-Web', repoPath: '/tmp/Acme-Web', manifestHash: 'h', defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-106', 'item.captured', { source: 'cli', text: 'implement ADR-042' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-106', 'item.queued', { spec: 'implement ADR-042' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-106', 'item.merged', {
+        commit: 'abc', certification: { couldBreak: 'x', detection: 'y', rollback: 'z' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    // parsePortabilityTargets always lower-cases; the registered name is mixed-case — byName
+    // must fold case on both sides or every note naming this target gets rejected as "unknown".
+    const res = await amendPortability(ledgerDir, 'WI-106', 'applies to: acme-web');
+    assert.equal(res.outcome, 'amended');
+    assert.deepEqual(res.targets, ['acme-web']);
+  }));
+
+test('amendPortability: persists the resolved targetId alongside each target name', () =>
+  withTempLedger(async (ledgerDir) => {
+    await appendEvents(ledgerDir, [
+      targetRegistered('acme-web', '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-107', 'item.captured', { source: 'cli', text: 'implement ADR-042' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-107', 'item.queued', { spec: 'implement ADR-042' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-107', 'item.merged', {
+        commit: 'abc', certification: { couldBreak: 'x', detection: 'y', rollback: 'z' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    await amendPortability(ledgerDir, 'WI-107', 'applies to: acme-web');
+    const events = await loadAllEvents(ledgerDir);
+    const amended = events.find(e => e.type === 'item.certification-amended')!;
+    const expectedId = fallbackTargetId('/tmp/acme-web');
+    assert.deepEqual((amended.data as unknown as ItemCertificationAmendedData).targetIds, [expectedId]);
+
+    const rec = fold(events).items.get('WI-107')!;
+    assert.deepEqual(rec.mergeCertification?.targetIds, [expectedId]);
+  }));
+
+test('amendPortability: an oversized reply body is rejected — no amendment event appended', () =>
+  withTempLedger(async (ledgerDir) => {
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'WI-108', 'item.captured', { source: 'cli', text: 'implement ADR-042' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-108', 'item.queued', { spec: 'implement ADR-042' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-108', 'item.merged', {
+        commit: 'abc', certification: { couldBreak: 'x', detection: 'y', rollback: 'z' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    const res = await amendPortability(ledgerDir, 'WI-108', 'a'.repeat(MAX_PORTABILITY_BODY_LEN + 1));
+    assert.equal(res.outcome, 'rejected');
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'item.certification-amended').length, 0);
+    for (const e of events) assert.ok(JSON.stringify(e).length < 4096, 'no event line approaches the ledger cap');
+  }));
+
+test('amendPortability: a retry with the same commandId no-ops instead of appending a duplicate amendment', () =>
+  withTempLedger(async (ledgerDir) => {
+    await appendEvents(ledgerDir, [
+      targetRegistered('acme-web', '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-109', 'item.captured', { source: 'cli', text: 'implement ADR-042' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-109', 'item.queued', { spec: 'implement ADR-042' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-109', 'item.merged', {
+        commit: 'abc', certification: { couldBreak: 'x', detection: 'y', rollback: 'z' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    const res1 = await amendPortability(ledgerDir, 'WI-109', 'applies to: acme-web', { commandId: 'cmd-1' });
+    assert.equal(res1.outcome, 'amended');
+
+    // Retry with the SAME commandId but a different body — the replay short-circuits before
+    // parsing, so the original amendment's own result comes back, not a re-parse of the retry.
+    const res2 = await amendPortability(ledgerDir, 'WI-109', 'none', { commandId: 'cmd-1' });
+    assert.equal(res2.outcome, 'amended');
+    assert.equal(res2.replay, true);
+    assert.equal(res2.portability, 'applies to: acme-web');
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'item.certification-amended').length, 1, 'exactly one amendment event');
+    assert.equal(events.filter(e => e.type === 'msg.in' && e.item === 'WI-109').length, 1, 'exactly one msg.in trail');
   }));
 
 test('amendPortability: a malformed reply rejects — no amendment event, only msg.out', () =>
@@ -370,13 +476,57 @@ test('reactor e2e (ADR-009): nudge fires on a merge missing the note, amendPorta
     await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
     events = await loadAllEvents(ledgerDir);
     const folded = fold(events);
-    const sibling = [...folded.items.values()].find(r => r.source === 'portability:WI-300:acme-web');
+    const acmeWebTargetId = fallbackTargetId('/tmp/acme-web');
+    const sibling = [...folded.items.values()].find(r => r.source === `portability:WI-300:${acmeWebTargetId}`);
     assert.ok(sibling, 'a sibling item was captured for the named target once the amendment landed');
     assert.equal(sibling!.target, 'acme-web');
 
     const nudgesAfter = events.filter(e => e.item === 'WI-300' && e.type === 'msg.out'
       && String((e.data as { text?: string }).text ?? '').startsWith('portability-nudge:'));
     assert.equal(nudgesAfter.length, 1, 'the amendment silences further nudges — still exactly one from beat 1');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reactor e2e (ADR-009): a target rename followed by a re-amendment does not mint a duplicate sibling promotion', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeReactorEnv();
+  try {
+    await appendEvents(ledgerDir, [
+      targetRegistered('acme-web', '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-310', 'item.captured', { source: 'cli', text: 'tooling dedup guard', lane: 'engineering' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-310', 'item.queued', { spec: 'tooling dedup guard', lane: 'engineering' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-310', 'item.merged', {
+        commit: 'abc', certification: { couldBreak: 'x', detection: 'y', rollback: 'z' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    await amendPortability(ledgerDir, 'WI-310', 'applies to: acme-web');
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+
+    const expectedId = fallbackTargetId('/tmp/acme-web');
+    let folded = fold(await loadAllEvents(ledgerDir));
+    let siblings = [...folded.items.values()].filter(r => (r.source ?? '').startsWith('portability:WI-310:'));
+    assert.equal(siblings.length, 1, 'one sibling promoted under the original name');
+    assert.equal(siblings[0]!.source, `portability:WI-310:${expectedId}`);
+
+    // Rename: re-register the SAME repoPath under a NEW display name. fold.ts's identity pin
+    // (byRepoPath revival) keeps the ORIGINAL targetId — it never mints a second target record.
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'acme-site', 'target.registered', {
+        name: 'acme-site', repoPath: '/tmp/acme-web', manifestHash: 'h', defaultBranch: 'main',
+      }, '2026-01-02T00:00:00Z'),
+    ]);
+
+    // Re-amend under the NEW name — this is the retry a rename forces on the operator.
+    const res2 = await amendPortability(ledgerDir, 'WI-310', 'applies to: acme-site');
+    assert.equal(res2.outcome, 'amended');
+
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+    folded = fold(await loadAllEvents(ledgerDir));
+    siblings = [...folded.items.values()].filter(r => (r.source ?? '').startsWith('portability:WI-310:'));
+    assert.equal(siblings.length, 1, 'still exactly one sibling — the rename + re-amendment must not mint a duplicate');
+    assert.equal(siblings[0]!.source, `portability:WI-310:${expectedId}`, 'keyed on the immutable target id, unaffected by the rename');
   } finally {
     cleanup();
   }

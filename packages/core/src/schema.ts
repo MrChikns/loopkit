@@ -301,6 +301,17 @@ export interface PortabilityParseResult {
 const PORTABILITY_TARGET_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
+ * Hard bounds enforced by {@link parsePortabilityTargets} BEFORE any splitting/looping, so a
+ * pathological reply can't grow the `item.certification-amended` event past the ledger's
+ * MAX_EVENT_BYTES cap (ledger.ts) — `shrinkEventToFit` only ever clips the longest *string*
+ * field, so an oversized `targets`/`targetIds` array would never get shrunk and could push the
+ * serialized event over the atomic-append limit. Both are well under 4096 to leave headroom for
+ * the rest of the envelope (id/ts/actor/targetIds/commandId/etc).
+ */
+export const MAX_PORTABILITY_BODY_LEN = 2000;
+export const MAX_PORTABILITY_TARGETS = 50;
+
+/**
  * ADR-009 — the ONE validating parser for a certification.portability note (grammar in
  * docs/decisions/ADR-009-portability-completion.md). Strict about shape (empty body is always an
  * error; each comma-separated entry must match `target := [A-Za-z0-9._-]{1,64}`) but TOLERANT about
@@ -316,12 +327,20 @@ export function parsePortabilityTargets(portability: string | undefined): Portab
   const marker = /^applies to:\s*/i.exec(trimmed);
   const body = (marker ? trimmed.slice(marker[0].length) : trimmed).trim();
   if (!body) return { targets: [], none: false, errors: ['empty body'] };
+  if (body.length > MAX_PORTABILITY_BODY_LEN) {
+    return { targets: [], none: false, errors: [`body too long (${body.length} chars, max ${MAX_PORTABILITY_BODY_LEN})`] };
+  }
   if (/^none$/i.test(body)) return { targets: [], none: true, errors: [] };
+
+  const rawEntries = body.split(',').map(s => s.trim());
+  if (rawEntries.length > MAX_PORTABILITY_TARGETS) {
+    return { targets: [], none: false, errors: [`too many targets (${rawEntries.length}, max ${MAX_PORTABILITY_TARGETS})`] };
+  }
 
   const errors: string[] = [];
   const seen = new Set<string>();
   const targets: string[] = [];
-  for (const raw of body.split(',').map(s => s.trim())) {
+  for (const raw of rawEntries) {
     if (!raw) { errors.push('empty target name'); continue; }
     if (/^none$/i.test(raw)) { errors.push(`stray "none" inside a target list: "${raw}"`); continue; }
     if (!PORTABILITY_TARGET_RE.test(raw)) { errors.push(`malformed target name: "${raw}"`); continue; }
@@ -379,10 +398,25 @@ export interface ItemCertificationAmendedData {
   portability: string;
   /** Parsed target names (lower-cased canonical). Empty ⇒ none. */
   targets: string[];
+  /**
+   * Resolved `targetId`s, same order/length as `targets` — captured at amend time by the verb
+   * (see verbs.ts amendPortability) so promotion-dedup (reactor.ts stepPortabilityPromotion) can
+   * key on the immutable id instead of the mutable display name: a target rename followed by a
+   * re-amendment under the new name still resolves to the same id, so it can never mint a second
+   * sibling promotion for what is really the same target. Absent on amendments written before
+   * this field existed — callers fall back to resolving `targets` by name in that case.
+   */
+  targetIds?: string[];
   /** Actor stamp — 'operator' for CLI/console, bridge ids otherwise. */
   by: string;
   /** Dedup link to the msg.in trail (mirrors approve/reject). */
   inReplyTo?: string;
+  /**
+   * Caller-supplied idempotency key (e.g. a bridge's outbound message id). A retry that submits
+   * the same `commandId` for the same item no-ops instead of appending a duplicate amendment +
+   * msg.in trail — see amendPortability's replay check in verbs.ts.
+   */
+  commandId?: string;
 }
 export interface ItemAcceptedData {
   by: string;
