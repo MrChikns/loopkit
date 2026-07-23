@@ -53,10 +53,12 @@ import { createRequire } from 'node:module';
 // renderItemTimeline (legacy non-WI item ids, e.g. CONV-N) still backs a live route from this
 // module. /activity and the write-verb error/404 envelopes converged onto opsPages.ts's
 // opsui-shelled renderActivityPage/renderErrorPage/renderNotFoundPage (WI-055 item 1); the
-// remaining old renderers (renderCommand/Missions/Acceptance/System/Analytics/Knowledge,
+// remaining old renderers (renderMissions/Acceptance/System/Analytics/Knowledge,
 // tierConfigFromLoopkitConfig) are no longer called here; they stay exported from views.ts as
 // the console package's public API (index.ts re-exports them) — pruning that surface is a
-// separate API decision, not this cleanup.
+// separate API decision, not this cleanup. (renderCommand itself — the pre-opsPages Command
+// renderer — was dead code with no live caller and was deleted; renderCommandPage is the only
+// Command-page renderer now.)
 import {
   renderItemTimeline,
   SegmentInfo,

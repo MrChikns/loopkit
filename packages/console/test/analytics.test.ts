@@ -1,7 +1,7 @@
 /**
  * analytics.test.ts — the Analytics observability board: window scoping (follow-the-picker vs
- * fast-lane vs label-only), conditional quota surfacing on Command, interval honesty on every
- * pane, and graceful empty-ledger rendering for every widget (a fresh plane starts with an
+ * fast-lane vs label-only), the quotaNotice chip/banner threshold contract, interval honesty on
+ * every pane, and graceful empty-ledger rendering for every widget (a fresh plane starts with an
  * empty ledger — nothing here may crash on one).
  */
 
@@ -11,7 +11,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { fold, makeEvent, LedgerEvent, ROUTING_CONFIG_DEFAULTS } from '@loopkit/core';
+import { fold, makeEvent, LedgerEvent, QuotaWindowRow, ROUTING_CONFIG_DEFAULTS } from '@loopkit/core';
 
 import {
   renderAnalytics,
@@ -26,11 +26,9 @@ import {
   QUOTA_WARN_PCT,
   QUOTA_CRIT_PCT,
 } from '../src/analytics.js';
-import { renderCommand } from '../src/views.js';
 
 const NOW = new Date('2026-07-02T00:00:00.000Z');
 const URL_DEFAULT = new URL('http://localhost/analytics');
-const COMMAND_URL = new URL('http://localhost/command');
 
 function urlWith(query: string): URL {
   return new URL(`http://localhost/analytics${query}`);
@@ -301,34 +299,34 @@ test('salvageEntries: parses interruption trail messages and classifies outcomes
 // Quota thresholds — the boundary contract (nothing / chip / banner)
 // ---------------------------------------------------------------------------
 
-test('quota thresholds: 59% stays entirely off the Command view', () => {
-  const events = quotaLedger(59);
-  const html = renderCommand(fold(events), NOW, events, COMMAND_URL);
-  assert.ok(!html.includes('quota-chip'));
-  assert.ok(!html.includes('quota-banner'));
+function quotaRow(usedPct: number): QuotaWindowRow {
+  return { provider: 'claude', window: 'five_hour', usedPct, resetsAt: '2026-07-02T14:30:00.000Z', ts: NOW.toISOString(), readingAgeHours: 1 };
+}
+
+test('quotaNotice: 59% renders neither chip nor banner', () => {
+  const notice = quotaNotice([quotaRow(59)]);
+  assert.equal(notice.chip, undefined);
+  assert.equal(notice.banner, undefined);
 });
 
-test('quota thresholds: exactly 60% renders the compact warning chip linking to the quota panel', () => {
-  const events = quotaLedger(60);
-  const html = renderCommand(fold(events), NOW, events, COMMAND_URL);
-  assert.match(html, /class="quota-chip quota-chip--warning" href="\/analytics#quota"/);
-  assert.match(html, /claude 5h: 60% · resets 14:30/);
-  assert.ok(!html.includes('quota-banner'));
+test('quotaNotice: exactly 60% renders the compact warning chip linking to the quota panel', () => {
+  const notice = quotaNotice([quotaRow(60)]);
+  assert.match(notice.chip!, /class="quota-chip quota-chip--warning" href="\/analytics#quota"/);
+  assert.match(notice.chip!, /claude 5h: 60% · resets 14:30/);
+  assert.equal(notice.banner, undefined);
 });
 
-test('quota thresholds: exactly 85% renders the critical banner (resets first, panel link), no chip', () => {
-  const events = quotaLedger(85);
-  const html = renderCommand(fold(events), NOW, events, COMMAND_URL);
-  assert.match(html, /class="quota-banner" role="alert"/);
-  assert.match(html, /LLM quota critical — claude 5h at 85%/);
-  assert.match(html, /resets 14:30/);
-  assert.ok(!html.includes('quota-chip'));
+test('quotaNotice: exactly 85% renders the critical banner (resets first, panel link), no chip', () => {
+  const notice = quotaNotice([quotaRow(85)]);
+  assert.match(notice.banner!, /class="quota-banner" role="alert"/);
+  assert.match(notice.banner!, /LLM quota critical — claude 5h at 85%/);
+  assert.match(notice.banner!, /resets 14:30/);
+  assert.equal(notice.chip, undefined);
 });
 
-test('quota banner: names the dispatch pause when the quota-pressure gate threshold is tripped', () => {
-  const events = quotaLedger(90);
-  const html = renderCommand(fold(events), NOW, events, COMMAND_URL, undefined, undefined, 80);
-  assert.match(html, /Dispatch pauses new builds at 80% — quota-pressure gate active\./);
+test('quotaNotice: names the dispatch pause when the quota-pressure gate threshold is tripped', () => {
+  const notice = quotaNotice([quotaRow(90)], 80);
+  assert.match(notice.banner!, /Dispatch pauses new builds at 80% — quota-pressure gate active\./);
 });
 
 test('quotaNotice: worst window across providers drives the level', () => {

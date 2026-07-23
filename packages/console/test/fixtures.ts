@@ -142,28 +142,6 @@ export function tieredMergeLedger(): LedgerEvent[] {
 }
 
 /**
- * Two decision parks whose approve outcomes differ — and whose approve buttons must say so:
- * WI-010 parked AFTER a build that recorded its branch (approving merges that branch);
- * WI-011 parked BEFORE any build was dispatched (approving unparks + requeues for a build).
- */
-export function decisionParkVariantsLedger(): LedgerEvent[] {
-  return [
-    // WI-010: parked with a built branch on record
-    makeEvent('cli', 'WI-010', 'item.captured', { source: 'cli', text: 'swap the storage adapter' }, '2026-07-01T13:00:00.000Z'),
-    makeEvent('reactor', 'WI-010', 'item.routed', { route: 'build', reply: 'queuing' }, '2026-07-01T13:01:00.000Z'),
-    makeEvent('reactor', 'WI-010', 'item.queued', { spec: 'swap the storage adapter' }, '2026-07-01T13:02:00.000Z'),
-    makeEvent('dispatch', 'WI-010', 'build.dispatched', { attempt: 1, branch: 'work/WI-010', worktree: '/tmp/wt-WI-010' }, '2026-07-01T13:03:00.000Z'),
-    makeEvent('conductor', 'WI-010', 'item.parked', { reason: 'schema boundary — needs an operator call', parkKind: 'decision' }, '2026-07-01T13:10:00.000Z'),
-
-    // WI-011: parked before any build was dispatched
-    makeEvent('cli', 'WI-011', 'item.captured', { source: 'cli', text: 'delete the legacy exporter' }, '2026-07-01T14:00:00.000Z'),
-    makeEvent('reactor', 'WI-011', 'item.routed', { route: 'build', reply: 'queuing' }, '2026-07-01T14:01:00.000Z'),
-    makeEvent('reactor', 'WI-011', 'item.queued', { spec: 'delete the legacy exporter' }, '2026-07-01T14:02:00.000Z'),
-    makeEvent('reactor', 'WI-011', 'item.parked', { reason: 'irreversible delete — confirm first', parkKind: 'decision' }, '2026-07-01T14:03:00.000Z'),
-  ];
-}
-
-/**
  * A now-relative ledger that drives the Command page's Glance footnotes into the states whose
  * canonical copy has drifted before (WI-053 shell-adoption guard). The fold's time windows
  * (24h flow, 7d reliability, recent-merged for acceptance) are measured against render-time
