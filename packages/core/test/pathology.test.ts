@@ -378,6 +378,97 @@ test('pathology: blockedWaitTimeoutHours is configurable and respected', async (
   }
 });
 
+test('pathology: wait-timeout escalation is one-shot across repeated beats (no re-parking every interval)', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-066', { attempt: 1 }),
+      makeEvent('reactor', 'WI-066', 'item.blocked', { onItem: 'WI-067', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
+      makeEvent('reactor', 'WI-067', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
+      makeEvent('reactor', 'WI-067', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
+      // WI-067 (the blocker) never merges or terminates — it just sits building forever.
+    ]);
+
+    const reactorArgs = {
+      repoRoot, ledgerDir, autonomy: 'on' as const,
+      provider: null,
+      config: makeTestConfig({ breakerN: 3 }),
+    };
+
+    // Beat 1: 25 hours after the park — past the 24h default, escalation should fire.
+    await runReactor({ ...reactorArgs, now: new Date('2026-01-02T01:00:03Z').getTime() });
+
+    // Beat 2: another full timeout window later, blocker STILL hasn't merged. Under the bug,
+    // parkedAt was reset by beat 1's re-park, so blockedOn+the age check alone would fire a
+    // second escalation here.
+    await runReactor({ ...reactorArgs, now: new Date('2026-01-03T02:00:03Z').getTime() });
+
+    // Beat 3: yet another window later, for good measure.
+    await runReactor({ ...reactorArgs, now: new Date('2026-01-04T03:00:03Z').getTime() });
+
+    const events = await loadAllEvents(ledgerDir);
+    const reparked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-066' && e.actor === 'reactor');
+    assert.equal(reparked.length, 1, 'escalation must fire exactly once, not on every subsequent beat');
+
+    const escalationNotes = events.filter(e => e.type === 'msg.out' && e.item === 'WI-066' && e.actor === 'reactor'
+      && (e.data as { text?: string }).text?.includes('wait-timeout'));
+    assert.equal(escalationNotes.length, 1, 'must surface exactly one wait-timeout thread note');
+
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-066')?.state, 'parked');
+    assert.equal(folded.items.get('WI-066')?.parkKind, 'decision', 'stays escalated, not silently re-diagnosed');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+test('pathology: blocker merging after wait-timeout escalation does NOT auto-requeue past the decision park', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-068', { attempt: 1 }),
+      makeEvent('reactor', 'WI-068', 'item.blocked', { onItem: 'WI-069', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
+      makeEvent('reactor', 'WI-069', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
+      makeEvent('reactor', 'WI-069', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
+      // WI-069 (the blocker) is still building at the time the timeout fires.
+    ]);
+
+    const reactorArgs = {
+      repoRoot, ledgerDir, autonomy: 'on' as const,
+      provider: null,
+      config: makeTestConfig({ breakerN: 3 }),
+    };
+
+    // Beat 1: past the 24h default — escalation fires, victim re-parks as parkKind:'decision'.
+    await runReactor({ ...reactorArgs, now: new Date('2026-01-02T01:00:03Z').getTime() });
+
+    const midFold = fold(await loadAllEvents(ledgerDir));
+    assert.equal(midFold.items.get('WI-068')?.parkKind, 'decision', 'pre-condition: escalation fired');
+    assert.equal(midFold.items.get('WI-068')?.blockedOn, 'WI-069', 'pre-condition: blockedOn survives the re-park');
+
+    // The blocker merges AFTER the escalation already fired.
+    await seedLedger(ledgerDir, [
+      makeEvent('worker', 'WI-069', 'item.merged', { commit: 'deadbeef' }, '2026-01-02T02:00:00Z'),
+    ]);
+
+    // Beat 2: the blocker is now merged. The buggy release loop matches on blockedOn alone and
+    // would auto-requeue the victim right past the operator's decision park.
+    await runReactor({ ...reactorArgs, now: new Date('2026-01-02T03:00:03Z').getTime() });
+
+    const events = await loadAllEvents(ledgerDir);
+    const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-068' && e.actor === 'reactor');
+    assert.equal(requeued.length, 0, 'must NOT auto-requeue an already-escalated victim just because the blocker later merged');
+
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-068')?.state, 'parked', 'victim stays parked for the operator');
+    assert.equal(folded.items.get('WI-068')?.parkKind, 'decision', 'stays a decision park, not silently released');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 5. items-own-code first failure → requeue once with diagnosis injected
 // ---------------------------------------------------------------------------
