@@ -1354,18 +1354,20 @@ async function stepRoute(
     // step detail so a dropped fictional prefix is visible in the beat log.
     const touchesCorrections: string[] = [];
 
-    // Beat-scoped allocator + idempotency guard for the isDecomp reclassify path below. Seeded
-    // from the persisted fold, then extended synchronously the moment a child is allocated so
-    // two epics reclassified in the same beat (routeOne runs concurrently in chunks, but each
-    // allocation itself is synchronous) can never collide on a WI number or double-queue the
-    // same epic.
+    // Idempotency guard for the isDecomp reclassify path below, seeded from the persisted fold
+    // and extended synchronously the moment a child is requested — two epics reclassified in the
+    // same beat (routeOne runs concurrently in chunks, but each request itself is synchronous)
+    // can never double-request the same epic. The WI NUMBER itself is deliberately NOT allocated
+    // here: this snapshot is taken before the (possibly minutes-long) per-item provider calls
+    // below, so a number picked from it could collide with a concurrent `loopctl new`/`conv new`/
+    // another beat step. Allocation is deferred to append time, under the ledger lock, right
+    // before the fresh fold is re-taken (see the append block below) — WI-134.
     const decomposedEpics = collectDecomposedEpics(foldResult.items.values());
-    let nextDecompNum = foldResult.maxWiNum;
-    const maybeEmitDecompositionChild = (epicId: string, reason: string): LedgerEvent[] => {
-      if (decomposedEpics.has(epicId)) return [];
+    const pendingDecompositions: { epicId: string; reason: string }[] = [];
+    const maybeEmitDecompositionChild = (epicId: string, reason: string): void => {
+      if (decomposedEpics.has(epicId)) return;
       decomposedEpics.add(epicId);
-      nextDecompNum += 1;
-      return makeDecompositionChildEvents(epicId, reason, nextDecompNum).events;
+      pendingDecompositions.push({ epicId, reason });
     };
 
     // Route in PARALLEL chunks of 4 — serial provider calls inside the single-lock beat could
@@ -1573,7 +1575,7 @@ async function stepRoute(
         // child BEFORE the epic's re-park so it never rests off-desk with nothing tracking it.
         if (isDecomp) {
           const reason = parkSpec.replace(/^\s*needs planner decomposition:\s*/i, '').trim() || rec.id;
-          out.push(...maybeEmitDecompositionChild(rec.id, reason));
+          maybeEmitDecompositionChild(rec.id, reason);
         }
         // A park whose reason names a dependency on another in-flight item (e.g.
         // "depends on WI-359") is a wait, not an open question about WHAT to build — the build
@@ -1625,9 +1627,29 @@ async function stepRoute(
       for (const r of results) events.push(...r);
     }
 
-    if (!opts.dryRun && events.length > 0) {
-      await appendEvents(opts.ledgerDir, events);
-      if (events.some((e) => e.type === 'item.queued')) (opts.kickDispatch ?? kickDispatch)(cfg.dispatchKickLabel);
+    if (!opts.dryRun && (events.length > 0 || pendingDecompositions.length > 0)) {
+      await withLock(opts.ledgerDir, async (tx) => {
+        // Decomposition-child WI ids are allocated HERE — fresh fold, under the lock,
+        // immediately before append — mirrors stepArmed/pathology's repair-WI allocation
+        // (WI-134). Re-check each epic against the fresh fold too: a concurrent writer may
+        // have already decomposed it since the beat-start snapshot above.
+        if (pendingDecompositions.length > 0) {
+          const freshEvents = await tx.loadAll();
+          const freshFold = fold(freshEvents);
+          const freshDecomposedEpics = collectDecomposedEpics(freshFold.items.values());
+          let nextDecompNum = freshFold.maxWiNum;
+          for (const { epicId, reason } of pendingDecompositions) {
+            if (freshDecomposedEpics.has(epicId)) continue;
+            freshDecomposedEpics.add(epicId);
+            nextDecompNum += 1;
+            events.push(...makeDecompositionChildEvents(epicId, reason, nextDecompNum).events);
+          }
+        }
+        if (events.length > 0) {
+          await tx.append(events);
+          if (events.some((e) => e.type === 'item.queued')) (opts.kickDispatch ?? kickDispatch)(cfg.dispatchKickLabel);
+        }
+      });
     }
 
     return {
@@ -1692,17 +1714,16 @@ async function stepEngageReplies(
     }
 
     const foldResult = fold(allEvents);
-    // Beat-local WI allocator for sibling spawns. Seeded from the fold (which already reflects any
-    // WIs stepRoute allocated earlier this beat, since that step appended before this one loaded),
-    // extended synchronously per alloc so sequential engagements never collide on a number.
-    let nextWiNum = foldResult.maxWiNum;
-    const allocWi = (): string => {
-      nextWiNum += 1;
-      return `WI-${String(nextWiNum).padStart(3, '0')}`;
-    };
 
     const batch = unanswered.slice(0, ENGAGE_PER_BEAT);
     const events: ReturnType<typeof makeEvent>[] = [];
+    // Sibling-spawn requests collected during engagement — the WI number is deliberately NOT
+    // allocated here (this fold snapshot predates the per-reply provider calls below, which can
+    // run for minutes) but at append time, under the ledger lock, from a freshly re-taken fold —
+    // mirrors stepArmed/pathology's repair-WI allocation and stepRoute's decomposition-child
+    // allocation. Otherwise a concurrent `loopctl new`/`conv new`/another beat step could compute
+    // the same next WI number and silently collide (WI-134).
+    const pendingSiblings: { parentItem: string; spec: string; replyText: string; irt: string }[] = [];
 
     const engageOne = async (reply: UnansweredReply): Promise<LedgerEvent[]> => {
       const out: LedgerEvent[] = [];
@@ -1823,20 +1844,15 @@ async function stepEngageReplies(
           break;
 
         case 'sibling': {
-          const childId = allocWi();
           // convRef (born-from CONV) is wired in S1 with the CONV entity; a sibling here carries
-          // only its parentItem + causation.
-          const capture: Record<string, unknown> = {
-            source: `sibling:${reply.item}`,
-            text: outcome.spec ?? outcome.reply,
+          // only its parentItem + causation. Its WI id is allocated later, at append time (see
+          // pendingSiblings above) — not here.
+          pendingSiblings.push({
             parentItem: reply.item,
-            inReplyTo: irt,
-          };
-          out.push(makeEvent('reactor', childId, 'item.captured', capture as never));
-          out.push(makeEvent('reactor', reply.item, 'msg.out', {
-            text: `${outcome.reply.slice(0, 1800)}\n\n(Spun this off as ${childId} so it stays separate from ${reply.item}.)`,
-            inReplyTo: irt,
-          }));
+            spec: outcome.spec ?? outcome.reply,
+            replyText: outcome.reply.slice(0, 1800),
+            irt,
+          });
           break;
         }
 
@@ -1866,15 +1882,42 @@ async function stepEngageReplies(
       return out;
     };
 
-    // Sequential — bounds the beat and keeps sibling WI allocation race-free.
+    // Sequential — bounds the beat and keeps sibling requests ordered (dedup-free; allocation
+    // itself happens later, under the lock, at append time).
     for (const reply of batch) {
       const r = await engageOne(reply).catch(() => [] as LedgerEvent[]);
       events.push(...r);
     }
 
-    if (!opts.dryRun && events.length > 0) {
-      await appendEvents(opts.ledgerDir, events);
-      if (events.some((e) => e.type === 'item.queued')) (opts.kickDispatch ?? kickDispatch)(cfg.dispatchKickLabel);
+    if (!opts.dryRun && (events.length > 0 || pendingSiblings.length > 0)) {
+      await withLock(opts.ledgerDir, async (tx) => {
+        // Sibling WI ids are allocated HERE — fresh fold, under the lock, immediately before
+        // append — mirrors stepArmed/pathology's repair-WI allocation and stepRoute's
+        // decomposition-child allocation (WI-134).
+        if (pendingSiblings.length > 0) {
+          const freshEvents = await tx.loadAll();
+          const freshFold = fold(freshEvents);
+          let nextWiNum = freshFold.maxWiNum;
+          for (const p of pendingSiblings) {
+            nextWiNum += 1;
+            const childId = `WI-${String(nextWiNum).padStart(3, '0')}`;
+            events.push(makeEvent('reactor', childId, 'item.captured', {
+              source: `sibling:${p.parentItem}`,
+              text: p.spec,
+              parentItem: p.parentItem,
+              inReplyTo: p.irt,
+            } as never));
+            events.push(makeEvent('reactor', p.parentItem, 'msg.out', {
+              text: `${p.replyText}\n\n(Spun this off as ${childId} so it stays separate from ${p.parentItem}.)`,
+              inReplyTo: p.irt,
+            }));
+          }
+        }
+        if (events.length > 0) {
+          await tx.append(events);
+          if (events.some((e) => e.type === 'item.queued')) (opts.kickDispatch ?? kickDispatch)(cfg.dispatchKickLabel);
+        }
+      });
     }
 
     const deferred = unanswered.length - batch.length;
