@@ -54,16 +54,29 @@ function messageList(thread: ThreadCard): string {
 
 function replyForm(thread: ThreadCard): string {
   const replyTo = thread.externalRef ?? '';
-  const replyInput = replyTo
+  // A channel-style externalRef (e.g. 'console') is shared by every console-composer
+  // capture, so posting via /intent+replyTo=<ref> is not addressed to THIS thread — every
+  // console-captured item's reply form would collapse onto the same shared 'console'
+  // address. Post straight at the WI id instead (/item/<id>/reply, which appends a msg.in
+  // on that exact item) so two different console-captured threads' replies land on two
+  // different items. A resolvable per-intent ref (e.g. 'EXT-1') keeps the existing /intent
+  // path, which the router can already thread back to it.
+  const resolvable = replyTo !== '' && isResolvableExternalRef(replyTo);
+  const nextPath = '/threads';
+  const actionUrl = resolvable
+    ? `/intent?next=${esc(encodeURIComponent(nextPath))}`
+    : `/item/${esc(encodeURIComponent(thread.id))}/reply?next=${esc(encodeURIComponent(nextPath))}`;
+  const replyInput = resolvable
     ? `<input type="hidden" name="replyTo" value="${esc(replyTo)}">`
     : '';
-  const nextPath = '/threads';
-  const actionUrl = `/intent?next=${esc(encodeURIComponent(nextPath))}`;
+  // /intent reads the composer's `intent` field; /item/<id>/reply reads `text` (server.ts's
+  // ITEM_REPLY_RE handler) — the field name must match whichever route the form posts to.
+  const fieldName = resolvable ? 'intent' : 'text';
   const inputId = `reply-${esc(thread.id)}`;
   const attachId = `reply-attach-${esc(thread.id)}`;
   return (
     // opsui-composer is a second class so opsui-composer.js hooks paste/drop/count for free.
-    `<form class="opsui-threads__reply opsui-composer" method="post" action="${actionUrl}" enctype="multipart/form-data" data-opsui-action="intent.submit"${replyTo ? ` data-reply-to="${esc(replyTo)}"` : ''}>` +
+    `<form class="opsui-threads__reply opsui-composer" method="post" action="${actionUrl}" enctype="multipart/form-data" data-opsui-action="intent.submit"${resolvable ? ` data-reply-to="${esc(replyTo)}"` : ''}>` +
     replyInput +
     `<label class="opsui-threads__reply-label" for="${inputId}">Reply</label>` +
     `<div class="opsui-composer__chips" hidden></div>` +
@@ -73,7 +86,7 @@ function replyForm(thread: ThreadCard): string {
     `<span class="opsui-composer__count" hidden></span>` +
     `</div>` +
     `<div class="opsui-threads__reply-row">` +
-    `<textarea class="opsui-threads__reply-input" id="${inputId}" name="intent" rows="2" placeholder="Reply…"></textarea>` +
+    `<textarea class="opsui-threads__reply-input" id="${inputId}" name="${fieldName}" rows="2" placeholder="Reply…"></textarea>` +
     `<button class="opsui-threads__reply-btn opsui-btn opsui-btn--primary opsui-btn--sm" type="submit">Send</button>` +
     `</div>` +
     `</form>`
