@@ -1,4 +1,4 @@
-// Acceptance projection — AcceptanceCard. The founder's
+// Acceptance projection — AcceptanceCard. The operator's
 // acceptance desk: every shipped slice awaiting a "works" / "found a problem"
 // verdict, oldest first (debt ordering), each carrying the captured
 // intent it delivered and links to its evidence. Composed ONLY from shared
@@ -20,7 +20,7 @@ import type { ProjectionEnvelope } from './projection-types.ts';
 
 /** The origin filter on the acceptance desk (WI-180): all shipped slices, only those whose
  *  changes land in the target vs the plane, or 'other' — items with no code origin
- *  (founder questions/feedback that shipped no touches). 'other' gives those a findable home
+ *  (operator questions/feedback that shipped no touches). 'other' gives those a findable home
  *  so nothing is hidden between the sub-filters (they used to appear under 'all' only). */
 export type AcceptanceFilter = 'all' | 'target' | 'plane' | 'other';
 
@@ -29,12 +29,12 @@ export type AcceptanceFilter = 'all' | 'target' | 'plane' | 'other';
  *  'mixed'-origin items count under both target and plane, so the buckets need not sum to `all`. */
 export type AcceptanceCounts = { all: number; target: number; plane: number; other: number };
 
-/** One slice awaiting the founder's verdict — AcceptanceItem, narrowed
+/** One slice awaiting the operator's verdict — AcceptanceItem, narrowed
  *  to what the loopkit fold carries (no test script / minute estimate yet). */
 export type AcceptanceItem = {
   id: string;
   title: string;
-  /** The captured intent this slice delivered — shown so the founder tests the right thing. */
+  /** The captured intent this slice delivered — shown so the operator tests the right thing. */
   captured?: string;
   metadata: string[];
   /** Acceptance tier ('must'|'review'|'optional'|'auto') — drives the row's verdict badge. */
@@ -128,7 +128,7 @@ export function isAutoAcceptTier(tier: string | undefined): boolean {
  *  the command board's Accept uses (fold-adapter buildDeliveryStream): `✅ accept <id>`
  *  matches the host app's ACCEPT_VERB_RE and runs `loopctl accept`. No client
  *  dispatcher needed — progressive enhancement, works without JS. `nextPath` returns the
- *  founder to wherever they verdict'd from (defaults to this acceptance desk). 'auto'-tier
+ *  operator to wherever they verdict'd from (defaults to this acceptance desk). 'auto'-tier
  *  items never had anything to test (no code, or plane-internal only) — no verdict actions.
  *  Exported (item-hub link sweep, WI-349) so `item-hub-adapter.ts` reuses this SAME builder
  *  for a merged/accepted item's action region — one source, never a second copy that could
@@ -160,7 +160,7 @@ export function buildAcceptanceVerbActions(
       label: 'Found a problem',
       emphasis: 'danger' as const,
       // No dedicated fail verb exists — a problem is free-text feedback. Open the
-      // composer pre-filled so the founder describes what's wrong; on submit it is
+      // composer pre-filled so the operator describes what's wrong; on submit it is
       // captured as a new item the reactor routes as a repair (feedback loop).
       composer: { prefill: `Problem with ${id} (${title}): ` },
     },
@@ -171,7 +171,7 @@ export function buildAcceptanceVerbActions(
  * Certify-don't-brief block (leader-leader doctrine: "a certification of understanding, not
  * an assertion of completion" — green tests alone are a brief). Renders the three labeled
  * fields when the merge carries a certification payload; when absent, renders ONE visible
- * "no certification provided" line rather than silently omitting the section — the founder
+ * "no certification provided" line rather than silently omitting the section — the operator
  * should never mistake missing certification for a clean one.
  */
 function certificationBlock(cert: AcceptanceItem['certification']): string {
@@ -225,7 +225,7 @@ function waitingRegion(items: AcceptanceItem[]): string {
   });
 }
 
-/** optional/auto items — nothing for the founder to do, so the section collapses by default
+/** optional/auto items — nothing for the operator to do, so the section collapses by default
  *  (zero-JS `<details>`, matching the threads/plane-observability convention) and each row's
  *  badge already carries its own countdown via {@link import('./fold-adapter.ts').mergedItemBadge}.
  *  Omitted entirely when empty so the desk doesn't show an empty collapsed shell. */

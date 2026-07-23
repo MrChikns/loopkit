@@ -1,4 +1,4 @@
-// Command projection — the founder's operating picture, composed
+// Command projection — the operator's operating picture, composed
 // ONLY from shared components: glance metrics, conductor, company
 // stream, decision desk, ops health, pipeline, and provenance. The renderer takes a
 // typed `ProjectionEnvelope<CommandData>` and returns the workspace HTML the AppShell
@@ -100,7 +100,7 @@ export type PipelineStage = {
 /** Rows for the "Active ops-parks" visibility card (WI-354) — reuses the generic
  *  `CommandEvent` shape (id/age/attempts/retry-state in `metadata`, no `actions`) so it
  *  renders through the same `eventList()`/`EventRow` path as every other Command region.
- *  Visibility only: these parks are plane-owned — never a founder action
+ *  Visibility only: these parks are plane-owned — never an operator action
  *  target here. */
 export type OpsParksCard = CommandEvent[];
 
@@ -108,9 +108,9 @@ export type OpsParksCard = CommandEvent[];
  *  this building?" diagnostic. Three stages, left to right in time: `preparing` (captured/
  *  routed, not yet queued), `queued` (dispatch pick order, existing why-not-picked reasons),
  *  `building` (in-flight workers — the same rows Conductor renders, reshaped). Parked items
- *  never appear here — they are plane-owned (ops) or founder-owned (decision), and already
+ *  never appear here — they are plane-owned (ops) or operator-owned (decision), and already
  *  render on the Active ops-parks card / decision desk (ops parks are plane-owned — never a
- *  founder action target) — this pipeline would otherwise duplicate them. */
+ *  operator action target) — this pipeline would otherwise duplicate them. */
 export type PipelineFlow = {
   preparing: CommandEvent[];
   queued: CommandEvent[];
@@ -140,11 +140,11 @@ export type CommandData = {
   opsParks: OpsParksCard;
   opsHealth: { headline: string; state: OperationalState };
   pipeline: PipelineStage[];
-  /** Last ~5 founder-sourced (ext:*) items from the last 24h — the recent-intents strip (WI-178). */
+  /** Last ~5 operator-sourced (ext:*) items from the last 24h — the recent-intents strip (WI-178). */
   recentIntents: RecentIntent[];
   /** Nav IA rewire: the former standalone Threads page's conversation history, folded
    *  into Command as a region. The `threads` route keeps serving directly (deep links,
-   *  the reply composer) — this is the same data, composed here so the founder doesn't
+   *  the reply composer) — this is the same data, composed here so the operator doesn't
    *  have to leave Command to see or reply to a thread. */
   threads: ThreadCard[];
   /** WI-355: the Pipeline region's three flow-ordered stages — see {@link PipelineFlow}. */
@@ -316,7 +316,7 @@ function toTestRegion(events: CommandEvent[]): string {
  *  (ops parks are plane-owned — never an operator action target). */
 function opsParksRegion(events: OpsParksCard): string {
   // Command-vs-Missions split: this card stays button-less (ops parks are plane-owned —
-  // never a founder action target here), but says so explicitly with a link to where they
+  // never an operator action target here), but says so explicitly with a link to where they
   // ARE actioned, so an unbuttoned list of parked rows doesn't read as broken.
   const note = events.length
     ? `<p class="opsui-opsparks__note">Auto-retries, escalates on breaker — ` +
@@ -386,7 +386,7 @@ export const DELIVERY_PAGE_SIZE = 20;
 
 /** WI-128: ONE unified recent-activity feed — the former separate "Recent work items" strip
  *  (captured intents) and "Recent deliveries" card (shipped merges), merged into a single
- *  card so a founder scanning "what's been happening" reads one widget, not two. */
+ *  card so an operator scanning "what's been happening" reads one widget, not two. */
 function recentActivityRegion(intents: RecentIntent[], events: CommandEvent[], page: number): string {
   const total = events.length;
   const pageCount = Math.max(1, Math.ceil(total / DELIVERY_PAGE_SIZE));
@@ -415,7 +415,7 @@ function recentActivityRegion(intents: RecentIntent[], events: CommandEvent[], p
 
 /** WI-128: Conversations demoted from a full inline list to a link — the standalone
  *  `/threads` route (threads-projection.ts) keeps serving the full page, deep links included;
- *  `threadsPage`, when given, carries the founder's current page over to that link so it
+ *  `threadsPage`, when given, carries the operator's current page over to that link so it
  *  reopens where Command left off, rather than resetting to page 1. */
 function conversationsLinkRegion(threads: ThreadCard[], threadsPage?: number): string {
   const total = threads.length;
@@ -502,7 +502,7 @@ export interface CommandProjectionOptions {
   /** 1-based page for the "Shipped" half of the recent-activity feed (WI-177); defaults to 1. */
   deliveryPage?: number;
   /** WI-128: Conversations is now a link, not a paginated inline list — when set (>1), the
-   *  link carries the founder's prior page over to `/threads?page=N` instead of resetting it. */
+   *  link carries the operator's prior page over to `/threads?page=N` instead of resetting it. */
   threadsPage?: number;
   /** Glance time-window picker (WI-359). When unset, the picker's displayed active state AND
    *  the underlying tiles both fall back to DEFAULT_GLANCE_WINDOW — one shared default so the

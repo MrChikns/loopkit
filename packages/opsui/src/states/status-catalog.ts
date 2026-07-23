@@ -41,7 +41,7 @@ export type StatusId =
 
 export type StatusCatalogEntry = {
   id: StatusId;
-  /** Founder-facing label — what every StatusBadge across every surface renders. */
+  /** Operator-facing label — what every StatusBadge across every surface renders. */
   label: string;
   /** Visual tone — always one of the six canonical OperationalState values (never invented
    *  per-status colour); StatusBadge's whole colour contract lives at that layer. */
@@ -87,7 +87,7 @@ export const STATUS_CATALOG: Record<StatusId, StatusCatalogEntry> = {
     label: 'Queued — routing…',
     tone: 'progress',
     icon: 'dot',
-    meaning: 'A founder verb just landed (approve / unpark); the reactor has not yet followed up with a fresh dispatch.',
+    meaning: 'An operator verb just landed (approve / unpark); the reactor has not yet followed up with a fresh dispatch.',
   },
   building: {
     id: 'building',
@@ -108,14 +108,14 @@ export const STATUS_CATALOG: Record<StatusId, StatusCatalogEntry> = {
     label: 'Needs your decision',
     tone: 'critical',
     icon: 'diamond',
-    meaning: 'Parked on a founder-owned call (conductor park, product-spine, touches-overstep) — the queue is blocked until you answer.',
+    meaning: 'Parked on an operator-owned call (conductor park, product-spine, touches-overstep) — the queue is blocked until you answer.',
   },
   'parked-ops': {
     id: 'parked-ops',
     label: 'Parked — recovering',
     tone: 'warning',
     icon: 'star',
-    meaning: 'A mechanical/infra failure the plane owns; it auto-retries on the reactor beat, never a founder action target.',
+    meaning: 'A mechanical/infra failure the plane owns; it auto-retries on the reactor beat, never an operator action target.',
   },
   'parked-hold': {
     id: 'parked-hold',
@@ -150,35 +150,35 @@ export const STATUS_CATALOG: Record<StatusId, StatusCatalogEntry> = {
     label: 'Merged',
     tone: 'success',
     icon: 'dot',
-    meaning: 'Shipped to the branch; may still be awaiting founder acceptance.',
+    meaning: 'Shipped to the branch; may still be awaiting operator acceptance.',
   },
   'awaiting-verdict': {
     id: 'awaiting-verdict',
     label: 'Awaiting your verdict',
     tone: 'warning',
     icon: 'star',
-    meaning: 'Merged and deployed; the founder has not yet accepted or rejected it on the acceptance desk.',
+    meaning: 'Merged and deployed; the operator has not yet accepted or rejected it on the acceptance desk.',
   },
   accepted: {
     id: 'accepted',
     label: 'Accepted',
     tone: 'success',
     icon: 'dot',
-    meaning: 'Shipped and verified by the founder — closed, no further action.',
+    meaning: 'Shipped and verified by the operator — closed, no further action.',
   },
   rejected: {
     id: 'rejected',
     label: 'Rejected',
     tone: 'neutral',
     icon: 'dot',
-    meaning: 'The founder declined this item; it is closed.',
+    meaning: 'The operator declined this item; it is closed.',
   },
   superseded: {
     id: 'superseded',
     label: 'Superseded',
     tone: 'neutral',
     icon: 'dot',
-    meaning: 'Closed automatically by the plane (duplicate-of-merged, decomposition supersede) — never a founder decline.',
+    meaning: 'Closed automatically by the plane (duplicate-of-merged, decomposition supersede) — never an operator decline.',
   },
   answered: {
     id: 'answered',
@@ -244,13 +244,13 @@ export type ItemStatusInput = {
    *  the breaker tripped (parked-ops, needs eyes even though it's plane-owned). */
   breakerTripped?: boolean;
   /** WI-362 interim-approved-status signal (work-adapter.ts isInterimApprovedStatus): true in
-   *  the narrow window between a founder verb landing (approve / fresh unpark) and the
+   *  the narrow window between an operator verb landing (approve / fresh unpark) and the
    *  reactor's follow-up (merged / a fresh dispatch). */
   interimApproved?: boolean;
   /** For a rejected item: who/what closed it. A machine actor (e.g. 'reactor') reads as
-   *  'superseded'; 'founder' or absent (pre-WI-331 replays) reads as a real 'rejected'. */
+   *  'superseded'; 'operator' or absent (pre-WI-331 replays) reads as a real 'rejected'. */
   rejectedBy?: string;
-  /** For a merged item: has the founder already accepted it? Distinguishes 'merged'
+  /** For a merged item: has the operator already accepted it? Distinguishes 'merged'
    *  (still awaiting-verdict once combined with `awaitingVerdict`) from a settled ship. */
   accepted?: boolean;
   /** Explicit override for the merged-but-not-yet-accepted acceptance-desk case — set by
@@ -296,7 +296,7 @@ function deriveStatusId(input: ItemStatusInput): StatusId {
   }
 
   if (state === 'rejected') {
-    const isMachineClosed = !!input.rejectedBy && input.rejectedBy !== 'founder';
+    const isMachineClosed = !!input.rejectedBy && input.rejectedBy !== 'operator';
     return isMachineClosed ? 'superseded' : 'rejected';
   }
   if (state === 'superseded') return 'superseded';

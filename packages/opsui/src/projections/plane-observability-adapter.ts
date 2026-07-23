@@ -176,7 +176,7 @@ export type PlaneTranscriptSize = {
 
 /** Human vs provisional accept split — from loopctl summary + verdicts. */
 export type PlaneAcceptSplit = {
-  /** Items accepted by a human (founder). */
+  /** Items accepted by a human (operator). */
   humanAccepted: number;
   /** Items self-accepted provisionally (excluded from judge calibration). */
   provisionalAccepted: number;
@@ -325,7 +325,7 @@ export type PlaneObservabilityData = {
   routing: PlaneRoutingData;
   /** Execution-config-by-model panel — null = CLI command absent (feature-detected). */
   executionConfig: PlaneExecutionConfigData;
-  /** Codex consult/founder-manual tile (WI-311) — null when no Codex usage recorded yet. */
+  /** Codex consult/operator-manual tile (WI-311) — null when no Codex usage recorded yet. */
   codex: PlaneCodexData;
   /** Unified Claude + Codex quota panel (WI-314) — null when no quota.snapshot recorded yet. */
   quota: PlaneQuotaData;
@@ -357,8 +357,8 @@ export function isPlaneObservabilityInput(v: unknown): v is PlaneObservabilityIn
 // ─── Lanes (WI-309) ───────────────────────────────────────────────────────────
 //
 // `costs.byLoop` is per-loop (dispatch/reactor/scout/judge/interactive/...); the console
-// groups those into two lanes the founder actually cares about — the autonomy plane
-// (loopkit's own headless calls) vs interactive (the founder's own CLI sessions). Usage is
+// groups those into two lanes the operator actually cares about — the autonomy plane
+// (loopkit's own headless calls) vs interactive (the operator's own CLI sessions). Usage is
 // metered against a Claude subscription, not billed per-call, so every lane figure here is
 // an "API-equivalent" estimate, not a real invoice line.
 
@@ -368,7 +368,7 @@ export type LaneRow = { lane: 'autonomy-plane' | 'interactive' | 'other'; label:
 
 // ─── Codex tile (WI-311) ───────────────────────────────────────────────────────
 //
-// Codex-dispatched consults and the founder's own personal Codex CLI use both draw on
+// Codex-dispatched consults and the operator's own personal Codex CLI use both draw on
 // the same subscription quota, so both need to be visible. `costs.byLoop` already
 // carries them as 'consult' / 'founder-manual' rows (tagged by the codex-usage collector); this
 // tile just groups those two rows and surfaces the latest quota reading — computed here from
@@ -443,7 +443,7 @@ export function quotaPanelFromCosts(costs: PlaneCostsData | null): PlaneQuotaDat
   return { rows: costs.quotaCapacity };
 }
 
-/** Group cost rows into founder-facing spend lanes. Pure — reused by both the glance tile
+/** Group cost rows into operator-facing spend lanes. Pure — reused by both the glance tile
  *  footnote (today-scoped, via `rows: costs.byLoopToday`) and the Spend card's lane table
  *  (all-time, defaults to `costs.byLoop` when `rows` is omitted). */
 export function laneRowsFromCosts(costs: PlaneCostsData | null, rows?: CostRow[]): LaneRow[] {
@@ -544,7 +544,7 @@ function buildGlance(
 // Each tile links to /observability (Analytics keeps its own route, deep tables).
 
 /** Highest current subscription-quota utilization across every provider:window reading
- *  (`costs.quotaCapacity`) — the single number the founder needs at a glance; the full
+ *  (`costs.quotaCapacity`) — the single number the operator needs at a glance; the full
  *  per-provider breakdown lives on Analytics. Undefined when no quota.snapshot has landed. */
 function highestQuotaUsedPct(quota: PlaneQuotaData): { usedPct: number; window: string; provider: string } | undefined {
   if (!quota || quota.rows.length === 0) return undefined;
