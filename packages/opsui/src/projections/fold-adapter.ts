@@ -195,6 +195,21 @@ export function toTouchList(touches?: string | string[]): string[] {
   return parts.map((t) => t.trim()).filter((t) => t.length > 0);
 }
 
+/** Shape of a resolvable per-intent external ref (e.g. 'EXT-77', 'WI-129') — the ONE
+ *  pattern console/src/server.ts's `/threads/:ref` route accepts (it imports this same
+ *  constant, so the two can never drift apart). loopkit's own console composer stamps
+ *  every item it captures with the literal channel marker `source: 'ext:console'`
+ *  (server.ts's `/intent` handler) rather than a unique per-intent id — core's summary.ts
+ *  still derives an `externalRef` of `'console'` from that prefix (so the item shows up
+ *  as a thread immediately), but `'console'` fails this shape and is NOT an addressable
+ *  reply/thread-detail target: every caller that turns an externalRef into a
+ *  `/threads/<ref>` link must fall back to the canonical `/item/<id>` hub instead. */
+export const RESOLVABLE_EXTERNAL_REF_RE = /^[A-Z]+-\d+$/;
+
+export function isResolvableExternalRef(ref: string): boolean {
+  return RESOLVABLE_EXTERNAL_REF_RE.test(ref);
+}
+
 /** Derive the origin chip once, at the fold boundary. No touches ⇒ undefined (an
  *  un-scoped item has no derivable origin, so the surface simply shows no chip rather
  *  than guessing). */
@@ -1164,7 +1179,12 @@ function buildRecentIntents(fold: FoldSummary, nowFn: () => number = Date.now): 
       // Item-hub link sweep (WI-349): the strip's "timeline" link now opens the item hub —
       // field name kept (RecentIntent.timelineHref) to avoid a wider rename across callers.
       timelineHref: `/item/${id}`,
-      ...(thread?.externalRef ? { threadHref: `/threads/${thread.externalRef}` } : {}),
+      // A channel-style externalRef (e.g. 'console') isn't a resolvable per-intent address
+      // (see isResolvableExternalRef) — route the "thread" link at the item hub instead of
+      // a /threads/<ref> page the router can never resolve for it.
+      ...(thread?.externalRef
+        ? { threadHref: isResolvableExternalRef(thread.externalRef) ? `/threads/${thread.externalRef}` : `/item/${id}` }
+        : {}),
     };
 
     return { intent, activityMs, hasThreadText };

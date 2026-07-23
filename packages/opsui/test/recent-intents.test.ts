@@ -143,6 +143,27 @@ test('an item present in BOTH threads and recentMerged renders once, preferring 
   assert.equal(row.threadHref, '/threads/EXT-42');
 });
 
+// WI-130 regression: the console composer stamps every item it captures with the literal
+// channel marker `source: 'ext:console'` (console/src/server.ts's /intent handler) — core's
+// summary.ts still derives an externalRef of 'console' from that prefix (so the item shows up
+// as a thread immediately), but 'console' is shared by every console-captured item, not a
+// unique per-intent address, so it fails console/src/server.ts's /threads/:ref route and 404s.
+// The strip's thread link must fall back to the canonical item hub for a ref shaped like this.
+test('a channel-sourced item (externalRef "console") gets an item-hub thread link, not /threads/console', () => {
+  const fold = baseFold({
+    threads: [
+      { id: 'WI-906', externalRef: 'console', outCount: 0, messages: [{ ts: '2026-07-20T11:00:00.000Z', direction: 'in', text: 'build the thing' }] },
+    ],
+  });
+
+  const envelope = commandProjectionFromFold(fold, { ledgerSequence: 1, now: FIXED_NOW });
+  const row = envelope.data.recentIntents.find((r) => r.id === 'WI-906');
+
+  assert.ok(row, 'a channel-sourced thread must still surface');
+  assert.equal(row!.externalRef, 'console');
+  assert.equal(row!.threadHref, '/item/WI-906', 'the thread link must resolve to the item hub, never /threads/console');
+});
+
 test('cap-at-5 and newest-first ordering hold across the unioned sources', () => {
   const recentMerged = Array.from({ length: 4 }, (_, i) => ({
     id: `WI-91${i}`,
