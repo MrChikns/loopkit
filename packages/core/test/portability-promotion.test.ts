@@ -64,9 +64,9 @@ function makeEnv(): { repoRoot: string; ledgerDir: string; cleanup: () => void }
 // ---------------------------------------------------------------------------
 
 test('isPortabilityRequired: ADR-bearing (decision-id / ADR-NNN) and incident-fix items owe a note', () => {
-  // A foreign private-scheme decision id (format `D-NNN`; loopkit's own scheme is ADR-NNN),
-  // with an obviously-fake number, assembled at runtime so even this example never lands as a
-  // greppable `D-<digits>` literal in the public source (the leak tripwire scans for that shape).
+  // Covers the D-<digits> branch of the shipped decision-id detector regex in schema.ts
+  // (some target repos use a D-prefixed id scheme; loopkit's own is ADR-NNN). Assembled
+  // at runtime with an obviously-fake number so the id stays a synthetic example.
   const decisionId = ['D', '000'].join('-');
   assert.equal(isPortabilityRequired({ spec: `implement ${decisionId} example decision` }), true);
   assert.equal(isPortabilityRequired({ text: 'per ADR-007 fast-drain' }), true);

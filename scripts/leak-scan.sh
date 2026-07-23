@@ -6,7 +6,7 @@
 #   1. GENERIC classes below — safe to publish (no real names), catch the usual
 #      leak shapes: private keys, cloud/CI/chat tokens, and `secret = "…"` literals.
 #   2. DECISIONID below — a concrete `D-NNN` operator-private decision-log citation
-#      (e.g. `D-172`, `D-144 clause 3`). This repo's OWN decision log uses a different,
+#      (e.g. `D-042`, `D-042 clause 3`). This repo's OWN decision log uses a different,
 #      local `ADR-NNN` id scheme (docs/decisions/); a bare `D-\d{2,}` token is residue
 #      from the operator's private, pre-loopkit decision log and must never land here —
 #      describe the behavior instead, or cite the local `ADR-NNN` if one exists.
@@ -58,7 +58,7 @@ glpat-[0-9A-Za-z_-]{20,}
 EMAIL='[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}'
 
 # Concrete private decision-log citation: `D-NNN` (optionally `D-NNN-SUFFIX`, e.g.
-# `D-128-H-CHAT`), word-bounded so `ADR-NNN` never matches, and not immediately
+# `D-042-H-CHAT`), word-bounded so `ADR-NNN` never matches, and not immediately
 # followed by a comma so a bare format-token example list (`D-10, D-100, etc.`)
 # doesn't trip it either.
 DECISIONID='\bD-\d{2,}(-[A-Z0-9]+)?\b(?!,)'
