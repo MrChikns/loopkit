@@ -322,8 +322,12 @@ export interface ItemRecord {
    * certification of understanding, not an assertion of completion"). Optional — absent on
    * every merge predating this field, and on any merge whose worker manifest didn't supply
    * one (the acceptance desk renders a visible "no certification provided" line, never blank).
+   * `couldBreak`/`detection`/`rollback` are optional (rather than required, as a merge-sourced
+   * certification always fills them) because ADR-009's item.certification-amended can synthesize
+   * this record from scratch on an item with no prior certification at all — only `portability`
+   * is guaranteed set in that minimal shape.
    */
-  mergeCertification?: { couldBreak: string; detection: string; rollback: string; portability?: string };
+  mergeCertification?: { couldBreak?: string; detection?: string; rollback?: string; portability?: string };
   /** True when the item was accepted provisionally by reactor:oc6-provisional. */
   provisionalAccept?: boolean;
 
@@ -953,6 +957,18 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           if (parsed) rec.judgeVerdict = parsed;
           break;
         }
+        // item.certification-amended (ADR-009): the amend verb's precondition (merged/accepted)
+        // means this event ALWAYS arrives on an already-terminal item — it must be handled here,
+        // not just in the main switch below, or it would silently no-op through the `default`
+        // branch. See the main switch's case for the full fail-soft/last-writer-wins doc comment.
+        case 'item.certification-amended': {
+          const field = d['field'];
+          const portability = d['portability'];
+          if (field === 'portability' && typeof portability === 'string') {
+            rec.mergeCertification = { ...rec.mergeCertification, portability };
+          }
+          break;
+        }
         default:
           // Every other event — including item.approved / item.parked / item.merged /
           // gate.* — is a no-op on an already-terminal item.
@@ -1101,6 +1117,21 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           rec.currentBuild = undefined;
         }
         break;
+
+      // item.certification-amended (ADR-009) — the operator's confirmed portability reply.
+      // ADDITIVE, NON-transition (mirrors item.escalated/item.blocked): pure annotation onto
+      // rec.mergeCertification, safe to fire on a merged/accepted item without racing any other
+      // event. Fail-soft: an unknown `field` or non-string `portability` is ignored outright
+      // (never throws, never partially applies). Last-writer-wins on re-amendment — a later
+      // amendment simply overwrites the prior `portability` string, which is also what gives
+      // the reactor's nudge dedup (keyed on `cert.portability` being set) free idempotency.
+      case 'item.certification-amended': {
+        const field = d['field'];
+        const portability = d['portability'];
+        if (field !== 'portability' || typeof portability !== 'string') break;
+        rec.mergeCertification = { ...rec.mergeCertification, portability };
+        break;
+      }
 
       case 'item.accepted':
         transition(rec, 'accepted', ev.ts);

@@ -14,7 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import { withLock } from './ledger.js';
 import { fold, nextWiId, resolveItemBranch, ItemRecord, TargetRecord } from './fold.js';
-import { makeEvent, ItemQueuedData, ItemEscalatedData } from './schema.js';
+import { makeEvent, ItemQueuedData, ItemEscalatedData, parsePortabilityTargets } from './schema.js';
 import { parseOverstepReason, resolveStoredSpecApproval } from './approval.js';
 
 /** Thrown for any usage/validation failure — callers decide how to surface it (CLI exit vs HTTP 4xx). */
@@ -265,6 +265,111 @@ export async function acceptItem(
     const msgEv = makeEvent('cli', wiId, 'msg.in', { text: trailText });
     await tx.append([verbEv, msgEv]);
     return { wiId, accepted: true, message: `Accepted ${wiId}` };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// amendPortability — `loopctl portability <id> "<reply body>"` (ADR-009)
+// ---------------------------------------------------------------------------
+
+export interface AmendPortabilityOptions {
+  /** Actor stamp for the amendment's `by` field (default 'operator'; bridge callers pass their own id). */
+  by?: string;
+  /** Overrides the msg.in trail text; defaults to the raw reply body. */
+  trail?: string;
+}
+
+export type AmendPortabilityOutcome = 'amended' | 'no-op' | 'rejected';
+
+export interface AmendPortabilityResult {
+  wiId: string;
+  outcome: AmendPortabilityOutcome;
+  message: string;
+  /** The canonical normalized note, present only when outcome === 'amended'. */
+  portability?: string;
+  /** The parsed target names, present only when outcome === 'amended'. */
+  targets?: string[];
+}
+
+/**
+ * Append `item.certification-amended` (ADR-009) — the deterministic confirm path that closes
+ * the portability-nudge loop. Precondition: item is `merged` or `accepted` (only a shipped item
+ * has a certification to amend) — anything else is a no-op, mirroring acceptItem's precondition
+ * shape. On a parse or unknown-target error, appends ONLY the operator-facing `msg.out` (no
+ * amendment event, no msg.in trail — the reply never became a confirmed amendment) and returns
+ * outcome:'rejected'; the caller decides how to surface that (CLI exit code, HTTP 4xx). On
+ * success, appends `[amendedEv, msgInTrail]` linked via `inReplyTo`, exactly the approve/reject
+ * verb-appends-an-event pattern.
+ */
+export async function amendPortability(
+  ledgerDir: string,
+  rawId: string,
+  replyBody: string,
+  opts: AmendPortabilityOptions = {},
+): Promise<AmendPortabilityResult> {
+  if (!rawId) throw new VerbError('id is required');
+  if (!/^WI-\d+$/.test(rawId)) {
+    throw new VerbError(`'${rawId}' is not a valid work-item id (expected WI-NNN)`);
+  }
+  if (replyBody === undefined || replyBody === null) throw new VerbError('reply body is required');
+  const by = opts.by ?? 'operator';
+  const wiId = rawId;
+
+  return withLock(ledgerDir, async (tx) => {
+    const allEvents = await tx.loadAll();
+    const result = fold(allEvents);
+
+    const rec: ItemRecord | undefined = result.items.get(wiId);
+    if (!rec || (rec.state !== 'merged' && rec.state !== 'accepted')) {
+      return {
+        wiId,
+        outcome: 'no-op',
+        message: `${wiId} is not merged/accepted (state: ${rec?.state ?? 'unknown'}) — only a shipped item has a certification to amend.`,
+      };
+    }
+
+    const parsed = parsePortabilityTargets(replyBody);
+    if (parsed.errors.length > 0) {
+      const msgOut = makeEvent('cli', wiId, 'msg.out', {
+        text: `Could not amend ${wiId}'s portability note: ${parsed.errors.join('; ')}. `
+          + `Reply with "applies to: <target>, <target>" or "applies to: none".`,
+      });
+      await tx.append([msgOut]);
+      return {
+        wiId,
+        outcome: 'rejected',
+        message: `${wiId}: portability reply rejected — ${parsed.errors.join('; ')}`,
+      };
+    }
+
+    // Registration check mirrors the reactor's own resolution (fold.ts TargetsProjection.byName)
+    // exactly — never accept a name here that the reactor's promotion step couldn't itself resolve.
+    const unknown = parsed.targets.filter(t => !result.targets.byName(t));
+    if (unknown.length > 0) {
+      const registeredNames = [...result.targets.values()].map(t => t.name);
+      const msgOut = makeEvent('cli', wiId, 'msg.out', {
+        text: `Could not amend ${wiId}'s portability note: unknown target(s) ${unknown.join(', ')}. `
+          + `Registered targets: ${registeredNames.length ? registeredNames.join(', ') : '(none registered)'}.`,
+      });
+      await tx.append([msgOut]);
+      return {
+        wiId,
+        outcome: 'rejected',
+        message: `${wiId}: portability reply rejected — unknown target(s) ${unknown.join(', ')}`,
+      };
+    }
+
+    const portability = parsed.targets.length === 0 ? 'applies to: none' : `applies to: ${parsed.targets.join(', ')}`;
+    const msgIn = makeEvent('cli', wiId, 'msg.in', { text: opts.trail ?? replyBody });
+    const amendedEv = makeEvent('cli', wiId, 'item.certification-amended', {
+      field: 'portability',
+      portability,
+      targets: parsed.targets,
+      by,
+      inReplyTo: msgIn.id,
+    });
+    await tx.append([amendedEv, msgIn]);
+    return { wiId, outcome: 'amended', message: `Amended ${wiId} portability: ${portability}`, portability, targets: parsed.targets };
   });
 }
 

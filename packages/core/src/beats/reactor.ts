@@ -914,7 +914,10 @@ async function stepPortabilityPromotion(
         if (rec.state !== 'merged' && rec.state !== 'accepted') continue;
 
         const cert = rec.mergeCertification;
-        const targets = parsePortabilityTargets(cert?.portability);
+        // ADR-009: the parser is strict-with-salvage (see schema.ts) — the reactor's read stays
+        // tolerant by consuming only `.targets` and ignoring `.errors` (a malformed entry among
+        // otherwise-valid ones just drops that one name; the amend verb is the strict gate).
+        const targets = parsePortabilityTargets(cert?.portability).targets;
 
         // ADVISORY nudge: owed a portability note but shipped without one (or with a blank/none it
         // shouldn't have). Bounded once per item via the msg.out marker.
@@ -927,7 +930,7 @@ async function stepPortabilityPromotion(
           );
           if (!alreadyNudged) {
             events.push(makeEvent('reactor', rec.id, 'msg.out', {
-              text: `${PORTABILITY_NUDGE_MARKER} This ADR-bearing/incident-fix item shipped without a portability note. State which other targets its pattern applies to (or "none") so the harvest isn't lost — "applies to: <targets> | none".`,
+              text: `${PORTABILITY_NUDGE_MARKER} This ADR-bearing/incident-fix item shipped without a portability note. State which other targets its pattern applies to (or "none") so the harvest isn't lost — run \`loopctl portability ${rec.id} "applies to: <targets> | none"\`.`,
             }));
             nudgedCount++;
           }

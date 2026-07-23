@@ -102,6 +102,26 @@ contract is pinned now so activation is additive):
 - Acceptance tiering classifies against the **target's** boundaries block, applying the
   precedence: surface wins over plane; risk wins over both.
 
+### Confirm a portability-nudge reply (ADR-009)
+- A merged/accepted item's certification may carry a `portability` note (`"applies to: <targets>
+  | none"`) declaring which OTHER registered targets its pattern generalizes to. When an
+  ADR-bearing or incident-fix item ships without one, the reactor nudges the operator once
+  (`msg.out`) — but a bare reply in the thread never becomes a certification amendment; it must be
+  confirmed through the verb below.
+- **Command** `loopctl portability <WI-NNN> "<reply body>" [--by <actor>] [--trail "<text>"]` —
+  precondition: item is `merged` or `accepted`. The reply body is validated against a strict
+  grammar (`schema.ts` `parsePortabilityTargets`): case-insensitive target names, `none` valid
+  alone, empty body always an error, unknown (unregistered) targets reject the **whole**
+  amendment with an operator-facing `msg.out` (all-or-nothing, unlike the reactor's own tolerant
+  read of the same field).
+- **Event** `item.certification-amended { field: 'portability', portability, targets, by,
+  inReplyTo }` on success, paired with the `msg.in` reply trail (linked via `inReplyTo`, mirroring
+  approve/reject). The fold merges it onto `mergeCertification.portability`, last-writer-wins —
+  any amendment (including `none`) also silences the nudge, since the nudge's dedup key is simply
+  "does `cert.portability` have a value".
+- `stepPortabilityPromotion` (reactor) is unchanged: it already re-reads `cert.portability` every
+  beat, so the very next beat after an amendment promotes the sibling on the named target.
+
 ## Plane topology — one default plane; detached planes; never federation
 
 The plane is **machine-level infrastructure, not project tooling**: one plane-home, one

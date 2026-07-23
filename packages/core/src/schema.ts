@@ -285,21 +285,50 @@ export function isPortabilityRequired(fields: { spec?: string; text?: string; la
 }
 
 /**
- * WI-098 — parse a certification.portability note into its target list. Returns `[]` for `none`,
- * an absent/blank note, or a note that names no targets after the `applies to:` marker. Lenient
- * transcribe-not-transform extraction (no LLM): splits the post-`applies to:` remainder on commas,
- * trims, drops the literal `none`. The reactor resolves each returned name against the registered
- * targets — an unregistered name simply captures nothing (surfaced in the step detail).
+ * ADR-009 — result of the single strict portability-note parser (see {@link parsePortabilityTargets}).
+ * `targets` is always the best-effort set of syntactically valid target names extracted (lower-cased,
+ * deduped) — populated even when `errors` is non-empty, so a tolerant reader (the reactor) can use it
+ * as-is. `none` is true only for an explicit "none" body (distinct from an empty/absent note, which
+ * is `targets: [], none: false`). `errors` is non-empty whenever the note did not fully conform to
+ * the ADR-009 grammar — a strict caller (the amend verb) rejects on any entry.
  */
-export function parsePortabilityTargets(portability: string | undefined): string[] {
-  if (!portability) return [];
-  const m = /applies to:\s*(.*)$/is.exec(portability);
-  const remainder = (m ? m[1] : portability).trim();
-  if (!remainder || /^none$/i.test(remainder)) return [];
-  return remainder
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !/^none$/i.test(s));
+export interface PortabilityParseResult {
+  targets: string[];
+  none: boolean;
+  errors: string[];
+}
+
+const PORTABILITY_TARGET_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * ADR-009 — the ONE validating parser for a certification.portability note (grammar in
+ * docs/decisions/ADR-009-portability-completion.md). Strict about shape (empty body is always an
+ * error; each comma-separated entry must match `target := [A-Za-z0-9._-]{1,64}`) but TOLERANT about
+ * salvage: a malformed entry is recorded in `errors` and simply excluded from `targets`, rather than
+ * discarding the whole note — this is what lets the reactor's read stay lenient (it only ever consumes
+ * `.targets`, ignoring `.errors`) while the amend verb enforces strictness by checking `.errors`.
+ * Registration (is a name an actually-registered target?) is NOT this parser's job — it has no
+ * access to the targets registry; that check lives in the verb.
+ */
+export function parsePortabilityTargets(portability: string | undefined): PortabilityParseResult {
+  if (portability === undefined) return { targets: [], none: false, errors: [] };
+  const trimmed = portability.trim();
+  const marker = /^applies to:\s*/i.exec(trimmed);
+  const body = (marker ? trimmed.slice(marker[0].length) : trimmed).trim();
+  if (!body) return { targets: [], none: false, errors: ['empty body'] };
+  if (/^none$/i.test(body)) return { targets: [], none: true, errors: [] };
+
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const raw of body.split(',').map(s => s.trim())) {
+    if (!raw) { errors.push('empty target name'); continue; }
+    if (/^none$/i.test(raw)) { errors.push(`stray "none" inside a target list: "${raw}"`); continue; }
+    if (!PORTABILITY_TARGET_RE.test(raw)) { errors.push(`malformed target name: "${raw}"`); continue; }
+    const lower = raw.toLowerCase();
+    if (!seen.has(lower)) { seen.add(lower); targets.push(lower); }
+  }
+  return { targets, none: false, errors };
 }
 export interface ItemMergedData {
   commit: string;
@@ -336,6 +365,25 @@ export interface ItemMergedData {
 /** TRUST-HARDENING: cap on the changedFiles evidence list so a huge merge never trips the
  *  oversized-event guard. Entries beyond the cap are dropped and changedFilesTruncated is set. */
 export const MERGE_EVIDENCE_FILES_CAP = 200;
+/**
+ * ADR-009 — item.certification-amended: the operator's confirmed reply to the portability-nudge
+ * (see {@link CertificationPayload.portability}). Closes the completion loop that a bare `msg.in`
+ * reply never could: an explicit verb-appended event the fold merges into
+ * `mergeCertification.portability`, last-writer-wins. `field` is deliberately extensible (only
+ * `'portability'` today) so a future amendable certification field doesn't need a new event type.
+ */
+export interface ItemCertificationAmendedData {
+  /** Amendable certification field. Only 'portability' today; extensible by design. */
+  field: 'portability';
+  /** Canonical normalized note: `applies to: <a>, <b>` or `applies to: none`. */
+  portability: string;
+  /** Parsed target names (lower-cased canonical). Empty ⇒ none. */
+  targets: string[];
+  /** Actor stamp — 'operator' for CLI/console, bridge ids otherwise. */
+  by: string;
+  /** Dedup link to the msg.in trail (mirrors approve/reject). */
+  inReplyTo?: string;
+}
 export interface ItemAcceptedData {
   by: string;
   provisional?: boolean;
@@ -739,6 +787,7 @@ export type EventDataMap = {
   'item.escalated': ItemEscalatedData;
   'item.blocked': ItemBlockedData;
   'item.merged': ItemMergedData;
+  'item.certification-amended': ItemCertificationAmendedData;
   'item.accepted': ItemAcceptedData;
   'item.feedback': ItemFeedbackData;
   'item.briefed': ItemBriefedData;
@@ -806,7 +855,7 @@ export interface LedgerEvent<T extends string = string> {
 
 const KNOWN_TYPES = new Set<string>([
   'item.captured', 'item.routed', 'item.queued', 'item.parked', 'item.unparked',
-  'item.approved', 'item.rejected', 'item.reopened', 'item.escalated', 'item.blocked', 'item.merged', 'item.accepted', 'item.feedback', 'item.briefed',
+  'item.approved', 'item.rejected', 'item.reopened', 'item.escalated', 'item.blocked', 'item.merged', 'item.certification-amended', 'item.accepted', 'item.feedback', 'item.briefed',
   'item.respec', 'engagement.baseline',
   'item.claimed', 'item.released',
   'session.started', 'session.heartbeat', 'session.ended',
