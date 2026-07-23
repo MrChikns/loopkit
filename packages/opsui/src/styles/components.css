@@ -845,6 +845,8 @@
   align-items: center;
 }
 .opsui-pipeline__stage { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* WI-128: the unified Pipeline card's header — health badge stacked above the stage-count strip. */
+.opsui-pipeline__header { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .opsui-pipeline__count {
   font-size: 22px;
   font-weight: 640;
