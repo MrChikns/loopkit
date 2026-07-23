@@ -50,6 +50,21 @@ it. The contract:
 - Worktrees with the manifest's `worktreePrefix` next to the repo belong to in-flight builds —
   leave them alone.
 
+**Ready-made skills.** This repo ships the interactive side of the contract as Claude Code
+slash commands in [`.claude/commands/`](../.claude/commands/): **`/drive`** — attended
+coordinator mode (session + claims per
+[ADR-007](decisions/ADR-007-claim-arbitration.md), build via `loopctl conduct` or parallel
+subagent builders, everything landing as ledger events); **`/plane-check`** — deterministic
+health triage (doctor/summary/slo) with each finding routed to a heal, a repair item, or an
+operator decision; **`/board`** — the status window. `/drive` is the sanctioned form of "the
+operator explicitly wants it done in-session": it is not a second delivery mechanism beside the
+plane — it claims through the same lease kernel and lands its merges as evidence-carrying ledger
+events on the same board (`conduct` writes the beats' full event trail; the coordinator path
+writes a single `item.merged` with diff/gate/session evidence). The skills load
+automatically in any Claude Code session opened in this repo; to get the same verbs in a target
+repo, copy them into its `.claude/commands/` and adapt both the `$LOOPCTL` path **and** the
+`docs/` links (they are written repo-relative to this repo).
+
 ### Copy-paste snippet for a target repo's `AGENTS.md` / `CLAUDE.md`
 
 Adapt the paths, then paste:

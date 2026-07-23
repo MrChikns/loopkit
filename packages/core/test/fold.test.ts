@@ -930,3 +930,126 @@ test('fold: a fresh replay rebuilds the catalog deterministically, not preservin
   const fp = computeParkFingerprint('tests red', 'ops');
   assert.deepEqual(first.failureCatalog.get(fp), second.failureCatalog.get(fp));
 });
+
+// ---------------------------------------------------------------------------
+// WI-108 — lifetime clean-landing counters on ItemRecord + summary wire
+// ---------------------------------------------------------------------------
+
+test('fold: lifetime counters are absent (undefined = 0) on a clean straight-through merge', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-600', 'item.captured', { source: 'cli', text: 'clean' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-600', 'item.queued', { spec: 'clean' }, '2026-01-01T00:01:00Z'),
+    makeEvent('dispatch', 'WI-600', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
+    makeEvent('dispatch', 'WI-600', 'gate.passed', {}, '2026-01-01T00:03:00Z'),
+    makeEvent('reactor', 'WI-600', 'item.merged', { commit: 'abc' }, '2026-01-01T00:04:00Z'),
+  ];
+  const item = fold(events).items.get('WI-600')!;
+  assert.equal(item.state, 'merged');
+  assert.equal(item.lifetimeParkCount, undefined);
+  assert.equal(item.lifetimeCrashCount, undefined);
+  assert.equal(item.lifetimeGateRedCount, undefined);
+  assert.equal(item.lifetimeEscalationCount, undefined);
+});
+
+test('fold: lifetimeParkCount accumulates across every park, ops and decision alike', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-601', 'item.captured', { source: 'cli', text: 'rough' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-601', 'item.queued', { spec: 'rough' }, '2026-01-01T00:01:00Z'),
+    makeEvent('dispatch', 'WI-601', 'item.parked', { reason: 'tests red', parkKind: 'ops' }, '2026-01-01T00:02:00Z'),
+    makeEvent('reactor', 'WI-601', 'item.unparked', {}, '2026-01-01T00:03:00Z'),
+    makeEvent('dispatch', 'WI-601', 'item.parked', { reason: 'needs a call', parkKind: 'decision' }, '2026-01-01T00:04:00Z'),
+  ];
+  const item = fold(events).items.get('WI-601')!;
+  assert.equal(item.lifetimeParkCount, 2, 'both parks counted');
+  // founder-attention = decision parks + escalations → only the decision park here
+  assert.equal(item.lifetimeEscalationCount, 1);
+});
+
+test('fold: lifetimeCrashCount counts crashes AND stalls; lifetimeGateRedCount counts gate.failed + gate.parked', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-602', 'item.captured', { source: 'cli', text: 'flaky' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-602', 'item.queued', { spec: 'flaky' }, '2026-01-01T00:01:00Z'),
+    makeEvent('dispatch', 'WI-602', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
+    makeEvent('doctor', 'WI-602', 'build.crashed', { reason: 'orphan', stderrTail: 'boom' }, '2026-01-01T00:03:00Z'),
+    makeEvent('dispatch', 'WI-602', 'build.dispatched', { attempt: 2, pid: 2 }, '2026-01-01T00:04:00Z'),
+    makeEvent('doctor', 'WI-602', 'build.stalled', { reason: 'no-progress' }, '2026-01-01T00:05:00Z'),
+    makeEvent('dispatch', 'WI-602', 'build.dispatched', { attempt: 3, pid: 3 }, '2026-01-01T00:06:00Z'),
+    makeEvent('dispatch', 'WI-602', 'gate.failed', { reason: 'unit tests red' }, '2026-01-01T00:07:00Z'),
+    makeEvent('reactor', 'WI-602', 'item.unparked', {}, '2026-01-01T00:08:00Z'),
+    makeEvent('dispatch', 'WI-602', 'build.dispatched', { attempt: 4, pid: 4 }, '2026-01-01T00:09:00Z'),
+    makeEvent('dispatch', 'WI-602', 'gate.parked', { reason: 'touches-overstep' }, '2026-01-01T00:10:00Z'),
+  ];
+  const item = fold(events).items.get('WI-602')!;
+  assert.equal(item.lifetimeCrashCount, 2, 'crash + stall');
+  assert.equal(item.lifetimeGateRedCount, 2, 'gate.failed + gate.parked');
+});
+
+test('fold: lifetimeEscalationCount = decision-parks + item.escalated events', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-603', 'item.captured', { source: 'cli', text: 'escalated' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-603', 'item.queued', { spec: 'escalated' }, '2026-01-01T00:01:00Z'),
+    makeEvent('dispatch', 'WI-603', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
+    makeEvent('console', 'WI-603', 'item.escalated', { by: 'operator' }, '2026-01-01T00:03:00Z'),
+    makeEvent('dispatch', 'WI-603', 'item.parked', { reason: 'needs a call', parkKind: 'decision' }, '2026-01-01T00:04:00Z'),
+  ];
+  const item = fold(events).items.get('WI-603')!;
+  assert.equal(item.lifetimeEscalationCount, 2, 'one escalation + one decision park');
+  assert.equal(item.lifetimeParkCount, 1, 'only the decision park counts as a park');
+});
+
+test('fold: lifetime counters survive a re-open (monotone — history is never reset)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-604', 'item.captured', { source: 'cli', text: 'reopened' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-604', 'item.queued', { spec: 'reopened' }, '2026-01-01T00:01:00Z'),
+    makeEvent('dispatch', 'WI-604', 'item.parked', { reason: 'tests red', parkKind: 'ops' }, '2026-01-01T00:02:00Z'),
+    makeEvent('reactor', 'WI-604', 'item.unparked', {}, '2026-01-01T00:03:00Z'),
+    makeEvent('dispatch', 'WI-604', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:04:00Z'),
+    makeEvent('reactor', 'WI-604', 'item.merged', { commit: 'def' }, '2026-01-01T00:05:00Z'),
+    makeEvent('operator', 'WI-604', 'item.reopened', { by: 'operator', reason: 'regressed' }, '2026-01-01T00:06:00Z'),
+    makeEvent('dispatch', 'WI-604', 'item.parked', { reason: 'tests red again', parkKind: 'ops' }, '2026-01-01T00:07:00Z'),
+  ];
+  const item = fold(events).items.get('WI-604')!;
+  assert.equal(item.lifetimeParkCount, 2, 'the pre-reopen park still counts');
+});
+
+test('summary: merged record carries lifetime counters through the --json wire shape when non-zero', async () => {
+  const { buildSummary } = await import('../src/summary.js');
+  const { loadConfig } = await import('../src/config.js');
+  const { mkdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { spawnSync } = await import('node:child_process');
+
+  const repoRoot = join(tmpdir(), `loopkit-wi108-summary-${process.pid}-${Date.now()}`);
+  mkdirSync(repoRoot, { recursive: true });
+  try {
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(repoRoot, 'base.txt'), 'base', 'utf8');
+    g(['add', 'base.txt']);
+    g(['commit', '-m', 'init']);
+
+    const now = Date.now();
+    const isoNow = new Date(now).toISOString();
+    const events: LedgerEvent[] = [
+      makeEvent('operator', 'WI-605', 'item.captured', { source: 'cli', text: 'rough merge' }, isoNow),
+      makeEvent('reactor', 'WI-605', 'item.queued', { spec: 'rough merge' }, isoNow),
+      makeEvent('dispatch', 'WI-605', 'item.parked', { reason: 'tests red', parkKind: 'ops' }, isoNow),
+      makeEvent('reactor', 'WI-605', 'item.unparked', {}, isoNow),
+      makeEvent('dispatch', 'WI-605', 'build.dispatched', { attempt: 1, pid: 1 }, isoNow),
+      makeEvent('reactor', 'WI-605', 'item.merged', { commit: 'ghi' }, isoNow),
+    ];
+    const summary = buildSummary(fold(events), events, { cfg: loadConfig(repoRoot), repoRoot, now });
+    const recentMerged30d = summary.recentMerged30d as Array<Record<string, unknown>>;
+    const merged = recentMerged30d.find((m) => m.id === 'WI-605');
+    assert.ok(merged, 'WI-605 appears in recentMerged30d');
+    assert.equal(merged!.lifetimeParkCount, 1);
+    // absent counters stay absent (clean signals emit nothing)
+    assert.equal('lifetimeCrashCount' in merged!, false);
+    assert.equal('lifetimeEscalationCount' in merged!, false);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});

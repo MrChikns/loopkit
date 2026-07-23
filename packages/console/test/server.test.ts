@@ -2620,10 +2620,12 @@ test('GET /command — the Flow footnote keeps the "median cycle · N in / N out
   });
 });
 
-test('GET /command — the Reliability footnote keeps the "N/M merged first try (…)" shape', async () => {
+test('GET /command — the Reliability footnote keeps the "N/M clean landing (7d) · N/M clean (30d) · target NN% · this try: N/M (…)" shape', async () => {
   await withGlanceServer((body) => {
-    // The sole recent merge was first-attempt ⇒ 1/1 in the reliability window.
-    assert.match(body, /1\/1 merged first try \([^)]+\)/);
+    // The sole recent merge landed clean (no lifetime park/crash/gate-red/escalation counts)
+    // and was also first-attempt ⇒ 1/1 on every axis, in both the 7d/30d windows and the
+    // selected reliability window.
+    assert.match(body, /1\/1 clean landing \(7d\) · 1\/1 clean \(30d\) · target 90% · this try: 1\/1 \([^)]+\)/);
   });
 });
 

@@ -166,6 +166,26 @@ export interface ItemRecord {
   builds: ItemBuild[];
   currentBuild?: ItemBuild;
 
+  // ── Lifetime clean-landing counters (WI-108, companion to attempts) ──────────────────────
+  // MONOTONE accumulators over the WHOLE lifecycle — unlike the last-occurrence timestamps
+  // (parkedAt/escalatedAt) and `attempts` (bumped only on build.dispatched), these count how
+  // many times each rough-landing signal ever fired for this WI, so a summary consumer can
+  // compute a per-WI "clean landing" rate (did it park/crash/red/escalate on the way to merge?)
+  // without re-scanning the raw event stream. Never reset — a re-open keeps the history. Absent
+  // (undefined) on a record that has seen zero of that signal; consumers treat absent as 0.
+  /** Count of item.parked events (every park, decision OR ops). */
+  lifetimeParkCount?: number;
+  /** Count of build.crashed + build.stalled events (worker died / made no progress). */
+  lifetimeCrashCount?: number;
+  /** Count of gate.failed + gate.parked events (a build proved red / oversteps its scope). */
+  lifetimeGateRedCount?: number;
+  /**
+   * Founder-attention count: item.escalated events PLUS decision-kind parks (parkKind==='decision').
+   * These are the landings that actually reached the operator's needs-you desk, distinct from
+   * lifetimeParkCount which counts every park including the ops-lane ones the plane self-heals.
+   */
+  lifetimeEscalationCount?: number;
+
   // spec and routing
   spec?: string;
   route?: string;
@@ -303,7 +323,7 @@ export interface ItemRecord {
    * every merge predating this field, and on any merge whose worker manifest didn't supply
    * one (the acceptance desk renders a visible "no certification provided" line, never blank).
    */
-  mergeCertification?: { couldBreak: string; detection: string; rollback: string };
+  mergeCertification?: { couldBreak: string; detection: string; rollback: string; portability?: string };
   /** True when the item was accepted provisionally by reactor:oc6-provisional. */
   provisionalAccept?: boolean;
 
@@ -639,7 +659,10 @@ function parseCertification(d: Record<string, unknown>): ItemRecord['mergeCertif
   const detection = typeof r['detection'] === 'string' ? r['detection'] : '';
   const rollback = typeof r['rollback'] === 'string' ? r['rollback'] : '';
   if (!couldBreak || !detection || !rollback) return undefined;
-  return { couldBreak, detection, rollback };
+  // WI-098: fold the optional portability note alongside the three required fields (additive;
+  // absent on every merge predating it). The reactor's portability-promotion step reads it.
+  const portability = typeof r['portability'] === 'string' && r['portability'].trim() ? r['portability'] : undefined;
+  return { couldBreak, detection, rollback, ...(portability ? { portability } : {}) };
 }
 
 function wiNum(id: string): number {
@@ -1005,6 +1028,12 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           : typeof d['parkReason'] === 'string' ? d['parkReason']
           : undefined;
         rec.parkKind = typeof d['parkKind'] === 'string' ? d['parkKind'] : undefined;
+        // WI-108 lifetime counters — every park bumps the park count; a decision-kind park
+        // additionally bumps the founder-attention count (it reaches the needs-you desk).
+        rec.lifetimeParkCount = (rec.lifetimeParkCount ?? 0) + 1;
+        if (rec.parkKind === 'decision') {
+          rec.lifetimeEscalationCount = (rec.lifetimeEscalationCount ?? 0) + 1;
+        }
         // storedSpec is fully specified by THIS event (no gate.parked pairing to preserve,
         // unlike parkClass) — reset every park, like parkReason.
         rec.storedSpec = typeof d['storedSpec'] === 'string' ? d['storedSpec'] : undefined;
@@ -1093,6 +1122,10 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       case 'item.escalated':
         rec.escalatedAt = ev.ts;
         rec.escalatedBy = typeof d['by'] === 'string' ? d['by'] : undefined;
+        // WI-108 founder-attention count: an explicit escalation reaches the operator (alongside
+        // decision-kind parks, counted in item.parked). This case never calls transition() so it
+        // fires safely on any state, including a late escalate on a live 'building' item.
+        rec.lifetimeEscalationCount = (rec.lifetimeEscalationCount ?? 0) + 1;
         break;
 
       // item.blocked — WI-084 park pathologist: the victim is blocked on a repair WI.
@@ -1164,6 +1197,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       // final state; the reason string distinguishes them on the build record / board.
       case 'build.crashed':
       case 'build.stalled':
+        rec.lifetimeCrashCount = (rec.lifetimeCrashCount ?? 0) + 1;  // WI-108 lifetime counter
         if (rec.currentBuild) {
           rec.currentBuild.crashedAt = ev.ts;
           rec.currentBuild.crashReason = typeof d['reason'] === 'string' ? d['reason'] : undefined;
@@ -1222,6 +1256,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       case 'gate.failed':
         transition(rec, 'parked', ev.ts);
         rec.parkedAt = ev.ts;
+        rec.lifetimeGateRedCount = (rec.lifetimeGateRedCount ?? 0) + 1;  // WI-108 lifetime counter
         rec.parkReason = typeof d['reason'] === 'string' ? d['reason'] : 'gate.failed';
         if (rec.currentBuild) {
           rec.builds.push({ ...rec.currentBuild });
@@ -1232,6 +1267,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       case 'gate.parked':
         transition(rec, 'parked', ev.ts);
         rec.parkedAt = ev.ts;
+        rec.lifetimeGateRedCount = (rec.lifetimeGateRedCount ?? 0) + 1;  // WI-108 lifetime counter
         // gate.parked.reason carries the park CLASS token ('touches-overstep' | 'spine');
         // record it separately from parkReason, which the following item.parked overwrites
         // with the human-readable detail. The auto-approve classifier keys on this.

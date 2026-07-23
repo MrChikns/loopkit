@@ -393,6 +393,16 @@ export interface LoopkitConfig {
     maxTrailEvents?: number;
     /** Maximum diff characters to send (stat + patch combined). Default: 12000. */
     maxDiffChars?: number;
+    /**
+     * WI-099 — blocked-victim wait-timeout. A victim parked on `blockedOn` (see
+     * ItemRecord.blockedOn) is normally released the moment its repair WI merges; if the
+     * repair is instead rejected or parked itself, the victim would otherwise sit blocked
+     * forever with no signal. When a victim has been parked longer than this many hours AND
+     * its blocker has not merged, the reactor re-parks it as parkKind:'decision' carrying the
+     * original diagnosis (which WI it was blocked on + why), so it reaches the operator desk
+     * instead of staying silently off it. Default: 24.
+     */
+    blockedWaitTimeoutHours?: number;
   };
 
   /**
@@ -814,6 +824,7 @@ const DEFAULTS: LoopkitConfig = {
     timeoutMs: 180_000,
     maxTrailEvents: 15,
     maxDiffChars: 12_000,
+    blockedWaitTimeoutHours: 24,
   },
   playbook: {
     enabled: true,

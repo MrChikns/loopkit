@@ -5,6 +5,11 @@
  * serving stale assets forever, even with the compiled server code fully current. `startConsole`
  * now refuses to boot in that state. All git setup here is local (a bare repo standing in for
  * "origin" plus a second clone standing in for "someone else's push") — no network involved.
+ *
+ * WI-105: "ahead of origin" (unpushed local commits on top of an up-to-date upstream) is a
+ * healthy pre-push state — the on-disk assets are newer than origin, never stale — so it must
+ * boot fine, not just the in-sync and behind/diverged cases. `skipCheckoutDriftCheck` is the
+ * explicit bypass for tests that want to opt out of the guard entirely.
  */
 
 import { test } from 'node:test';
@@ -126,6 +131,107 @@ test('startConsole: refuses to boot when the checkout has fallen behind its upst
         () => startConsole({ ledgerDir, port: 0, runsDir: join(ledgerDir, 'runs'), checkoutDir }),
         /does not match its upstream/,
       );
+    } finally {
+      rmSyncFs(originDir, { recursive: true, force: true });
+      rmSyncFs(checkoutDir, { recursive: true, force: true });
+      rmSyncFs(otherPusherDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('startConsole: boots fine when the checkout is ahead of its upstream (unpushed local commits)', async () => {
+  await withLedgerAndDirs(async (ledgerDir) => {
+    const originDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-origin-'));
+    const checkoutDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-ahead-'));
+    try {
+      run(originDir, 'init', '-q', '--bare', '-b', 'main');
+
+      initRepo(checkoutDir);
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'root');
+      run(checkoutDir, 'remote', 'add', 'origin', originDir);
+      run(checkoutDir, 'push', '-q', '-u', 'origin', 'main');
+
+      // Local commit(s) never pushed — the healthy "mid fast-drain, about to push" state this
+      // guard must not block (WI-105 was filed because it did).
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'unpushed local work');
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'more unpushed local work');
+
+      const handle = await startConsole({ ledgerDir, port: 0, runsDir: join(ledgerDir, 'runs'), checkoutDir });
+      await handle.close();
+    } finally {
+      rmSyncFs(originDir, { recursive: true, force: true });
+      rmSyncFs(checkoutDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('startConsole: refuses to boot when the checkout has diverged from its upstream', async () => {
+  await withLedgerAndDirs(async (ledgerDir) => {
+    const originDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-origin-'));
+    const checkoutDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-diverged-'));
+    const otherPusherDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-pusher-'));
+    try {
+      run(originDir, 'init', '-q', '--bare', '-b', 'main');
+
+      initRepo(checkoutDir);
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'root');
+      run(checkoutDir, 'remote', 'add', 'origin', originDir);
+      run(checkoutDir, 'push', '-q', '-u', 'origin', 'main');
+
+      // Someone else pushes a commit checkoutDir never sees...
+      rmSyncFs(otherPusherDir, { recursive: true, force: true });
+      run(tmpdir(), 'clone', '-q', originDir, otherPusherDir);
+      configUser(otherPusherDir);
+      run(otherPusherDir, 'commit', '--allow-empty', '-q', '-m', 'a later merge');
+      run(otherPusherDir, 'push', '-q', 'origin', 'main');
+
+      // ...while checkoutDir ALSO makes its own unpushed local commit — HEAD and the
+      // (fetched) upstream ref now share a common ancestor but neither is an ancestor of the
+      // other: genuinely diverged, not merely ahead. Must still block.
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'unpushed local work');
+      run(checkoutDir, 'fetch', '-q', 'origin');
+
+      await assert.rejects(
+        () => startConsole({ ledgerDir, port: 0, runsDir: join(ledgerDir, 'runs'), checkoutDir }),
+        /does not match its upstream/,
+      );
+    } finally {
+      rmSyncFs(originDir, { recursive: true, force: true });
+      rmSyncFs(checkoutDir, { recursive: true, force: true });
+      rmSyncFs(otherPusherDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('startConsole: skipCheckoutDriftCheck bypasses the guard even when behind upstream', async () => {
+  await withLedgerAndDirs(async (ledgerDir) => {
+    const originDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-origin-'));
+    const checkoutDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-skip-'));
+    const otherPusherDir = mkdtempSync(join(tmpdir(), 'loopkit-console-drift-pusher-'));
+    try {
+      run(originDir, 'init', '-q', '--bare', '-b', 'main');
+
+      initRepo(checkoutDir);
+      run(checkoutDir, 'commit', '--allow-empty', '-q', '-m', 'root');
+      run(checkoutDir, 'remote', 'add', 'origin', originDir);
+      run(checkoutDir, 'push', '-q', '-u', 'origin', 'main');
+
+      rmSyncFs(otherPusherDir, { recursive: true, force: true });
+      run(tmpdir(), 'clone', '-q', originDir, otherPusherDir);
+      configUser(otherPusherDir);
+      run(otherPusherDir, 'commit', '--allow-empty', '-q', '-m', 'a later merge');
+      run(otherPusherDir, 'push', '-q', 'origin', 'main');
+
+      run(checkoutDir, 'fetch', '-q', 'origin'); // behind upstream — would normally block
+
+      const handle = await startConsole({
+        ledgerDir,
+        port: 0,
+        runsDir: join(ledgerDir, 'runs'),
+        checkoutDir,
+        skipCheckoutDriftCheck: true,
+      });
+      await handle.close();
     } finally {
       rmSyncFs(originDir, { recursive: true, force: true });
       rmSyncFs(checkoutDir, { recursive: true, force: true });

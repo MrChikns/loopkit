@@ -927,6 +927,13 @@ export interface WorkerCertification {
   couldBreak: string;
   detection: string;
   rollback: string;
+  /**
+   * WI-098 — cross-target portability note ("applies to: <targets> | none"). Optional even when
+   * the rest of the certification is present; carried verbatim to item.merged.certification so the
+   * reactor's portability-promotion step can capture a sibling item on each named target. See
+   * {@link CertificationPayload}.portability.
+   */
+  portability?: string;
 }
 
 /**
@@ -980,7 +987,10 @@ function parseWorkerCertification(raw: unknown): WorkerCertification | undefined
   const detection = typeof r['detection'] === 'string' ? r['detection'] : '';
   const rollback = typeof r['rollback'] === 'string' ? r['rollback'] : '';
   if (!couldBreak || !detection || !rollback) return undefined;
-  return { couldBreak, detection, rollback };
+  // WI-098: portability is an optional add-on to a present certification — keep it when supplied
+  // as a non-empty string, drop it otherwise (never a partially-filled block).
+  const portability = typeof r['portability'] === 'string' && r['portability'].trim() ? r['portability'] : undefined;
+  return { couldBreak, detection, rollback, ...(portability ? { portability } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,8 +1188,9 @@ export function parseBrief(text: string): string {
  * Exported for testing. */
 export const MANIFEST_INSTRUCTION = `
 MANIFEST: Before finishing, write MANIFEST-<wi-id>.json at the WORKTREE ROOT (not committed) with:
-{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>" } }
+{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" } }
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" honestly even when nothing looks risky (say so plainly, e.g. couldBreak: "nothing outside the touched files").
+PORTABILITY: name any OTHER registered targets this change's pattern applies to (or "none") — REQUIRED when the work is ADR-bearing or an incident-fix. The reactor files a sibling item on each named target.
 Do NOT commit this file. It is read by the dispatch gate for attribution and observability.`;
 
 /** @internal exported for tests */
@@ -1242,8 +1253,9 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
     .join('\n\n');
   const batchManifestInstruction = `
 MANIFESTS: Before finishing, for EACH item write MANIFEST-<wi-id>.json at the WORKTREE ROOT (e.g. MANIFEST-${items[0].id}.json). Do NOT commit these files.
-Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>" } }
-CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.`;
+Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" } }
+CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.
+PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
 Make ONE SEPARATE COMMIT PER ITEM, and start each commit subject with the item id in parentheses — e.g. "feat(${items[0].id}): ..." — so each change is attributable. Commit by explicit path (never git add -A). COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
 Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, skip it (leave it uncommitted) and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.

@@ -134,6 +134,11 @@ const publicDirPromise = findPublicDir();
  * `git fetch`: it compares HEAD against the already-known remote-tracking ref, so it can't
  * hang or fail on a missing network and only ever reports drift the checkout could already
  * have known about locally.
+ *
+ * "Ahead of origin" (unpushed local commits, upstream is an ancestor of HEAD) is a healthy,
+ * expected pre-push state — the on-disk CSS/JS is *newer* than origin, never stale — so it is
+ * explicitly allowed via `git merge-base --is-ancestor @{u} HEAD`. Only genuinely BEHIND (HEAD
+ * is an ancestor of upstream) or DIVERGED (neither is an ancestor of the other) trips the guard.
  */
 function checkoutDriftError(dir: string): string | undefined {
   const run = (...args: string[]) => spawnSync('git', args, { cwd: dir, stdio: 'pipe' });
@@ -144,6 +149,8 @@ function checkoutDriftError(dir: string): string | undefined {
   const headSha = head.stdout.toString('utf8').trim();
   const upstreamSha = upstream.stdout.toString('utf8').trim();
   if (!headSha || !upstreamSha || headSha === upstreamSha) return undefined;
+  const upstreamIsAncestor = run('merge-base', '--is-ancestor', '@{u}', 'HEAD');
+  if (upstreamIsAncestor.status === 0) return undefined; // ahead of origin — healthy, not stale
   return (
     `console checkout at ${dir} (HEAD ${headSha.slice(0, 12)}) does not match its upstream ` +
     `(${upstreamSha.slice(0, 12)}) — this checkout is behind (or has diverged from) origin, ` +
@@ -832,6 +839,16 @@ export interface ConsoleOptions {
    * instead of asserting against whatever this monorepo checkout happens to be doing.
    */
   checkoutDir?: string;
+  /**
+   * Skip the checkout-drift guard entirely (see `checkoutDriftError` above). The guard already
+   * allows the healthy ahead-of-origin state, so this is not needed to run a gate on an
+   * unpushed checkout — it exists for tests that want to assert server behavior in isolation
+   * from this monorepo checkout's git state altogether (e.g. a CI sandbox with no upstream
+   * wiring, or a test that doesn't want any git subprocess in its critical path). Never set
+   * this in production: it disables the only protection against silently serving stale
+   * live-read CSS/JS.
+   */
+  skipCheckoutDriftCheck?: boolean;
 }
 
 export interface ConsoleHandle {
@@ -856,7 +873,7 @@ export async function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle>
   const trustedHosts = new Set((opts.trustedHosts ?? []).map((h) => h.toLowerCase()));
   const runsDir = opts.runsDir ?? resolvePlaneHome({ repoRoot }).runsDir;
 
-  const driftError = checkoutDriftError(opts.checkoutDir ?? __dirname);
+  const driftError = opts.skipCheckoutDriftCheck ? undefined : checkoutDriftError(opts.checkoutDir ?? __dirname);
   if (driftError) throw new Error(driftError);
 
   const server = createServer((req, res) => {

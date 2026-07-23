@@ -17,7 +17,6 @@ your project's equivalent) to catch a real regression, loopkit is the harness th
 prove it against that gate before it merges, and routes only the changes that actually need your
 judgment back to you. See ["Honest scope"](#honest-scope) below for exactly what's proven today.
 
-<!-- Record the 40-second demo and drop it here as docs/demo.gif — see docs/demo-recording.md -->
 ![loopkit turning one English sentence into a merged, tested commit](docs/demo.gif)
 
 ```bash
@@ -204,9 +203,19 @@ The plane encodes an opinionated delivery discipline:
 4. **The gate is the reviewer of record** — human attention goes to product judgment (the
    `review`/`must` tiers), not to re-checking what a test suite already proved.
 
-More: [the vision](docs/vision.md) · [operating model](docs/operating-model.md) ·
-[event model](docs/event-model.md) · [trust boundaries](docs/trust-boundaries.md) ·
+The discipline itself — stated so it outlives the code — is
+[docs/method.md](docs/method.md); [docs/hardening-audit.md](docs/hardening-audit.md) is it
+applied: a 10-class incident catalog run proactively against the framework.
+
+More: [the method](docs/method.md) · [the vision](docs/vision.md) ·
+[operating model](docs/operating-model.md) · [event model](docs/event-model.md) ·
+[trust boundaries](docs/trust-boundaries.md) · [hardening audit](docs/hardening-audit.md) ·
 [agent integration](docs/agent-integration.md) · [knowledge index](docs/knowledge.md).
+
+For Claude Code users the repo ships the operating discipline as slash commands
+(`.claude/commands/`): `/drive` (attended coordinator mode over claims),
+`/plane-check` (health triage), `/board` (the status window). Open a session in this repo and
+they load automatically; see [agent integration](docs/agent-integration.md).
 
 ## Honest scope
 

@@ -260,6 +260,125 @@ test('pathology: blocked victim requeues once its blocker merges (blockedOn clea
 });
 
 // ---------------------------------------------------------------------------
+// 4b. WI-099: blocked-victim wait-timeout — a blocker that never merges
+// ---------------------------------------------------------------------------
+
+test('pathology: blocked victim past the wait-timeout re-parks as decision with diagnosis (blocker rejected)', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-060', { attempt: 1 }),
+      makeEvent('reactor', 'WI-060', 'item.blocked', { onItem: 'WI-061', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
+      makeEvent('reactor', 'WI-061', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
+      makeEvent('reactor', 'WI-061', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
+      makeEvent('operator', 'WI-061', 'item.rejected', { by: 'operator' }, '2026-01-01T00:00:07Z'),
+    ]);
+
+    const preFold = fold(await loadAllEvents(ledgerDir));
+    assert.equal(preFold.items.get('WI-060')?.state, 'parked', 'pre-condition: victim parked');
+    assert.equal(preFold.items.get('WI-060')?.blockedOn, 'WI-061');
+    assert.equal(preFold.items.get('WI-061')?.state, 'rejected', 'pre-condition: blocker rejected, never merges');
+
+    // 25 hours after the victim's item.parked (2026-01-01T00:00:03Z) — past the 24h default.
+    const now = new Date('2026-01-02T01:00:03Z').getTime();
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: null,   // release/timeout path needs no provider
+      config: makeTestConfig({ breakerN: 3 }),
+      now,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const reparked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-060' && e.actor === 'reactor');
+    assert.equal(reparked.length, 1, 'must re-park the timed-out victim exactly once');
+    const data = reparked[0].data as { reason?: string; parkKind?: string; escalation?: { intent: string; evidence: string; risk: string; recommendation: string } };
+    assert.equal(data.parkKind, 'decision', 'must escalate to the operator desk, not the health lane');
+    assert.match(data.reason ?? '', /WI-061/, 'reason must carry the original blocker id');
+    assert.ok(data.escalation, 'must carry an escalation payload');
+    assert.match(data.escalation!.evidence, /WI-061/);
+    assert.match(data.escalation!.recommendation, /WI-061/);
+
+    const msgOut = events.filter(e => e.type === 'msg.out' && e.item === 'WI-060' && e.actor === 'reactor');
+    assert.ok(msgOut.some(e => (e.data as { text?: string }).text?.includes('wait-timeout')), 'must surface a thread note');
+
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-060')?.state, 'parked', 'victim stays parked (now as a decision park)');
+    assert.equal(folded.items.get('WI-060')?.parkKind, 'decision');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+test('pathology: blocked victim within the wait-timeout window stays parked (no re-park yet)', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-062', { attempt: 1 }),
+      makeEvent('reactor', 'WI-062', 'item.blocked', { onItem: 'WI-063', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
+      makeEvent('reactor', 'WI-063', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
+      makeEvent('reactor', 'WI-063', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
+      // WI-063 (the blocker) is still building — no terminal event at all.
+    ]);
+
+    // Only 1 hour after the victim's item.parked — well within the 24h default.
+    const now = new Date('2026-01-01T01:00:03Z').getTime();
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: null,
+      config: makeTestConfig({ breakerN: 3 }),
+      now,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const reparked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-062' && e.actor === 'reactor');
+    assert.equal(reparked.length, 0, 'must NOT re-park before the wait-timeout elapses');
+    const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-062' && e.actor === 'reactor');
+    assert.equal(requeued.length, 0, 'blocker has not merged — no release either');
+
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-062')?.state, 'parked');
+    assert.equal(folded.items.get('WI-062')?.blockedOn, 'WI-063', 'still genuinely blocked, unchanged');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+test('pathology: blockedWaitTimeoutHours is configurable and respected', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-064', { attempt: 1 }),
+      makeEvent('reactor', 'WI-064', 'item.blocked', { onItem: 'WI-065', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
+      makeEvent('reactor', 'WI-065', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
+      makeEvent('reactor', 'WI-065', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
+      makeEvent('reactor', 'WI-065', 'item.parked', { reason: 'gate red', parkKind: 'ops' }, '2026-01-01T00:00:07Z'),
+    ]);
+
+    // 2 hours after the victim's park — past a configured 1h timeout.
+    const now = new Date('2026-01-01T02:00:03Z').getTime();
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: null,
+      config: makeTestConfig({ breakerN: 3, pathology: { ...CONFIG_DEFAULTS.pathology, blockedWaitTimeoutHours: 1 } }),
+      now,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const reparked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-064' && e.actor === 'reactor');
+    assert.equal(reparked.length, 1, 'a shorter configured timeout must fire sooner');
+    assert.equal((reparked[0].data as { parkKind?: string }).parkKind, 'decision');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 5. items-own-code first failure → requeue once with diagnosis injected
 // ---------------------------------------------------------------------------
 

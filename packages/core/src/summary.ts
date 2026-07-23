@@ -230,6 +230,14 @@ export function buildSummary(
           // each merged item — carried straight through, no re-derivation.
           ...(rec.createdAt ? { createdAt: rec.createdAt } : {}),
           attempts: rec.attempts,
+          // WI-108 lifetime clean-landing counters — how rough the road to merge was, per WI.
+          // Emitted only when non-zero (absent === 0) so a clean landing carries none and legacy
+          // replays stay byte-identical. Lets a summary consumer compute per-WI clean-landing
+          // rate without re-scanning the raw event stream.
+          ...(rec.lifetimeParkCount ? { lifetimeParkCount: rec.lifetimeParkCount } : {}),
+          ...(rec.lifetimeCrashCount ? { lifetimeCrashCount: rec.lifetimeCrashCount } : {}),
+          ...(rec.lifetimeGateRedCount ? { lifetimeGateRedCount: rec.lifetimeGateRedCount } : {}),
+          ...(rec.lifetimeEscalationCount ? { lifetimeEscalationCount: rec.lifetimeEscalationCount } : {}),
           // carry touches so the ops console can derive the origin chip for shipped items on
           // the stream + acceptance desk.
           ...(rec.touches ? { touches: rec.touches } : {}),

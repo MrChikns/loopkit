@@ -254,6 +254,52 @@ export interface CertificationPayload {
   detection: string;
   /** The rollback path if it does. */
   rollback: string;
+  /**
+   * WI-098 — cross-target pattern portability ("harvest portable patterns at boundaries").
+   * A free-form note in the shape `"applies to: <target-a>, <target-b> | none"` declaring which
+   * OTHER registered targets this change's pattern generalizes to, so the reactor can capture a
+   * sibling item there (see reactor.ts stepPortabilityPromotion). OPTIONAL in general (a merge
+   * without it still folds and renders), but REQUIRED when the item is ADR-bearing (references a
+   * D-NNN / ADR) or an incident-fix — enforced advisorily, not as a hard gate (see
+   * {@link isPortabilityRequired}). `none` (or an empty target list) means "nothing generalizes";
+   * absent means "the worker didn't consider portability" — the two are deliberately distinct so
+   * the grooming bounce can nudge only the latter.
+   */
+  portability?: string;
+}
+
+/**
+ * WI-098 — does this item OWE a portability note (certification.portability)? True when the
+ * item is ADR-bearing (its spec/text names a `D-NNN` or `ADR-NNN`) or is an incident-fix (repair
+ * lane / an incident-shaped spec). Pure/deterministic string test, never an LLM call — the
+ * reactor's portability-grooming bounce keys on it, exactly as escalation-grooming keys on
+ * readsAsBareQuestion. A false negative just skips the nudge; it never blocks a merge.
+ */
+export function isPortabilityRequired(fields: { spec?: string; text?: string; lane?: string; repairContext?: string }): boolean {
+  const hay = `${fields.spec ?? ''}\n${fields.text ?? ''}`;
+  if (/\b(D-\d{2,}|ADR-\d+)\b/.test(hay)) return true;                 // ADR-bearing
+  if (fields.repairContext) return true;                              // a repair build (incident-fix)
+  if (fields.lane === 'repair') return true;                         // repair lane
+  if (/\b(incident|regression|post-?mortem|hotfix)\b/i.test(hay)) return true; // incident-shaped
+  return false;
+}
+
+/**
+ * WI-098 — parse a certification.portability note into its target list. Returns `[]` for `none`,
+ * an absent/blank note, or a note that names no targets after the `applies to:` marker. Lenient
+ * transcribe-not-transform extraction (no LLM): splits the post-`applies to:` remainder on commas,
+ * trims, drops the literal `none`. The reactor resolves each returned name against the registered
+ * targets — an unregistered name simply captures nothing (surfaced in the step detail).
+ */
+export function parsePortabilityTargets(portability: string | undefined): string[] {
+  if (!portability) return [];
+  const m = /applies to:\s*(.*)$/is.exec(portability);
+  const remainder = (m ? m[1] : portability).trim();
+  if (!remainder || /^none$/i.test(remainder)) return [];
+  return remainder
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0 && !/^none$/i.test(s));
 }
 export interface ItemMergedData {
   commit: string;

@@ -31,7 +31,7 @@ import { fold, FoldResult, ItemRecord, computeAcceptanceDebt, projectEngagement,
 import { runDoctor, defaultPidProbe, DoctorConfig, ProgressProbe, ExitFileProbe, WorktreeProbe, reapStaleClaims } from '../doctor.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
-import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, resolveAttachmentPaths, DEFAULT_LANE } from '../schema.js';
+import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets } from '../schema.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { makeRegistry, makeFileHealthFns, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
@@ -843,6 +843,156 @@ function makeDecompositionChildEvents(
       } as ItemQueuedData),
     ],
   };
+}
+
+/**
+ * WI-098 — cross-target pattern promotion ("harvest portable patterns at boundaries — never leave
+ * them in chat"). When a MERGED item's certification carries a portability note naming OTHER
+ * registered targets, capture a sibling item on each so the generalizable pattern lands as durable
+ * work on the right project instead of being rediscovered later. The captured sibling is:
+ *   - PARKED as a decision when the source work is product-shaped (an operator must ratify how the
+ *     pattern applies to that target's product surface), OR
+ *   - QUEUED when the source work is mechanical (a tooling/infra change the plane can just build).
+ * docs/method.md stays the durable home for ratified GENERIC patterns; this step never edits it —
+ * it only files the per-target work item (tracked as a sibling concern).
+ *
+ * Idempotent: each promoted sibling carries source `portability:<sourceWI>:<targetName>` and the
+ * step skips any (source, target) pair that already has one — a standing merged item is promoted
+ * exactly once per named target, never re-captured every beat.
+ *
+ * ADVISORY nudge (same shape as escalation-grooming): a merged item that OWED a portability note
+ * (ADR-bearing / incident-fix, isPortabilityRequired) but shipped without one gets ONE msg.out
+ * asking the producer to state portability. Never a hard gate — the merge already happened; this
+ * only prompts the harvest it skipped.
+ */
+const PORTABILITY_NUDGE_MARKER = 'portability-nudge:';
+
+/** Product-shaped source work ⇒ the promoted sibling parks as a decision (an operator ratifies how
+ *  the pattern applies to that target's product); mechanical work ⇒ it queues. Heuristic, keyed on
+ *  the source item's lane + spec shape — a false call only changes park-vs-queue, never correctness. */
+function isProductShapedSource(rec: ItemRecord): boolean {
+  const lane = rec.lane;
+  if (lane === 'engineering' || lane === 'repair') return false;   // build/tooling/repair work is mechanical
+  if (lane === 'planning' || lane === 'marketing' || lane === 'product') return true;
+  const hay = `${rec.spec ?? ''}\n${rec.sourceText ?? ''}`;
+  return /\b(product|pricing|packaging|surface|UX|onboarding|policy|doctrine|ADR|D-\d{2,})\b/i.test(hay);
+}
+
+async function stepPortabilityPromotion(
+  opts: ReactorOptions,
+  cfg: LoopkitConfig,
+): Promise<StepResult> {
+  const step = 'portability-promotion';
+  try {
+    let written = 0;
+    let promotedCount = 0;
+    let nudgedCount = 0;
+    const skippedUnregistered: string[] = [];
+    await withLock(opts.ledgerDir, async (tx) => {
+      const allEvents = await tx.loadAll();
+      const foldResult = fold(allEvents);
+      const events: LedgerEvent[] = [];
+      let nextNum = foldResult.maxWiNum;
+
+      // Existing promotion siblings, keyed by their source stamp — the once-per-(source,target)
+      // idempotency guard (extended synchronously below so two named targets in one note don't
+      // collide on a WI number within this beat).
+      const promotedPairs = new Set<string>();
+      for (const rec of foldResult.items.values()) {
+        if (rec.source && rec.source.startsWith('portability:')) promotedPairs.add(rec.source);
+      }
+
+      for (const rec of foldResult.items.values()) {
+        // Only harvest from an item that actually SHIPPED (merged/accepted) — a parked or in-flight
+        // item's certification isn't final.
+        if (rec.state !== 'merged' && rec.state !== 'accepted') continue;
+
+        const cert = rec.mergeCertification;
+        const targets = parsePortabilityTargets(cert?.portability);
+
+        // ADVISORY nudge: owed a portability note but shipped without one (or with a blank/none it
+        // shouldn't have). Bounded once per item via the msg.out marker.
+        const owed = isPortabilityRequired({
+          spec: rec.spec, text: rec.sourceText, lane: rec.lane, repairContext: rec.repairContext,
+        });
+        if (owed && !cert?.portability) {
+          const alreadyNudged = rec.messages.some(
+            (m) => m.direction === 'out' && m.text.startsWith(PORTABILITY_NUDGE_MARKER),
+          );
+          if (!alreadyNudged) {
+            events.push(makeEvent('reactor', rec.id, 'msg.out', {
+              text: `${PORTABILITY_NUDGE_MARKER} This ADR-bearing/incident-fix item shipped without a portability note. State which other targets its pattern applies to (or "none") so the harvest isn't lost — "applies to: <targets> | none".`,
+            }));
+            nudgedCount++;
+          }
+        }
+
+        if (targets.length === 0) continue;
+
+        const productShaped = isProductShapedSource(rec);
+        for (const targetName of targets) {
+          // Never promote onto the item's OWN target (that's not cross-target).
+          const ownTarget = rec.target;
+          if (ownTarget && targetName === ownTarget) continue;
+
+          // Resolve against the registered targets — an unregistered name captures nothing
+          // (surfaced in the detail; the operator can register it and the promotion fires next beat).
+          const targetRec = foldResult.targets.byName(targetName);
+          if (!targetRec) { skippedUnregistered.push(`${rec.id}→${targetName}`); continue; }
+
+          const sourceStamp = `portability:${rec.id}:${targetName}`;
+          if (promotedPairs.has(sourceStamp)) continue;
+          promotedPairs.add(sourceStamp);
+
+          nextNum += 1;
+          const childId = `WI-${String(nextNum).padStart(3, '0')}`;
+          const patternRef = (rec.title ?? rec.spec ?? rec.sourceText ?? rec.id).slice(0, 120);
+          const childText = `Apply the pattern from ${rec.id} ("${patternRef}") to ${targetName}.`;
+
+          events.push(makeEvent('reactor', childId, 'item.captured', {
+            source: sourceStamp,
+            text: childText,
+            target: targetName,
+            targetId: targetRec.targetId,
+          } as ItemCapturedData));
+
+          if (productShaped) {
+            // Product-shaped ⇒ park as a decision so an operator ratifies how the pattern applies
+            // to that target's product surface before it becomes build work.
+            events.push(makeEvent('reactor', childId, 'item.parked', {
+              reason: `Portability of ${rec.id}'s pattern to ${targetName} — ratify how it applies to this target's product before building.`,
+              parkKind: 'decision',
+            }));
+          } else {
+            // Mechanical ⇒ queue it directly; dispatch builds it against the named target.
+            events.push(makeEvent('reactor', childId, 'item.queued', {
+              spec: childText,
+            } as ItemQueuedData));
+          }
+          promotedCount++;
+        }
+      }
+
+      if (!opts.dryRun && events.length > 0) {
+        await tx.append(events);
+        written = events.length;
+      }
+    });
+
+    const bits: string[] = [];
+    if (promotedCount > 0) bits.push(`promoted ${promotedCount} sibling(s)`);
+    if (nudgedCount > 0) bits.push(`nudged ${nudgedCount} for missing portability`);
+    if (skippedUnregistered.length > 0) bits.push(`skipped ${skippedUnregistered.length} unregistered target(s): ${skippedUnregistered.join(', ')}`);
+    return {
+      step,
+      ok: true,
+      eventsWritten: written,
+      mdWritten: false,
+      detail: bits.length === 0 ? 'no portability notes to promote' : bits.join('; '),
+    };
+  } catch (e) {
+    return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
+  }
 }
 
 async function stepDecompositionUnpark(
@@ -1745,6 +1895,14 @@ const PATHOLOGY_EXCLUDED_PARK_KINDS = new Set<string | undefined>(['decision', '
  * FAIL-OPEN: provider absent/erroring/unparseable → skip note, park stands EXACTLY as today.
  * Every action (including a skip) appends a msg.out 'pathology: ' note so existing thread/desk
  * surfaces show it with zero UI changes (no packages/opsui or packages/console touch).
+ *
+ * WI-099 — blocked-victim wait-timeout: a victim's blocker can be rejected or itself parked
+ * instead of merging, in which case the release loop below is a permanent no-op and the victim
+ * sits blocked with no signal (silently off the needs-you desk, per the parkKind decision/ops
+ * taxonomy — see docs/event-model.md). Once a victim has been parked longer than
+ * cfg.pathology.blockedWaitTimeoutHours AND its blocker has still not merged, re-park the
+ * victim as parkKind:'decision' carrying the original blockedOn diagnosis as an
+ * EscalationPayload, so it surfaces on the operator desk instead of staying silently parked.
  */
 async function stepPathology(
   opts: ReactorOptions,
@@ -1769,23 +1927,54 @@ async function stepPathology(
     // FIRST: blocked-victim RELEASE (no provider needed, cheap, always runs). A victim blocked
     // on a repair WI (item.blocked.onItem) is released the moment that repair item merges —
     // requeue clears blockedOn via the fold's item.queued case.
+    //
+    // WI-099: when the blocker is NOT merged (rejected / re-parked / still building), leaving
+    // the victim parked forever used to be a silent no-op. Instead, once the victim has been
+    // parked past blockedWaitTimeoutHours, re-park it as parkKind:'decision' so it reaches the
+    // operator desk with the original blocked-on diagnosis attached.
+    const blockedWaitTimeoutMs =
+      (cfg.pathology.blockedWaitTimeoutHours ?? 24) * 60 * 60 * 1000;
+    const nowMs = opts.now ?? Date.now();
     for (const rec of foldResult.items.values()) {
       if (rec.state !== 'parked' || !rec.blockedOn) continue;
-      const blocker = foldResult.items.get(rec.blockedOn);
-      if (!blocker || blocker.state !== 'merged') continue;   // rejected/gone/still-building → leave parked, no infinite loop
-      const queuedData: ItemQueuedData = {
-        spec: rec.spec ?? '',
-        repairContext: `blocker ${rec.blockedOn} merged — auto-requeued (pathology)`,
-      };
-      if (rec.touches) queuedData.touches = rec.touches;
-      if (rec.model) queuedData.model = rec.model;
-      if (rec.effort) queuedData.effort = rec.effort;
-      if (rec.priority) queuedData.priority = rec.priority;
-      events.push(makeEvent('reactor', rec.id, 'item.queued', queuedData));
-      events.push(makeEvent('reactor', rec.id, 'msg.out', {
-        text: `pathology: blocker ${rec.blockedOn} merged, requeuing.`,
+      const blockerId = rec.blockedOn;
+      const blocker = foldResult.items.get(blockerId);
+      if (blocker && blocker.state === 'merged') {
+        const queuedData: ItemQueuedData = {
+          spec: rec.spec ?? '',
+          repairContext: `blocker ${blockerId} merged — auto-requeued (pathology)`,
+        };
+        if (rec.touches) queuedData.touches = rec.touches;
+        if (rec.model) queuedData.model = rec.model;
+        if (rec.effort) queuedData.effort = rec.effort;
+        if (rec.priority) queuedData.priority = rec.priority;
+        events.push(makeEvent('reactor', rec.id, 'item.queued', queuedData));
+        events.push(makeEvent('reactor', rec.id, 'msg.out', {
+          text: `pathology: blocker ${blockerId} merged, requeuing.`,
+        }));
+        released++;
+        continue;
+      }
+
+      // Blocker hasn't merged yet — still building is fine, no timeout applies until the
+      // parked-since age crosses the threshold below.
+      const parkedAtMs = rec.parkedAt ? Date.parse(rec.parkedAt) : NaN;
+      if (!Number.isFinite(parkedAtMs) || nowMs - parkedAtMs < blockedWaitTimeoutMs) continue;
+
+      const blockerState = blocker?.state ?? 'unknown (gone from the ledger)';
+      events.push(makeEvent('reactor', rec.id, 'item.parked', {
+        reason: `blocked-victim wait-timeout: blocker ${blockerId} has not merged (state: ${blockerState}) after ${cfg.pathology.blockedWaitTimeoutHours ?? 24}h`,
+        parkKind: 'decision',
+        escalation: {
+          intent: `Decide how to unblock this item — its repair WI ${blockerId} did not merge within the wait window.`,
+          evidence: `Blocked since ${rec.parkedAt ?? 'unknown'} on ${blockerId}, currently ${blockerState}.`,
+          risk: 'This item has been silently stuck behind a repair that will never release it automatically.',
+          recommendation: `Check ${blockerId}: if it was rejected or parked, either fix/re-approve it, or reject/requeue this victim directly.`,
+        },
       }));
-      released++;
+      events.push(makeEvent('reactor', rec.id, 'msg.out', {
+        text: `pathology: blocked-victim wait-timeout — ${blockerId} has not merged (state: ${blockerState}); re-parked for review with the original diagnosis.`,
+      }));
     }
 
     // SECOND: diagnose fresh failure parks — dedup on parkFingerprint, never re-diagnose a
@@ -4250,6 +4439,13 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     pushStep(await stepDecompositionGrooming(opts, cfg));
 
     pushStep(await stepDecompositionUnpark(opts, cfg));
+
+    // Step (a2): WI-098 cross-target pattern promotion — a merged item whose certification names
+    // OTHER registered targets its pattern applies to gets a sibling item captured on each (parked
+    // as decision when product-shaped, queued when mechanical), so the harvest lands as durable
+    // per-target work. Advisory-nudges an ADR/incident merge that owed a portability note but
+    // shipped without one. Idempotent per (source, target).
+    pushStep(await stepPortabilityPromotion(opts, cfg));
 
     // Step (b): route new captured items (degraded = tool-less fallback active). TRUST-HARDENING
     // (defect c): pass the registry so routing resolves EACH item's own sensitivity fail-closed,

@@ -3921,6 +3921,102 @@ test('reactor: non-FF push rejection + re-gate fails → item parked (not transi
 });
 
 // ---------------------------------------------------------------------------
+// WI-109 — post-merge-regate rollback regression (ports the LOST coverage the orphaned
+// `target-postmerge-regate` compiled test represented before the v0.1.0 history rebuild).
+//
+// The STRONG contract the orphan guarded, distinct from the parked-state assertions above:
+// a branch that passes its OWN (initial) gate but reds the merged/post-rebase tree must be
+// ROLLED BACK and never lands — no item.merged event is EVER appended, the item never reaches
+// the terminal `merged` state, and master's tip is unchanged (the branch's commit was never
+// pushed). This is the invariant a stale compiled test can silently keep "green" on while the
+// current source regresses, so it is pinned here against the live reactor.
+// ---------------------------------------------------------------------------
+
+test('reactor (WI-109): branch that passes its own gate but reds the merged tree never lands as merged', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'reactor-postmerge-regate-'));
+  try {
+    const repoRoot = join(tmpDir, 'repo');
+    const ledgerDir = join(tmpDir, 'ledger');
+    mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(repoRoot, 'x.txt'), 'x', 'utf8');
+    g(['add', 'x.txt']);
+    g(['commit', '-m', 'init']);
+
+    // Approved branch: passes its own gate, but the integration re-gate will red.
+    g(['checkout', '-b', 'wi-109']);
+    writeFileSync(join(repoRoot, 'w.txt'), 'w', 'utf8');
+    g(['add', 'w.txt']);
+    g(['commit', '-m', 'feat: WI-109']);
+    g(['checkout', 'master']);
+
+    const masterTipBefore = spawnSync('git', ['rev-parse', 'master'], { cwd: repoRoot, stdio: 'pipe' })
+      .stdout.toString().trim();
+
+    await seedLedger(ledgerDir, [
+      makeEvent('test', 'WI-109', 'item.captured', { source: 'cli', text: 'w' }, '2026-01-01T00:00:00Z'),
+      makeEvent('test', 'WI-109', 'item.queued', { spec: 'w' }, '2026-01-01T00:01:00Z'),
+      makeEvent('test', 'WI-109', 'build.dispatched', {
+        attempt: 1, branch: 'wi-109', pid: 1,
+      }, '2026-01-01T00:02:00Z'),
+      makeEvent('operator', 'WI-109', 'item.approved', { by: 'operator' }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    // Initial gate passes (the branch is green on its own); the post-rebase re-gate reds —
+    // the concurrent-master integration broke the tree.
+    let gateCallCount = 0;
+    const gateRunner = () => {
+      gateCallCount++;
+      if (gateCallCount === 1) return { passed: true, timedOut: false, reason: 'branch green on its own' };
+      return { passed: false, timedOut: false, reason: 'merged tree red' };
+    };
+
+    // Force the rebase+re-gate path via a non-FF push rejection (the reactor's route into the
+    // integration re-gate). The retry push must never be reached once the re-gate reds.
+    let pushCallCount = 0;
+    const pushProbe = () => {
+      pushCallCount++;
+      return { status: 1 as number | null, stderr: Buffer.from('rejected (non-fast-forward)') };
+    };
+
+    await runReactor({
+      repoRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: null,
+      config: makeTestConfig(),
+      gateRunner,
+      pushProbe,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+
+    // STRONG negative: not one item.merged event was ever appended.
+    const merged = events.filter(e => e.type === 'item.merged' && e.item === 'WI-109');
+    assert.equal(merged.length, 0, 'a merged-tree-red branch must NEVER emit item.merged');
+
+    // The item must not have folded to the terminal `merged` state — it is parked instead.
+    const state = fold(events).items.get('WI-109')?.state;
+    assert.equal(state, 'parked', 'item is rolled back and parked, never merged');
+
+    // The gate ran twice (initial + integration re-gate) and the retry push was never reached.
+    assert.equal(gateCallCount, 2, 'gate ran initial + integration re-gate');
+    assert.equal(pushCallCount, 1, 'no retry push once the merged-tree gate reds');
+
+    // Master's tip is untouched — the branch's commit was never allowed onto master.
+    const masterTipAfter = spawnSync('git', ['rev-parse', 'master'], { cwd: repoRoot, stdio: 'pipe' })
+      .stdout.toString().trim();
+    assert.equal(masterTipAfter, masterTipBefore, 'master tip unchanged — rollback left no trace on master');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Repair-requeue tests
 //
 // On first merge conflict or first gate-red after approved merge, the reactor

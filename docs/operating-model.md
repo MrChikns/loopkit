@@ -93,10 +93,22 @@ prompts can't enforce claims, gates, or recording.)
 
 | Stage | Ships |
 |---|---|
-| **v0.1** (now) | single-target proof end-to-end · thin console · README + demo · at most the two method skills the demo actually uses. Claims and plans appear **only as this roadmap**. |
-| v0.2 | attended scope claims + `reconcile` (the fast path) |
+| **v0.1** (now) | single-target proof end-to-end · thin console · README + demo · the method skills in [`.claude/commands/`](../.claude/commands/) (`/drive`, `/plane-check`, `/board`) · **attended item claims + the conductor** (`session`/`claim`/`conduct`), shipped ahead of the original sequence per [ADR-007](decisions/ADR-007-claim-arbitration.md). Plans appear **only as this roadmap**. |
+| v0.2 | `scope.claimed`-style *file-scope* claims + `reconcile` (the fast path) — item-level claiming already shipped in v0.1 |
 | v0.3 | plan DAG + one-shot run windows (the evening run) · **flip-gated releases** (see below) |
 | later | recurring schedules · presence suggestions · multi-target scheduling · skill registries |
+
+**On "1.0" — there deliberately isn't one.** The versions above deepen the *proof*; they do not
+march toward a product launch. A "1.0" would mean the thesis is fully demonstrated — every pillar
+in [vision.md](vision.md) at "works today," proven in anger rather than roadmap — for **one
+operator running their own targets**. It would *not* mean "adopted by a team," "hosted," or
+"multi-tenant": those boundaries in [limitations.md](limitations.md) are permanent by design, not
+a backlog, and there is no 2.0 that crosses them — a team platform is a *different artifact* (its
+own gateway, RBAC, and named-approver merges), not a later loopkit. That is the point of the
+read-only, no-SLA framing: this repo is **proof that governed autonomy can be built by one
+person**, not a product being shipped to you. The `later` tier is reserved *contract* — the event
+shapes exist so today's ledgers stay forward-compatible — explored only as far as it sharpens the
+proof.
 
 ### Agentic concepts: the admission filter (roadmap)
 
