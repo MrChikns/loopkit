@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -539,5 +539,57 @@ test('routing grounding: an operator-approved unpark is never re-parked for the 
     // The rejection is a backed-off retry — the provider-failure counter is stamped.
     const stamp = join(repoRoot, '.ai', 'runs', 'loopkit', 'provider-fail', 'WI-021.json');
     assert.ok(existsSync(stamp), 'the re-park rejection stamps the failure counter for a backed-off retry');
+  } finally { clean(base); }
+});
+
+test('routing grounding: the same-reason re-park counter accumulates across beats and caps at MAX_PROVIDER_FAILURES (3)', async () => {
+  const base = tmp();
+  const repoRoot = join(base, 'repo');
+  const ledgerDir = join(base, 'ledger');
+  initRepo(repoRoot);
+  const reason = 'which database backend should the widget use';
+  await appendEvents(ledgerDir, [
+    makeEvent('cli', 'WI-022', 'item.captured', { source: 'cli', text: 'store the widget somewhere' }, iso(NOW - 5000)),
+    makeEvent('reactor', 'WI-022', 'item.parked', { reason, parkKind: 'decision' }, iso(NOW - 4000)),
+    makeEvent('operator', 'WI-022', 'item.unparked', {}, iso(NOW - 3000)),
+  ]);
+  const stampPath = join(repoRoot, '.ai', 'runs', 'loopkit', 'provider-fail', 'WI-022.json');
+  // Bypass the hourly backoff between beats (real time barely moves within a test run) by
+  // zeroing lastFailMs after each beat — isolates the counter-accumulation behavior from the
+  // separately-covered backoff-window behavior.
+  const bypassBackoff = () => {
+    const state = JSON.parse(readFileSync(stampPath, 'utf8')) as { count: number; lastFailMs: number };
+    writeFileSync(stampPath, JSON.stringify({ count: state.count, lastFailMs: 0 }), 'utf8');
+  };
+  const runOpts = {
+    repoRoot, ledgerDir, autonomy: 'on' as const, provider: reparkSameReasonProvider(reason), pidProbe: () => true, config: cfg(),
+  };
+  try {
+    // Beats 1-3: the router re-parks for the identical reason each time — every one must be
+    // REJECTED (not accepted as a new item.parked) and the durable counter must climb 1→2→3.
+    // If the failure stamp were cleared on every valid-decision parse (the pre-fix bug at the old
+    // line ~1509, BEFORE this rejection path's bump), the count would reset to 1 every beat and
+    // never reach the cap.
+    for (let i = 1; i <= 3; i++) {
+      await runReactor(runOpts);
+      const state = JSON.parse(readFileSync(stampPath, 'utf8')) as { count: number; lastFailMs: number };
+      assert.equal(state.count, i, `after re-park beat ${i}, the durable failure counter reads ${i}`);
+      bypassBackoff();
+    }
+    const eventsAfter3 = await loadAllEvents(ledgerDir);
+    assert.equal(eventsAfter3.filter(e => e.type === 'item.parked' && e.item === 'WI-022').length, 1,
+      'through the 3 rejected re-parks, only the original setup park exists — none were accepted verbatim');
+
+    // Beat 4: the counter is now at the cap — the pre-call guard parks (ops) OFF the operator's
+    // decision desk instead of calling the provider again, and clears the stamp (terminal for the loop).
+    await runReactor(runOpts);
+    const eventsAfter4 = await loadAllEvents(ledgerDir);
+    const opsParks = eventsAfter4.filter(e => e.type === 'item.parked' && e.item === 'WI-022'
+      && (e.data as { parkKind?: string }).parkKind === 'ops');
+    assert.equal(opsParks.length, 1, 'the retry cap trips into exactly one ops park after 3 identical re-parks');
+    assert.ok(String((opsParks[0]!.data as { reason?: string }).reason).includes('3'),
+      'the ops park names the failure count');
+    assert.equal(eventsAfter4.filter(e => e.type === 'item.queued' && e.item === 'WI-022').length, 0,
+      'the cap never silently queues the item');
   } finally { clean(base); }
 });
