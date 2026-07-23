@@ -1369,9 +1369,18 @@ function plannerToolset(): string[] {
   return ['Read', 'Grep', 'Glob', `Bash(node ${cliPath} new:*)`];
 }
 
-/** @internal exported for tests */
+/**
+ * Substitutes the planner prompt's `{{cliPath}}`/`{{itemId}}` markers with the actual resolved
+ * CLI path and this run's item id, so the worker is handed the sanctioned `loopctl new` command
+ * (and required `--source decompose:<itemId>` stamp, see the planning gate below) verbatim
+ * instead of guessing a path like `.../dist/cli.js` and burning a turn on permission-denied.
+ * @internal exported for tests
+ */
 export function buildPlannerPrompt(plannerPromptContent: string, itemId: string, spec: string): string {
-  return `${plannerPromptContent}\n\nDECOMPOSE THIS ITEM:\nID: ${itemId}\nSPEC: ${spec}\n\nReturn the QUEUED:/REMAINING: block described above — nothing else.`;
+  const resolved = plannerPromptContent
+    .split('{{cliPath}}').join(resolveCliPath())
+    .split('{{itemId}}').join(itemId);
+  return `${resolved}\n\nDECOMPOSE THIS ITEM:\nID: ${itemId}\nSPEC: ${spec}\n\nReturn the QUEUED:/REMAINING: block described above — nothing else.`;
 }
 
 /**
@@ -1461,9 +1470,13 @@ export async function runPlanningLane(
 
     // Snapshot ids before the run so a successful `loopctl new` shows up as a fold diff.
     // The ledger's own append lock (cli.ts cmdNew / ledger withLock) makes this race-safe
-    // against a concurrent capture; a same-second unrelated capture could in theory be
-    // misattributed as this planner's child — an accepted low-probability MVP limitation.
+    // against a concurrent capture. The diff alone isn't provenance though: any process could
+    // land a new item in the same window (an attended-session capture, another lane), so the
+    // gate below also requires the new item's `source` to carry this run's `decompose:<itemId>`
+    // stamp (buildPlannerPrompt hands the worker the exact `--source decompose:<itemId>` command
+    // to use) — an unrelated concurrent capture never has that stamp and no longer false-passes.
     const beforeIds = new Set(fold(await loadAllEventsWithQuarantine(opts.ledgerDir)).items.keys());
+    const expectedSource = `decompose:${rec.id}`;
 
     const spec = rec.spec ?? rec.sourceText ?? '';
     const prompt = buildPlannerPrompt(plannerPromptContent, rec.id, spec);
@@ -1496,12 +1509,14 @@ export async function runPlanningLane(
       continue;
     }
 
-    const afterIds = fold(await loadAllEventsWithQuarantine(opts.ledgerDir)).items.keys();
-    const newIds = [...afterIds].filter(id => !beforeIds.has(id));
+    const afterItems = fold(await loadAllEventsWithQuarantine(opts.ledgerDir)).items;
+    const newIds = [...afterItems.entries()]
+      .filter(([id, item]) => !beforeIds.has(id) && item.source === expectedSource)
+      .map(([id]) => id);
 
     if (!result.ok || newIds.length === 0) {
       const reason = result.ok
-        ? 'planning: no child item queued (loopctl new was not called)'
+        ? `planning: no child item queued with the required --source ${expectedSource} stamp (loopctl new was not called, called without --source, or a concurrent unrelated capture landed instead)`
         : `planning: provider failed: ${result.error}`;
       const events: ReturnType<typeof makeEvent>[] = [makeEvent('dispatch', rec.id, 'gate.failed', { reason })];
       if (attempt >= cfg.breakerN) {
