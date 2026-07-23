@@ -656,32 +656,38 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   const cycleMedianMs = median(cycleTimesMs);
   const cycleLabel = cycleMedianMs !== undefined ? `${(cycleMedianMs / HOUR_MS).toFixed(1)}h` : '–';
 
-  // ── RELIABILITY: per-WI clean-landing rate over 7d/30d, WI-089 ──
+  // ── RELIABILITY: per-WI clean-landing rate over the selected window (+ a fixed 30d
+  //    reference), WI-089 / WI-129 ──
   // Headline switched from "first-attempt merge rate" (attempts===1, one attempt-count field)
   // to "clean landing" (WI-108 lifetime counters, one outcome per WI): a merged item is clean
   // iff it never parked/crashed/gate-failed/escalated ANYWHERE on its road to merge — a WI that
   // gate-failed once then passed on attempt 2 is not "first try" but it's also not the rough
   // landing the founder actually cares about catching, so this reads truer than attempts alone.
-  // fold.recentMerged is already pre-trimmed to 7d and fold.recentMerged30d to 30d (WI-360) —
-  // both windows read straight off the fold's own arrays, matching every other Glance tile.
   const isCleanLanding = (m: FoldMergedItem): boolean =>
     !m.lifetimeParkCount && !m.lifetimeCrashCount && !m.lifetimeGateRedCount && !m.lifetimeEscalationCount;
-  const clean7d = fold.recentMerged.filter(isCleanLanding).length;
-  const total7d = fold.recentMerged.length;
+  // WI-129: the headline (and its denominator) now read from the SAME window-filtered merged set
+  // the picker drives on every other tile (mergedInWindow(reliabilityWindow) — shared with the
+  // "this try" secondary below), instead of hardcoding fold.recentMerged (a fixed 7d slice). It
+  // used to never move when the founder changed the Glance window filter.
+  const reliabilityWindow: GlanceWindow = opts.window ?? DEFAULT_GLANCE_WINDOW;
+  const reliabilityMerged = mergedInWindow(reliabilityWindow);
+  const cleanHeadline = reliabilityMerged.filter(isCleanLanding).length;
+  const totalHeadline = reliabilityMerged.length;
+  const cleanPctHeadline = totalHeadline > 0 ? Math.round((cleanHeadline / totalHeadline) * 100) : undefined;
+  // Fixed 30d reference point, independent of the picker, so the founder keeps a longer-horizon
+  // comparison even while scrubbing the headline window narrower (24h/7d). fold.recentMerged30d
+  // is already pre-trimmed to 30d upstream (WI-360).
   const merged30d = fold.recentMerged30d ?? fold.recentMerged;
   const clean30d = merged30d.filter(isCleanLanding).length;
   const total30d = merged30d.length;
-  const cleanPct7d = total7d > 0 ? Math.round((clean7d / total7d) * 100) : undefined;
   const cleanPct30d = total30d > 0 ? Math.round((clean30d / total30d) * 100) : undefined;
   const RELIABILITY_TARGET_PCT = 90;
 
   // Secondary line — the ORIGINAL per-attempt computation (attempts===1 share of merges in the
   // selected window), kept as-is but relabeled: it measures attempt-level luck on the final try,
   // not whether the WI's whole lifecycle was clean, so it must never be confused with the
-  // headline above. Still follows the window picker like every other tile (Flow included).
-  const reliabilityWindow: GlanceWindow = opts.window ?? DEFAULT_GLANCE_WINDOW;
-  const reliabilityMerged = mergedInWindow(reliabilityWindow);
-  const mergedTotal = reliabilityMerged.length;
+  // headline above. Shares reliabilityMerged with the headline — both track the same window.
+  const mergedTotal = totalHeadline;
   const firstAttempt = reliabilityMerged.filter((m) => (m.attempts ?? 1) === 1).length;
   const reliabilityPct = mergedTotal > 0 ? Math.round((firstAttempt / mergedTotal) * 100) : undefined;
 
@@ -738,17 +744,18 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
     },
     {
       label: 'Reliability',
-      // Headline is the 7d clean-landing rate — the target line (90%) is judged against THIS
-      // number, not the attempt-level secondary, so the value shown must be the one the target
-      // marker applies to.
-      value: cleanPct7d !== undefined ? `${cleanPct7d}%` : '–',
-      // Footnote packs: 7d clean-landing count · 30d clean-landing rate+count · the 90% target
-      // marker · the attempt-level secondary (explicitly relabeled "this try" so it can never be
-      // mistaken for the clean-landing headline) · a one-tap link to the dirty items themselves.
-      footnote: total7d > 0
-        ? `${clean7d}/${total7d} clean landing (7d) · ${cleanPct30d !== undefined ? `${clean30d}/${total30d} clean (30d)` : 'no merges (30d)'} · target ${RELIABILITY_TARGET_PCT}% · this try: ${mergedTotal > 0 ? `${firstAttempt}/${mergedTotal} (${reliabilityWindow})` : `no merges (${reliabilityWindow})`}`
-        : `no merges yet (7d) · target ${RELIABILITY_TARGET_PCT}%`,
-      state: total7d === 0 ? 'neutral' : cleanPct7d! >= RELIABILITY_TARGET_PCT ? 'success' : 'warning',
+      // Headline is the clean-landing rate over the SELECTED window (WI-129) — the target line
+      // (90%) is judged against THIS number, not the fixed-30d or attempt-level secondaries, so
+      // the value shown must be the one the target marker applies to.
+      value: cleanPctHeadline !== undefined ? `${cleanPctHeadline}%` : '–',
+      // Footnote packs: windowed clean-landing count (labelled with the window it's actually
+      // scoped to) · a fixed 30d clean-landing rate+count for longer-horizon context · the 90%
+      // target marker · the attempt-level secondary (explicitly relabeled "this try" so it can
+      // never be mistaken for the clean-landing headline) · a one-tap link to the dirty items.
+      footnote: totalHeadline > 0
+        ? `${cleanHeadline}/${totalHeadline} clean landing (${reliabilityWindow}) · ${cleanPct30d !== undefined ? `${clean30d}/${total30d} clean (30d)` : 'no merges (30d)'} · target ${RELIABILITY_TARGET_PCT}% · this try: ${mergedTotal > 0 ? `${firstAttempt}/${mergedTotal} (${reliabilityWindow})` : `no merges (${reliabilityWindow})`}`
+        : `no merges yet (${reliabilityWindow}) · target ${RELIABILITY_TARGET_PCT}%`,
+      state: totalHeadline === 0 ? 'neutral' : cleanPctHeadline! >= RELIABILITY_TARGET_PCT ? 'success' : 'warning',
       // One-tap link to the current dirty-item list — /work is the Missions board every other
       // Glance drill (Stuck, Flow) already opens; there is no separate "dirty items" surface.
       href: '/work',
