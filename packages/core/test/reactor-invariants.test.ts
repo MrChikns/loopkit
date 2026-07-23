@@ -455,3 +455,89 @@ test('auto-approve guard: an ops park is never auto-approved (even if its class 
       'an ops park is never auto-approved');
   } finally { clean(base); }
 });
+
+// ---------------------------------------------------------------------------
+// routing-wall grounding — a target-stamped item routes with cwd = the TARGET repo (not the
+// plane root); an operator-approved unpark is never re-parked for the same reason (no new evidence)
+// ---------------------------------------------------------------------------
+
+/** Records every provider call's cwd + prompt so a test can assert what the router was grounded in. */
+function cwdRecordingProvider(calls: Array<{ cwd?: string; prompt: string }>): LlmProvider {
+  return {
+    name: 'fake-cwd',
+    async run(req: ProviderRequest): Promise<ProviderResult> {
+      calls.push({ cwd: req.cwd, prompt: req.prompt });
+      return { ok: true, text: 'ROUTE: build\nSPEC: build the widget\nTOUCHES: src/\nREPLY: ok' };
+    },
+  };
+}
+
+test('routing grounding: a target-stamped item routes with cwd = the target repoPath, not the plane root', async () => {
+  const base = tmp();
+  const repoRoot = join(base, 'repo');
+  const targetRepo = join(base, 'target-widget');
+  const ledgerDir = join(base, 'ledger');
+  initRepo(repoRoot);
+  mkdirSync(targetRepo, { recursive: true });
+  const targetId = 'tgt-aaaaaaaa';
+  await appendEvents(ledgerDir, [
+    makeEvent('cli', targetId, 'target.registered',
+      { name: 'widget', targetId, repoPath: targetRepo, defaultBranch: 'main', manifestHash: 'h' }, iso(NOW - 6000)),
+    // An item stamped for the non-default target 'widget' — its routing tools (Read/Grep/Glob)
+    // must be grounded in targetRepo, not the plane's own repoRoot.
+    makeEvent('cli', 'WI-020', 'item.captured',
+      { source: 'cli', text: 'build the widget', target: 'widget', targetId }, iso(NOW - 1000)),
+  ]);
+  try {
+    const calls: Array<{ cwd?: string; prompt: string }> = [];
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: cwdRecordingProvider(calls), pidProbe: () => true, config: cfg(),
+    });
+    const routeCall = calls.find(c => c.prompt.includes('ROUTE THIS ITEM ONLY') && c.prompt.includes('WI-020'));
+    assert.ok(routeCall, 'the routing call for the target item happened');
+    assert.equal(routeCall!.cwd, targetRepo,
+      'the router must be grounded in the TARGET repo, not the plane root');
+    assert.notEqual(routeCall!.cwd, repoRoot,
+      'the router must NOT be grounded in the plane root for a target-stamped item');
+  } finally { clean(base); }
+});
+
+/** Router that re-parks the item for a given reason (as an approval-directive 'needs decision:' park). */
+function reparkSameReasonProvider(reason: string): LlmProvider {
+  return {
+    name: 'fake-repark',
+    async run(_req: ProviderRequest): Promise<ProviderResult> {
+      return { ok: true, text: `ROUTE: park\nSPEC: needs decision: ${reason}\nREPLY: ${reason}` };
+    },
+  };
+}
+
+test('routing grounding: an operator-approved unpark is never re-parked for the identical reason absent new evidence', async () => {
+  const base = tmp();
+  const repoRoot = join(base, 'repo');
+  const ledgerDir = join(base, 'ledger');
+  initRepo(repoRoot);
+  const reason = 'which database backend should the widget use';
+  await appendEvents(ledgerDir, [
+    makeEvent('cli', 'WI-021', 'item.captured', { source: 'cli', text: 'store the widget somewhere' }, iso(NOW - 5000)),
+    // Parked for an operator decision, then the operator unparked it (approved proceeding).
+    // isApprovedReroute is now true: state==='queued', no spec, lastUnparkedAt set; lastParkReason=reason.
+    makeEvent('reactor', 'WI-021', 'item.parked', { reason, parkKind: 'decision' }, iso(NOW - 4000)),
+    makeEvent('operator', 'WI-021', 'item.unparked', {}, iso(NOW - 3000)),
+  ]);
+  try {
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: reparkSameReasonProvider(reason), pidProbe: () => true, config: cfg(),
+    });
+    const events = await loadAllEvents(ledgerDir);
+    // The setup park is the ONLY item.parked — the same-reason re-park was rejected, not accepted verbatim.
+    assert.equal(events.filter(e => e.type === 'item.parked' && e.item === 'WI-021').length, 1,
+      'an operator-approved item must NOT be re-parked for the same reason absent new evidence');
+    // And the rejection did not silently queue the item either.
+    assert.equal(events.filter(e => e.type === 'item.queued' && e.item === 'WI-021').length, 0,
+      'the rejected re-park must not silently queue the item');
+    // The rejection is a backed-off retry — the provider-failure counter is stamped.
+    const stamp = join(repoRoot, '.ai', 'runs', 'loopkit', 'provider-fail', 'WI-021.json');
+    assert.ok(existsSync(stamp), 'the re-park rejection stamps the failure counter for a backed-off retry');
+  } finally { clean(base); }
+});

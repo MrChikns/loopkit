@@ -1251,6 +1251,46 @@ async function stepEscalationGrooming(
   }
 }
 
+/**
+ * Words ignored when deciding whether a re-park reason carries NEW evidence — the mandated
+ * reclassify prefixes ("needs decision:"/"needs planner decomposition:") plus generic glue.
+ */
+const REPARK_STOPWORDS = new Set([
+  'needs', 'decision', 'planner', 'decomposition', 'the', 'a', 'an', 'to', 'of', 'for', 'on',
+  'in', 'and', 'or', 'is', 'it', 'this', 'that', 'with', 'be', 'as', 'no', 'not', 'item', 'wi',
+  'build', 'park', 'parked', 'operator', 'reason', 'same', 'because', 'still', 'we',
+]);
+
+/** Significant (non-stopword) tokens of a park reason, prefix-stripped and normalized. */
+function reparkReasonTokens(reason: string): Set<string> {
+  return new Set(
+    reason
+      .toLowerCase()
+      .replace(/^\s*needs (planner decomposition|decision):\s*/i, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(' ')
+      .filter(t => t.length > 1 && !REPARK_STOPWORDS.has(t)),
+  );
+}
+
+/**
+ * True when a re-park reason introduces NO significant token the prior park reason didn't
+ * already carry — i.e. it restates the same reason with no new evidence. This is the
+ * deterministic wall behind the approve→re-park loop: the conductor prompt already TELLS the
+ * router never to re-park an approved item with the same bundled reason, but a prompt-level
+ * instruction alone can't hold it (a grounding-confused router re-parks the identical reason),
+ * so a re-park that adds nothing new is rejected rather than accepted verbatim. Fail-open: an
+ * empty/absent prior reason is never treated as a bounce.
+ */
+function reparkHasNoNewEvidence(newReason: string, priorReason: string | undefined): boolean {
+  if (!priorReason || !priorReason.trim()) return false;
+  const nextTokens = reparkReasonTokens(newReason);
+  if (nextTokens.size === 0) return true; // only prefix/stopwords — no evidence at all
+  const priorTokens = reparkReasonTokens(priorReason);
+  for (const t of nextTokens) if (!priorTokens.has(t)) return false; // a genuinely new token
+  return true; // every significant token was already in the prior reason
+}
+
 async function stepRoute(
   opts: ReactorOptions,
   cfg: LoopkitConfig,
@@ -1415,10 +1455,21 @@ async function stepRoute(
         return out; // within backoff window — try again a later beat, no LLM call, no events
       }
 
+      // GROUNDING WALL (routing): the router's Read/Grep/Glob tools must be grounded in the
+      // SAME repo the item targets, not the plane's own checkout. Grounding a target-stamped
+      // item (e.g. target='loopkit') in opts.repoRoot makes every Read/Grep/Glob classify
+      // against the wrong tree and read false "file does not exist here" evidence — the exact
+      // bug that drove correct target items to park. Resolve the cwd through THE one
+      // registration rule (target.ts lookupRegisteredTarget), the SAME rule the Touches-
+      // grounding post-processing below already uses; fall open to opts.repoRoot when the
+      // item is untargeted or its target is unregistered (never silently the wrong repo).
+      const routingReg = rec.target ? lookupRegisteredTarget(foldResult.targets, rec) : undefined;
+      const routingCwd = routingReg?.repoPath || opts.repoRoot;
+
       const result = await itemProvider.run({
         prompt: itemPrompt,
         model: cfg.models.conductor,
-        cwd: opts.repoRoot,
+        cwd: routingCwd,
         // Read-only tools — omitted in degraded mode (tool-less provider).
         // The reactor owns the ledger writes now (item.queued/parked/routed +
         // msg.out are emitted below from the parsed decision). The router only classifies —
@@ -1500,6 +1551,21 @@ async function stepRoute(
         //     single question, never the same bundled reason that looked like a bounce.
         const parkSpec = decision.spec ?? decision.reply;
         const isDecomp = isApprovedReroute && /^\s*needs planner decomposition/i.test(parkSpec);
+        // RE-PARK GUARD (deterministic): an operator-approved unpark that the router tries to
+        // re-park onto the DECISION desk for the same reason — no new evidence vs. the reason it
+        // was already parked for — is the approve→re-park bounce loop. Reject it here rather than
+        // accept it verbatim (the prompt directive alone can't hold a grounding-confused router):
+        // bump the failure counter + back off, so it retries a bounded number of beats (the
+        // grounding fix above may let a retry build) and then caps into an ops park OFF the
+        // operator's desk — never back onto the desk with the identical reason. A decomposition
+        // re-park is exempt: it routes to the planner lane, not the decision desk.
+        if (isApprovedReroute && !isDecomp && reparkHasNoNewEvidence(parkSpec, rec.lastParkReason)) {
+          bumpProviderFail(resolveRunDir(opts), rec.id, nowMs);
+          out.push(makeEvent('reactor', rec.id, 'msg.out', {
+            text: 'routing rejected: an operator-approved item was re-parked for the same reason with no new evidence — retrying (backing off)',
+          }));
+          return out;
+        }
         // A FRESH decomposition classification needs the same
         // planning child stepDecompositionUnpark queues for an already-tagged park — otherwise
         // this reroute strands the operator's approval with no child ever queued (the desk
