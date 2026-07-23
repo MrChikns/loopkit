@@ -504,6 +504,14 @@ export function approveActionLabel(branch: string | undefined, branchAlive?: boo
   return branch && branchAlive !== false ? 'Approve — merge built branch' : 'Approve — requeue for build';
 }
 
+/** Shipped-but-still-needs-a-verdict predicate — must/review tier, not yet accepted. Shared
+ *  by the Glance "To test" tile's count (buildGlance) and Command's own To-test region
+ *  (buildToTest below) so the two can never disagree on how many items are awaiting a
+ *  founder works/found-a-problem call. */
+function isAwaitingVerdict(m: FoldMergedItem): boolean {
+  return !m.accepted && (m.tier === 'must' || m.tier === 'review');
+}
+
 // ─── Region builders ──────────────────────────────────────────────────────────
 
 /** Glance is attention-oriented: each tile answers a distinct operator question rather than a
@@ -583,9 +591,7 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   // test a shipped slice), so they render as two separately-linked tiles — a single
   // combined count that always opened the decision desk hid the to-test half entirely.
   const decisionParks = fold.active.filter(isDecisionPark);
-  const awaitingAcceptance = fold.recentMerged.filter(
-    (m) => !m.accepted && (m.tier === 'must' || m.tier === 'review'),
-  );
+  const awaitingAcceptance = fold.recentMerged.filter(isAwaitingVerdict);
   const decisionAge = oldestAge(nowMs, decisionParks.map((i) => i.parkedAt));
   const acceptanceAge = oldestAge(nowMs, awaitingAcceptance.map((m) => m.mergedAt));
 
@@ -931,32 +937,49 @@ export function mergedItemBadge(
   }
 }
 
+/** The one mapper from a merged fold item to a `CommandEvent` row — shared by the delivery
+ *  stream (every recent merge) and the To-test region (just the awaiting-verdict subset), so
+ *  the same merged item can never render a different badge/title/action in the two places. */
+function mergedEventFor(m: FoldMergedItem, fold: FoldSummary): CommandEvent {
+  const origin = deriveOrigin(m.touches);
+  const post = '/intent?next=/command';
+  const acceptIntent = `✅ accept ${m.id}`;
+  // Only must/review tiers need a founder verdict at all — optional/auto
+  // auto-accept on their own (a timer, or immediately) with nothing for the founder to do,
+  // so neither gets the urgent Accept affordance (mirrors the badge split above).
+  const needsAcceptAction = !m.accepted && (m.tier === 'must' || m.tier === 'review' || m.tier === undefined);
+  return {
+    state: 'success' as OperationalState,
+    title: specLabel(m),
+    metadata: [m.accepted ? 'accepted' : 'shipped', ...(m.mergeCommit ? [m.mergeCommit.slice(0, 7)] : [])],
+    badge: mergedItemBadge(m, fold.tierWindows),
+    ...(origin ? { originChip: originBadge(origin) } : {}),
+    ...(needsAcceptAction
+      ? { actions: [{ id: `accept:${m.id}`, label: 'Accept', emphasis: 'primary' as const, form: { action: post, intent: acceptIntent } }] }
+      : {}),
+    // Item-hub link sweep (WI-349): every "Item detail" evidence link now points at the
+    // canonical hub, not the retired per-item timeline view.
+    evidence: { id: `detail-${m.id}`, label: 'Item detail →', href: `/item/${m.id}` },
+  };
+}
+
 function buildDeliveryStream(fold: FoldSummary): CommandEvent[] {
   // Newest first — the fold emits insertion (event) order.
   return [...fold.recentMerged]
     .sort((a, b) => (b.mergedAt ?? '').localeCompare(a.mergedAt ?? ''))
-    .map((m) => {
-    const origin = deriveOrigin(m.touches);
-    const post = '/intent?next=/command';
-    const acceptIntent = `✅ accept ${m.id}`;
-    // Only must/review tiers need a founder verdict at all — optional/auto
-    // auto-accept on their own (a timer, or immediately) with nothing for the founder to do,
-    // so neither gets the urgent Accept affordance (mirrors the badge split above).
-    const needsAcceptAction = !m.accepted && (m.tier === 'must' || m.tier === 'review' || m.tier === undefined);
-    return {
-      state: 'success' as OperationalState,
-      title: specLabel(m),
-      metadata: [m.accepted ? 'accepted' : 'shipped', ...(m.mergeCommit ? [m.mergeCommit.slice(0, 7)] : [])],
-      badge: mergedItemBadge(m, fold.tierWindows),
-      ...(origin ? { originChip: originBadge(origin) } : {}),
-      ...(needsAcceptAction
-        ? { actions: [{ id: `accept:${m.id}`, label: 'Accept', emphasis: 'primary' as const, form: { action: post, intent: acceptIntent } }] }
-        : {}),
-      // Item-hub link sweep (WI-349): every "Item detail" evidence link now points at the
-      // canonical hub, not the retired per-item timeline view.
-      evidence: { id: `detail-${m.id}`, label: 'Item detail →', href: `/item/${m.id}` },
-    };
-  });
+    .map((m) => mergedEventFor(m, fold));
+}
+
+/** Command's "To test" region (WI-128): the actual shipped-awaiting-verdict rows, oldest
+ *  first — the longest-waiting slice needs the founder's attention soonest. Reuses the SAME
+ *  `isAwaitingVerdict` predicate the Glance "To test" tile counts and the SAME `mergedEventFor`
+ *  mapper the delivery stream renders with, so this region's row count and each row's badge
+ *  can never drift from what Glance/the delivery stream say about the same merged item. */
+function buildToTest(fold: FoldSummary): CommandEvent[] {
+  return fold.recentMerged
+    .filter(isAwaitingVerdict)
+    .sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? ''))
+    .map((m) => mergedEventFor(m, fold));
 }
 
 function buildPipeline(fold: FoldSummary): PipelineStage[] {
@@ -1230,6 +1253,7 @@ export function commandProjectionFromFold(
       conductor: buildConductor(fold),
       deliveryStream: buildDeliveryStream(fold),
       decisionDesk: buildDecisionDesk(fold),
+      toTest: buildToTest(fold),
       opsParks: buildOpsParks(fold),
       opsHealth: buildHealth(fold),
       pipeline: buildPipeline(fold),
@@ -1267,6 +1291,7 @@ function emptyCommandData(): CommandData {
     conductor: { headline: 'unavailable', state: 'critical', workers: [] },
     deliveryStream: [],
     decisionDesk: [],
+    toTest: [],
     opsParks: [],
     opsHealth: { headline: 'unavailable', state: 'critical' },
     pipeline: [],

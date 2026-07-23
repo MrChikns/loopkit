@@ -16,7 +16,6 @@ import type { OperationalState } from '../states/operational-state.ts';
 import { DEFAULT_GLANCE_WINDOW } from './fold-adapter.ts';
 import type { GlancePulse, GlanceWindow } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
-import { conversationsRegion } from './threads-projection.ts';
 import type { ThreadCard } from './threads-adapter.ts';
 
 /** One recent ext:-sourced intent item for the durable capture trail (WI-178). `foldState`
@@ -131,6 +130,11 @@ export type CommandData = {
   conductor: { headline: string; state: OperationalState; workers: CommandEvent[] };
   deliveryStream: CommandEvent[];
   decisionDesk: CommandEvent[];
+  /** WI-128: shipped slices actually awaiting a works/found-a-problem verdict, oldest first —
+   *  Command's own To-test region, distinct from the Glance "To test" tile (a count + link).
+   *  Shares fold-adapter.ts's `isAwaitingVerdict` predicate with that tile so the two counts
+   *  can never disagree. */
+  toTest: CommandEvent[];
   /** WI-354: active ops-parks the STUCK glance tile doesn't (yet) flag — the blind window
    *  between "just parked" and "breaker-tripped or 6h+ stale" (see fold-adapter.ts buildOpsParks). */
   opsParks: OpsParksCard;
@@ -231,7 +235,7 @@ function pulseRegion(pulse: GlancePulse): string {
   }));
 
   rows.push(pulseRow({
-    href: '#delivery-stream',
+    href: '#recent-activity',
     badge: StatusBadge({ state: 'success', label: 'Shipped', size: 'sm' }),
     text: `${pulse.shipped.count} in the ${esc(WINDOW_PHRASE[pulse.shipped.window])} · median cycle ${esc(pulse.shipped.cycleLabel)}`,
   }));
@@ -291,6 +295,22 @@ function decisionDeskRegion(events: CommandEvent[]): string {
   });
 }
 
+/** WI-128: the actual awaiting-verdict rows (distinct from the Glance "To test" tile, which
+ *  is a count + link) — every badge here is `mergedItemBadge` (fold-adapter.ts), the same
+ *  deriver the delivery stream uses for the identical merged item. */
+function toTestRegion(events: CommandEvent[]): string {
+  return Card({
+    title: 'To test',
+    subtitle: 'Shipped, awaiting your works / found-a-problem verdict',
+    headerAside: StatusBadge({
+      state: events.length ? 'warning' : 'success',
+      label: events.length ? `${events.length} awaiting verdict` : 'All caught up',
+      ...(events.length ? { emphasis: 'recommended' as const } : {}),
+    }),
+    body: eventList(events, 'Nothing shipped is waiting on your verdict.'),
+  });
+}
+
 /** WI-354: visibility-only card for ops-parks that are neither an operator decision (decision
  *  desk) nor yet flagged Stuck — the blind window that hid WI-348 for 3.5h. No actions
  *  (ops parks are plane-owned — never an operator action target). */
@@ -313,12 +333,50 @@ function opsParksRegion(events: OpsParksCard): string {
   });
 }
 
-function conductorRegion(conductor: CommandData['conductor']): string {
+/** WI-128: ONE unified Pipeline card — the former separate "Ops health & pipeline" stage-count
+ *  strip and "Pipeline" preparing/queued/building card, merged: the counts strip becomes this
+ *  card's header, the three flow stages render underneath, and the Conductor widget folds into
+ *  the Building stage (both `conductor.workers` and `flow.building` are the SAME
+ *  `buildBuildingEvents` rows — fold-adapter.ts — so folding them costs no information, only a
+ *  second header for the identical list). */
+function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHealth'], flow: PipelineFlow, conductor: CommandData['conductor']): string {
+  const countCells = stages
+    .map(
+      (s) =>
+        `<div class="opsui-pipeline__stage" data-state="${s.state}">` +
+        `${StatusBadge({ state: s.state, label: s.label })}` +
+        `<span class="opsui-pipeline__count">${esc(s.count)}</span></div>`,
+    )
+    .join('');
+  const headerAside =
+    `<div class="opsui-pipeline__header">` +
+    StatusBadge({ state: health.state, label: health.headline }) +
+    `<div class="opsui-pipeline">${countCells}</div>` +
+    `</div>`;
+
+  const flowStages: Array<{ label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
+    { label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
+    { label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
+    // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
+    { label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
+  ];
+  const body = flowStages
+    .map(
+      (s) =>
+        `<div class="opsui-pipelineflow__stage">` +
+        `<h3 class="opsui-pipelineflow__stage-title">${esc(s.label)}` +
+        `<span class="opsui-pipelineflow__stage-count">${s.events.length}</span>` +
+        (s.sub ? StatusBadge({ state: s.sub.state, label: s.sub.label, size: 'sm' }) : '') +
+        `</h3>` +
+        eventList(s.events, s.empty) +
+        `</div>`,
+    )
+    .join('');
   return Card({
-    title: 'Conductor',
-    subtitle: 'The AI workforce, right now',
-    headerAside: StatusBadge({ state: conductor.state, label: conductor.headline }),
-    body: eventList(conductor.workers, 'No workers building right now.'),
+    title: 'Pipeline',
+    subtitle: 'The build lane, end to end — captured to merged',
+    headerAside,
+    body: `<div class="opsui-pipelineflow">${body}</div>`,
   });
 }
 
@@ -326,7 +384,10 @@ function conductorRegion(conductor: CommandData['conductor']): string {
  *  zero-JS prev/next pager. Collapsible day groups are a possible future follow-up, not built here. */
 export const DELIVERY_PAGE_SIZE = 20;
 
-function deliveryStreamRegion(events: CommandEvent[], page: number): string {
+/** WI-128: ONE unified recent-activity feed — the former separate "Recent work items" strip
+ *  (captured intents) and "Recent deliveries" card (shipped merges), merged into a single
+ *  card so a founder scanning "what's been happening" reads one widget, not two. */
+function recentActivityRegion(intents: RecentIntent[], events: CommandEvent[], page: number): string {
   const total = events.length;
   const pageCount = Math.max(1, Math.ceil(total / DELIVERY_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, Math.floor(page) || 1), pageCount);
@@ -338,63 +399,45 @@ function deliveryStreamRegion(events: CommandEvent[], page: number): string {
     total,
     itemNoun: 'shipped',
     label: 'Recent deliveries pages',
-    hrefFor: (p) => (p <= 1 ? '/command#delivery-stream' : `/command?page=${p}#delivery-stream`),
+    hrefFor: (p) => (p <= 1 ? '/command#recent-activity' : `/command?page=${p}#recent-activity`),
   });
+  const shippedHeading = `<p class="opsui-intent-strip__heading">Shipped</p>`;
   return Card({
-    title: 'Recent deliveries',
-    subtitle: 'What shipped recently',
-    body: eventList(pageItems, 'No shipped work in the recent window.') + pager,
+    title: 'Recent activity',
+    subtitle: 'Captured intents and shipped deliveries',
+    headerAside: StatusBadge({
+      state: total ? 'success' : 'neutral',
+      label: total ? `${total} shipped` : 'Nothing shipped yet',
+    }),
+    body: recentIntentsRegion(intents) + shippedHeading + eventList(pageItems, 'No shipped work in the recent window.') + pager,
   });
 }
 
-function pipelineRegion(stages: PipelineStage[], health: CommandData['opsHealth']): string {
-  const cells = stages
-    .map(
-      (s) =>
-        `<div class="opsui-pipeline__stage" data-state="${s.state}">` +
-        `${StatusBadge({ state: s.state, label: s.label })}` +
-        `<span class="opsui-pipeline__count">${esc(s.count)}</span></div>`,
-    )
-    .join('');
+/** WI-128: Conversations demoted from a full inline list to a link — the standalone
+ *  `/threads` route (threads-projection.ts) keeps serving the full page, deep links included;
+ *  `threadsPage`, when given, carries the founder's current page over to that link so it
+ *  reopens where Command left off, rather than resetting to page 1. */
+function conversationsLinkRegion(threads: ThreadCard[], threadsPage?: number): string {
+  const total = threads.length;
+  const needsYou = threads.filter((t) => t.state === 'needs-you').length;
+  const badge = needsYou
+    ? StatusBadge({ state: 'critical', label: `${needsYou} needs you`, emphasis: 'blocking' })
+    : StatusBadge({
+        state: total ? 'neutral' : 'success',
+        label: total ? `${total} thread${total === 1 ? '' : 's'}` : 'No threads',
+      });
+  const href = threadsPage && threadsPage > 1 ? `/threads?page=${threadsPage}` : '/threads';
   return Card({
-    title: 'Ops health & pipeline',
-    subtitle: 'The build lane, end to end',
-    headerAside: StatusBadge({ state: health.state, label: health.headline }),
-    body: `<div class="opsui-pipeline">${cells}</div>`,
+    title: 'Conversations',
+    subtitle: 'Founder conversations with the conductor',
+    headerAside: badge,
+    body: `<p class="opsui-empty"><a href="${esc(href)}">View all conversations →</a></p>`,
   });
 }
 
-/** WI-355: replaces the "Why isn't this building?" diagnostic with an honest, flow-ordered
- *  picture of Command's own build lane — preparing → queued → building. Each stage renders
- *  through the same `eventList()`/`EventRow` path as every other Command region; parked
- *  items never appear here (they are the decision desk's / Active ops-parks card's job —
- *  ops parks are plane-owned, never a founder action target). Named `pipelineFlowRegion`, not `pipelineRegion`, to avoid colliding
- *  with the existing stage-count `pipelineRegion` above (the "Ops health & pipeline" tile,
- *  which this does not replace). */
-function pipelineFlowRegion(flow: PipelineFlow): string {
-  const stages: Array<{ label: string; events: CommandEvent[]; empty: string }> = [
-    { label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
-    { label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
-    { label: 'Building', events: flow.building, empty: 'No workers running.' },
-  ];
-  const body = stages
-    .map(
-      (s) =>
-        `<div class="opsui-pipelineflow__stage">` +
-        `<h3 class="opsui-pipelineflow__stage-title">${esc(s.label)}` +
-        `<span class="opsui-pipelineflow__stage-count">${s.events.length}</span></h3>` +
-        eventList(s.events, s.empty) +
-        `</div>`,
-    )
-    .join('');
-  return Card({
-    title: 'Pipeline',
-    subtitle: 'What is being prepared, queued, and built',
-    body: `<div class="opsui-pipelineflow">${body}</div>`,
-  });
-}
-
-/** Compact strip of recent ext:-sourced items — durable answer to "where did my capture go?" (WI-178). */
+/** Compact strip of recent ext:-sourced items — durable answer to "where did my capture go?"
+ *  (WI-178). Nested inside {@link recentActivityRegion}'s unified card (WI-128); renders '' when
+ *  empty so the unified card never shows a blank "Recent work items" heading with nothing under it. */
 function recentIntentsRegion(intents: RecentIntent[]): string {
   if (intents.length === 0) return '';
   const rows = intents
@@ -456,9 +499,10 @@ function provenanceRegion<T>(env: ProjectionEnvelope<T>): string {
 export interface CommandProjectionOptions {
   /** Confirmation chip content after a capture round-trip. */
   capturedId?: string;
-  /** 1-based delivery-stream page (WI-177); defaults to 1. */
+  /** 1-based page for the "Shipped" half of the recent-activity feed (WI-177); defaults to 1. */
   deliveryPage?: number;
-  /** 1-based Conversations-region page (WI-307); defaults to 1. */
+  /** WI-128: Conversations is now a link, not a paginated inline list — when set (>1), the
+   *  link carries the founder's prior page over to `/threads?page=N` instead of resetting it. */
   threadsPage?: number;
   /** Glance time-window picker (WI-359). When unset, the picker's displayed active state AND
    *  the underlying tiles both fall back to DEFAULT_GLANCE_WINDOW — one shared default so the
@@ -493,24 +537,19 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   }
 
   const d = env.data;
+  // Operator-attention order (WI-128): decision desk → to test → the unified pipeline card →
+  // glance → the unified recent-activity feed (Conversations demoted to a link within it) →
+  // active ops-parks → provenance.
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
-    recentIntentsRegion(d.recentIntents ?? []) +
-    glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
-    conductorRegion(d.conductor) +
+    `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
+    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
+    glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
+    `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [], d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
+    `<section id="conversations">${conversationsLinkRegion(d.threads ?? [], opts.threadsPage)}</section>` +
     `<section id="ops-parks">${opsParksRegion(d.opsParks)}</section>` +
-    // Nav order (operator request): "Ops health & pipeline" and "Pipeline" render before
-    // Conversations, so the build-lane picture precedes the conversation history.
-    pipelineRegion(d.pipeline, d.opsHealth) +
-    `<section id="pipeline-flow">${pipelineFlowRegion(d.pipelineFlow)}</section>` +
-    `<section id="conversations">${conversationsRegion(
-      d.threads ?? [],
-      opts.threadsPage ?? 1,
-      (p) => (p <= 1 ? '/command#conversations' : `/command?threadsPage=${p}#conversations`),
-    )}</section>` +
-    `<section id="delivery-stream">${deliveryStreamRegion(d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
     provenanceRegion(env) +
     `</div>`
   );
