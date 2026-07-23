@@ -6,9 +6,9 @@
 // reads as "no threads yet".
 
 import type { OperationalState } from '../states/operational-state.ts';
-import { STATUS_CATALOG, type StatusId } from '../states/status-catalog.ts';
+import { deriveItemStatus, STATUS_CATALOG, type StatusId } from '../states/status-catalog.ts';
 import type { GlanceMetric } from './command-projection.ts';
-import { isDecisionPark, isFoldSummary } from './fold-adapter.ts';
+import { isFoldSummary } from './fold-adapter.ts';
 import type { FoldSummary, FoldThread } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 
@@ -31,8 +31,23 @@ export type ThreadMessage = {
  *  recentRejected[].rejectedBy — 'rejected' is a real founder decline, 'superseded' is a
  *  machine-driven closure (reactor duplicate-of-merged / decomposition supersede) that the
  *  founder never actually rejected. Absent `rejectedBy` (pre-WI-331 replays) reads as
- *  founder-equivalent, i.e. 'rejected' — never silently reclassified. */
-export type ThreadState = 'queued' | 'building' | 'needs-you' | 'merged' | 'accepted' | 'rejected' | 'superseded' | 'unknown';
+ *  founder-equivalent, i.e. 'rejected' — never silently reclassified.
+ *  'awaiting-planner' and 'on-hold' (WI-127) split out of the old blanket ops-park→'building'
+ *  collapse: a decomposition park is queued for the planner (not being actively built), and a
+ *  hold park is a deliberate pause — both deserve their own catalog-backed reading rather than
+ *  reading as "a worker is on it right now". Plain ops-parks/awaiting-retry still fold to
+ *  'building' (see {@link deriveThreadState}) — that carve-out is unchanged by this split. */
+export type ThreadState =
+  | 'queued'
+  | 'building'
+  | 'needs-you'
+  | 'awaiting-planner'
+  | 'on-hold'
+  | 'merged'
+  | 'accepted'
+  | 'rejected'
+  | 'superseded'
+  | 'unknown';
 
 /** ThreadState → the status-catalog id whose TONE this badge must always match (WI-086/
  *  WI-087) — a thread card is a conversation-level view of the same underlying work item
@@ -45,6 +60,8 @@ const THREAD_STATE_STATUS_ID: Record<ThreadState, StatusId> = {
   queued: 'queued',
   building: 'building',
   'needs-you': 'parked-decision',
+  'awaiting-planner': 'parked-decomposition',
+  'on-hold': 'parked-hold',
   merged: 'merged',
   accepted: 'accepted',
   rejected: 'rejected',
@@ -58,6 +75,8 @@ const THREAD_STATE_LABEL: Record<ThreadState, string> = {
   queued: 'Queued',
   building: 'Building',
   'needs-you': 'Needs you',
+  'awaiting-planner': 'Awaiting planner',
+  'on-hold': 'On hold',
   merged: 'Merged',
   accepted: 'Accepted',
   rejected: 'Rejected',
@@ -150,6 +169,20 @@ function buildGlance(threads: ThreadCard[]): GlanceMetric[] {
   ];
 }
 
+/** Parked-status catalog id → ThreadState — the parked branch of {@link deriveThreadState}
+ *  routes through {@link deriveItemStatus} (the ONE status deriver, status-catalog.ts) rather
+ *  than re-deriving decision-vs-ops itself, then narrows the catalog's five parked ids down
+ *  to this thread-card vocabulary. 'parked-ops'/'awaiting-retry' deliberately keep folding to
+ *  'building' — a mechanical/infra park the plane auto-recovers from is never an operator
+ *  action target, so the card should still read as in motion, same as before this map existed. */
+const PARKED_STATUS_TO_THREAD_STATE: Partial<Record<StatusId, ThreadState>> = {
+  'parked-decision': 'needs-you',
+  'parked-decomposition': 'awaiting-planner',
+  'parked-hold': 'on-hold',
+  'parked-ops': 'building',
+  'awaiting-retry': 'building',
+};
+
 /** Join a thread against its work item's lifecycle (fold.active / recentMerged /
  *  recentRejected) to derive the founder-facing state, plus the joined item's `spec`
  *  when one exists (feeds the {@link shortTitle} fallback). Absent from all three ⇒
@@ -162,11 +195,17 @@ function deriveThreadState(
   if (active) {
     const spec = active.spec ? { spec: active.spec } : {};
     if (active.state === 'parked') {
-      return isDecisionPark(active)
-        ? { state: 'needs-you', ...(active.parkReason ? { parkReason: active.parkReason } : {}), ...spec }
-        // Ops-parks are mechanical/infra failures the plane auto-recovers from (plane-owned
-        // — never an operator decision), so the card still reads as in motion.
-        : { state: 'building', ...spec };
+      const status = deriveItemStatus({
+        state: 'parked',
+        ...(active.parkKind ? { parkKind: active.parkKind } : {}),
+        breakerTripped: (active.parkReason ?? '').startsWith('breaker:'),
+      });
+      const state = PARKED_STATUS_TO_THREAD_STATE[status.id] ?? 'building';
+      return {
+        state,
+        ...(state === 'needs-you' && active.parkReason ? { parkReason: active.parkReason } : {}),
+        ...spec,
+      };
     }
     if (active.state === 'queued' || active.state === 'routed') return { state: 'queued', ...spec };
     return { state: 'building', ...spec }; // building / testing / approved
