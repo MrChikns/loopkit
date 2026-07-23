@@ -105,7 +105,7 @@ const HEAL_KIND_LABEL: Record<HealActivityEntry['kind'], string> = {
 };
 
 // Reuses the SLO status dot palette: proposed reads as "needs a look" (at-risk),
-// executed as resolved (met), escalated as needs founder attention (breached).
+// executed as resolved (met), escalated as needs operator attention (breached).
 const HEAL_KIND_DOT: Record<HealActivityEntry['kind'], SloStatus> = {
   proposed: 'at-risk',
   executed: 'met',

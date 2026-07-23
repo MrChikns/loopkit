@@ -180,7 +180,7 @@ export interface ItemRecord {
   /** Count of gate.failed + gate.parked events (a build proved red / oversteps its scope). */
   lifetimeGateRedCount?: number;
   /**
-   * Founder-attention count: item.escalated events PLUS decision-kind parks (parkKind==='decision').
+   * Operator-attention count: item.escalated events PLUS decision-kind parks (parkKind==='decision').
    * These are the landings that actually reached the operator's needs-you desk, distinct from
    * lifetimeParkCount which counts every park including the ops-lane ones the plane self-heals.
    */
@@ -1045,7 +1045,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           : undefined;
         rec.parkKind = typeof d['parkKind'] === 'string' ? d['parkKind'] : undefined;
         // WI-108 lifetime counters — every park bumps the park count; a decision-kind park
-        // additionally bumps the founder-attention count (it reaches the needs-you desk).
+        // additionally bumps the operator-attention count (it reaches the needs-you desk).
         rec.lifetimeParkCount = (rec.lifetimeParkCount ?? 0) + 1;
         if (rec.parkKind === 'decision') {
           rec.lifetimeEscalationCount = (rec.lifetimeEscalationCount ?? 0) + 1;
@@ -1153,7 +1153,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       case 'item.escalated':
         rec.escalatedAt = ev.ts;
         rec.escalatedBy = typeof d['by'] === 'string' ? d['by'] : undefined;
-        // WI-108 founder-attention count: an explicit escalation reaches the operator (alongside
+        // WI-108 operator-attention count: an explicit escalation reaches the operator (alongside
         // decision-kind parks, counted in item.parked). This case never calls transition() so it
         // fires safely on any state, including a late escalate on a live 'building' item.
         rec.lifetimeEscalationCount = (rec.lifetimeEscalationCount ?? 0) + 1;

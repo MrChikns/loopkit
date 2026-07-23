@@ -961,7 +961,7 @@ test('fold: lifetimeParkCount accumulates across every park, ops and decision al
   ];
   const item = fold(events).items.get('WI-601')!;
   assert.equal(item.lifetimeParkCount, 2, 'both parks counted');
-  // founder-attention = decision parks + escalations → only the decision park here
+  // operator-attention = decision parks + escalations → only the decision park here
   assert.equal(item.lifetimeEscalationCount, 1);
 });
 

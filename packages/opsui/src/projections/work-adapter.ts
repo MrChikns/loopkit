@@ -214,12 +214,12 @@ export type WorkLedgerData = {
   queueBlocking?: QueueBlockingRow[];
 };
 
-// Primary sort order within the active board: founder-attention order (WI-102). Five groups,
-// top to bottom: (0) decision parks — the only rows that genuinely need the founder's
+// Primary sort order within the active board: operator-attention order (WI-102). Five groups,
+// top to bottom: (0) decision parks — the only rows that genuinely need the operator's
 // judgment; (1) in-flight (building/testing/gated, then approved) — progressing, worth
 // watching; (2) blocked — stalled, may need a nudge; (3) queued/routed/captured — waiting its
 // turn; (4) plane-owned parks (ops/hold/decomposition, and any parked item with an
-// unrecognized/missing parkKind — plane-owned by default, never assumed to need the founder).
+// unrecognized/missing parkKind — plane-owned by default, never assumed to need the operator).
 // `decision` parks are carved out of the `parked` state into their own top group by
 // `attentionGroup` below; STATE_SORT only decides groups 1-4 for every OTHER state (including
 // non-decision parked rows, which land in group 4 regardless of what STATE_SORT says for
@@ -251,10 +251,10 @@ const PRIORITY_SORT: Record<string, number> = {
   blocker: 0, high: 1, medium: 2, low: 3,
 };
 
-/** Founder-attention group for a work item (WI-102): 0 = decision parks (need the founder),
+/** Operator-attention group for a work item (WI-102): 0 = decision parks (need the operator),
  *  1 = in-flight, 2 = blocked, 3 = queued/routed/captured, 4 = plane-owned parks (ops/hold/
  *  decomposition, and any parked item with an unrecognized/missing parkKind — plane-owned by
- *  default, never assumed to need the founder). */
+ *  default, never assumed to need the operator). */
 function attentionGroup(state: string, parkKind: string | undefined): number {
   if (state === 'parked' && parkKind === 'decision') return 0;
   return STATE_SORT[state] ?? 3;
@@ -262,7 +262,7 @@ function attentionGroup(state: string, parkKind: string | undefined): number {
 
 /** Truthful "Parked" glance split: the count of parked items is not, by
  *  itself, a needs-you signal — only `parkKind: 'decision'` parks are. `ops`/`hold` parks are
- *  plane-owned (requeue/dismiss or resume, no founder judgment call) and `decomposition` parks
+ *  plane-owned (requeue/dismiss or resume, no operator judgment call) and `decomposition` parks
  *  are the planner's own queue. The tile shows the total but the "needs attention" subtitle
  *  only fires when a real decision is waiting. */
 function buildGlance(counts: Record<string, number>, parkedKinds: Record<string, number>): GlanceMetric[] {
@@ -343,7 +343,7 @@ export function workProjectionFromFold(
   const nowMs = new Date(generatedAt).getTime();
   const freshUntil = new Date(nowMs + staleAfter * 1000).toISOString();
 
-  // Founder-attention order (WI-102): group first, then the group's own state sub-tier (in-
+  // Operator-attention order (WI-102): group first, then the group's own state sub-tier (in-
   // flight: building/testing/gated ahead of approved; plane-owned parks: ops/hold ahead of
   // decomposition), then priority within that sub-tier, then the existing relative order
   // (Array.prototype.sort is stable in Node, so ties fall through unchanged — no explicit

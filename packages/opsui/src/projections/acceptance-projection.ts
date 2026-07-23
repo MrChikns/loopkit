@@ -117,9 +117,9 @@ function filterToggle(active: AcceptanceFilter, counts?: AcceptanceCounts): stri
   );
 }
 
-/** Acceptance-tier 'optional'/'auto' tiers auto-accept on a timer (or immediately, for 'auto') without a
- *  founder verdict — they belong in the collapsed "Auto-accepting soon" section, not mixed in
- *  with the 'must'/'review' items that actually need the founder's test. */
+/** Acceptance-tier 'optional'/'auto' tiers auto-accept on a timer (or immediately, for 'auto') without an
+ *  operator verdict — they belong in the collapsed "Auto-accepting soon" section, not mixed in
+ *  with the 'must'/'review' items that actually need the operator's test. */
 export function isAutoAcceptTier(tier: string | undefined): boolean {
   return tier === 'optional' || tier === 'auto';
 }
@@ -205,7 +205,7 @@ function acceptanceRow(i: AcceptanceItem): string {
   });
 }
 
-/** must/review items — these are the ones that actually need the founder's test, so they
+/** must/review items — these are the ones that actually need the operator's test, so they
  *  render unsorted (already oldest-first from the adapter) and always visible. */
 function waitingRegion(items: AcceptanceItem[]): string {
   const waiting = items.filter((i) => !isAutoAcceptTier(i.tier));

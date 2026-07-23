@@ -38,8 +38,11 @@ Delivery itself is treated as an event-sourced system. Every intent, build, gate
 and human verdict is an **immutable event in one append-only ledger**. Nothing mutates in place;
 a crashed process changes nothing retroactively, because recovery is just re-reading the log. The
 board, an item's timeline, the needs-you list, the health readout — none of them are *stored*
-state you keep in sync. They are **projections**: pure folds over the one log, derived on demand,
-so they cannot drift from the truth because they *are* the truth, re-read.
+state you keep in sync. They are **ledger-first projections**, derived from the one log on
+demand, so they cannot drift from the truth because they *are* the truth, re-read. Most are pure
+folds over events; a few (the ops-console summary's parked-branch liveness check, the daily
+brief's usage-ledger append) also run a small, explicit diagnostic alongside the read — never
+silent, and never a mutation of the ledger's own event log.
 
 This is the single discipline that kills the failure class the tool was built against: mutable
 coordination state — queues in markdown, status files, chat threads — silently loses or
