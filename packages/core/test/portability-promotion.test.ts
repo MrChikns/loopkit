@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -28,7 +28,7 @@ import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { parseManifest } from '../src/beats/dispatch.js';
 import { fold } from '../src/fold.js';
 import { runReactor } from '../src/beats/reactor.js';
-import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
+import { LoopkitConfig, CONFIG_DEFAULTS, loadConfig } from '../src/config.js';
 
 function makeTestConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
   return {
@@ -38,6 +38,9 @@ function makeTestConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
     breakerN: 3,
     promptsDir: '.ai/loops/prompts',
     notifyHook: '.ai/notify-phone.sh',
+    // Off by default (staged flag — see config.ts); these tests exercise the step itself,
+    // so opt in explicitly. A dedicated test below pins the default-disabled no-op.
+    portabilityPromotion: { enabled: true },
     ...overrides,
   };
 }
@@ -123,6 +126,56 @@ test('fold: item.merged.certification.portability folds onto rec.mergeCertificat
 });
 
 // ---------------------------------------------------------------------------
+// portabilityPromotion config block (staged flag — default off)
+// ---------------------------------------------------------------------------
+
+/** Load a repo-root loopkit.config.json without any ambient plane-home (LOOPKIT_HOME) interfering. */
+function loadConfigIsolated(repoRoot: string): LoopkitConfig {
+  const saved = process.env['LOOPKIT_HOME'];
+  delete process.env['LOOPKIT_HOME'];
+  try {
+    return loadConfig(repoRoot);
+  } finally {
+    if (saved === undefined) delete process.env['LOOPKIT_HOME']; else process.env['LOOPKIT_HOME'] = saved;
+  }
+}
+
+test('portabilityPromotion: config default is enabled:false (loadConfig with no file)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'wi098-cfg-'));
+  try {
+    const cfg = loadConfigIsolated(base);
+    assert.equal(cfg.portabilityPromotion?.enabled, false, 'default must be false — the step ships dormant');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('config: portabilityPromotion.enabled must be a boolean', () => {
+  const base = mkdtempSync(join(tmpdir(), 'wi098-cfg-'));
+  try {
+    writeFileSync(join(base, 'loopkit.config.json'), JSON.stringify({ portabilityPromotion: { enabled: 'yes' } }), 'utf8');
+    assert.throws(
+      () => loadConfigIsolated(base),
+      /portabilityPromotion\.enabled must be a boolean/,
+      'must throw on non-boolean portabilityPromotion.enabled',
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('config: portabilityPromotion.enabled:true loads and flows through to the reactor step', () => {
+  const base = mkdtempSync(join(tmpdir(), 'wi098-cfg-'));
+  try {
+    writeFileSync(join(base, 'loopkit.config.json'), JSON.stringify({ portabilityPromotion: { enabled: true } }), 'utf8');
+    const cfg = loadConfigIsolated(base);
+    assert.equal(cfg.portabilityPromotion?.enabled, true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // reactor promotion step (via runReactor)
 // ---------------------------------------------------------------------------
 
@@ -182,6 +235,35 @@ test('reactor (WI-098): a product-shaped merged item PARKS the sibling as a deci
     assert.ok(sibling, 'sibling captured');
     assert.equal(sibling!.state, 'parked', 'product-shaped source ⇒ the sibling parks');
     assert.equal(sibling!.parkKind, 'decision', 'parked as a decision (operator must ratify)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reactor (WI-098): portabilityPromotion.enabled defaults false — the step is a no-op even with a portable merge', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'acme-web', 'target.registered', {
+        name: 'acme-web', repoPath: '/tmp/acme-web', manifestHash: 'h', defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-020', 'item.captured', { source: 'cli', text: 'add a dedup guard to the tooling', lane: 'engineering' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-020', 'item.queued', { spec: 'add a dedup guard to the tooling', lane: 'engineering' }, '2026-01-01T00:02:00Z'),
+      makeEvent('reactor', 'WI-020', 'item.merged', {
+        commit: 'abc',
+        certification: { couldBreak: 'x', detection: 'y', rollback: 'z', portability: 'applies to: acme-web' },
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    // Override the file's opt-in back to the real CONFIG_DEFAULTS shape (enabled: false).
+    const result = await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig({ portabilityPromotion: { enabled: false } }) });
+    const step = result.steps.find(s => s.step === 'portability-promotion');
+    assert.ok(step, 'step still runs (and reports) even when disabled');
+    assert.equal(step!.eventsWritten, 0, 'disabled step writes nothing');
+
+    const folded = fold(await loadAllEvents(ledgerDir));
+    const sibling = [...folded.items.values()].find(r => r.source === 'portability:WI-020:acme-web');
+    assert.equal(sibling, undefined, 'no sibling captured while the flag is off');
   } finally {
     cleanup();
   }

@@ -883,6 +883,12 @@ async function stepPortabilityPromotion(
   cfg: LoopkitConfig,
 ): Promise<StepResult> {
   const step = 'portability-promotion';
+  // Staged flag (method.md "the rollback is written before the flip"): multi-target
+  // portability isn't proven yet (README's "Honest scope"), so this defaults off — an unset
+  // flag is byte-for-byte "the step never runs." No lock taken, no events read, when disabled.
+  if (!cfg.portabilityPromotion?.enabled) {
+    return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'disabled (portabilityPromotion.enabled=false)' };
+  }
   try {
     let written = 0;
     let promotedCount = 0;
