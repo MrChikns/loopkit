@@ -67,7 +67,7 @@ test('isPortabilityRequired: ADR-bearing (decision-id / ADR-NNN) and incident-fi
   // Covers the D-<digits> branch of the shipped decision-id detector regex in schema.ts
   // (some target repos use a D-prefixed id scheme; loopkit's own is ADR-NNN). Assembled
   // at runtime with an obviously-fake number so the id stays a synthetic example.
-  const decisionId = ['D', '000'].join('-');
+  const decisionId = ['D', '000'].join('-'); // leak-scan:allow-decision-id
   assert.equal(isPortabilityRequired({ spec: `implement ${decisionId} example decision` }), true);
   assert.equal(isPortabilityRequired({ text: 'per ADR-007 fast-drain' }), true);
   assert.equal(isPortabilityRequired({ spec: 'fix', repairContext: 'gate red on merged tree' }), true);
