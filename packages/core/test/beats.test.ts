@@ -5541,6 +5541,18 @@ test('buildPlannerPrompt: injects item id and spec after the prompt-of-record co
   assert.match(p, /SPEC: decompose WI-399: too big/);
 });
 
+test('buildPlannerPrompt: substitutes {{cliPath}}/{{itemId}} with the real resolved CLI path — never leaves the worker to guess a path', () => {
+  const p = buildPlannerPrompt(
+    'Run: node {{cliPath}} new "<child spec text>" --source decompose:{{itemId}}',
+    'WI-400',
+    'decompose WI-399: too big',
+  );
+  assert.ok(!p.includes('{{cliPath}}'), 'the literal {{cliPath}} placeholder must never reach the worker');
+  assert.ok(!p.includes('{{itemId}}'), 'the literal {{itemId}} placeholder must never reach the worker');
+  assert.match(p, /node \S*cli\.js new "<child spec text>" --source decompose:WI-400/,
+    'the worker must be handed the exact sanctioned command, with the real cli.js path and this run\'s item id');
+});
+
 test('dispatch: planning lane queues a child via loopctl new, merges with no source commit, no worktree needed', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
@@ -5565,7 +5577,7 @@ test('dispatch: planning lane queues a child via loopctl new, merges with no sou
         assert.ok(!req.tools?.some(t => t.startsWith('Bash(git') || t === 'Edit' || t === 'Write'),
           'planner must never be granted git/Edit/Write tools');
         await appendEvents(ledgerDir, [
-          makeEvent('cli', 'WI-401', 'item.captured', { source: 'cli', text: 'first buildable child slice' }),
+          makeEvent('cli', 'WI-401', 'item.captured', { source: 'decompose:WI-400', text: 'first buildable child slice' }),
         ]);
         return {
           ok: true,
@@ -5680,7 +5692,7 @@ test('dispatch: planning lane runs independently of a conflicting in-flight engi
       name: 'fake-planner',
       async run(): Promise<ProviderResult> {
         await appendEvents(ledgerDir, [
-          makeEvent('cli', 'WI-432', 'item.captured', { source: 'cli', text: 'child' }),
+          makeEvent('cli', 'WI-432', 'item.captured', { source: 'decompose:WI-431', text: 'child' }),
         ]);
         return { ok: true, text: 'QUEUED: child' };
       },
@@ -5693,6 +5705,51 @@ test('dispatch: planning lane runs independently of a conflicting in-flight engi
     const folded = fold(await loadAllEvents(ledgerDir));
     assert.equal(folded.items.get('WI-431')?.state, 'merged',
       'a wildcard-footprint in-flight ENGINEERING build must never block the planning lane');
+  } finally {
+    cleanDir(ledgerDir);
+    cleanDir(repoRoot);
+  }
+});
+
+test('dispatch: planning lane gate — an unrelated capture landing in the same window (no decompose:<itemId> source stamp) does not pass the gate', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+  mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'planner.md'), 'stub planner prompt');
+  try {
+    await seedLedger(ledgerDir, [
+      makeEvent('reactor', 'WI-440', 'item.captured', { source: 'decompose:WI-439', text: 'decompose WI-439: too big' }),
+      makeEvent('reactor', 'WI-440', 'item.queued', { spec: 'decompose WI-439: too big', lane: 'planning' }),
+    ]);
+
+    // The provider text CLAIMS a child was queued, but the item it lands in the ledger during
+    // the run carries no `decompose:WI-440` source — e.g. an attended operator session capturing
+    // an unrelated message at the same moment. This must no longer be misattributed as WI-440's
+    // planner output (the old before/after id-window diff would have credited it).
+    const provider: LlmProvider = {
+      name: 'fake-planner',
+      async run(): Promise<ProviderResult> {
+        await appendEvents(ledgerDir, [
+          makeEvent('cli', 'WI-441', 'item.captured', { source: 'cli', text: 'unrelated concurrent capture' }),
+        ]);
+        return { ok: true, text: 'QUEUED: unrelated concurrent capture' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot, ledgerDir, autonomy: 'on', provider, config: makeTestConfig(), authProbeResult: { ok: true },
+    });
+
+    assert.equal(result.dispatched.find(d => d.item === 'WI-440')?.gateOutcome, 'failed',
+      'a concurrent unrelated capture during a planning build must not pass the gate');
+
+    const events = await loadAllEvents(ledgerDir);
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-440')?.state, 'queued', 'attempt 1 of 3 requeues, not merges');
+    assert.equal(folded.items.get('WI-441')?.state, 'captured',
+      'the unrelated capture itself still lands normally — only WI-440\'s gate must reject it');
+    assert.equal(events.filter(e => e.type === 'item.merged' && e.item === 'WI-440').length, 0);
   } finally {
     cleanDir(ledgerDir);
     cleanDir(repoRoot);
