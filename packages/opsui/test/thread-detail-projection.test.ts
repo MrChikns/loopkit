@@ -55,3 +55,20 @@ test('the header badge matches the catalog label for a routed item, not the raw 
   assert.ok(html.includes(STATUS_CATALOG.routing.label));
   assert.ok(!html.includes('>routed<'));
 });
+
+// WI-130 regression: this projection backs both the standalone /threads/:ref page AND the
+// item hub's embedded conversation region (item-hub-adapter.ts's conversationRegion). A
+// channel-style externalRef (the console composer's literal 'console' marker — see
+// server.ts's /intent handler and core's summary.ts) isn't a resolvable per-intent address,
+// so the reply form's post-submit redirect must land on the item hub, not the unresolvable
+// /threads/console the router 404s on.
+test('the reply form redirects to the item hub when externalRef is a channel marker, not a resolvable ref', () => {
+  const html = ThreadDetailProjection(baseData({ externalRef: 'console', wiRef: 'WI-129' }));
+  assert.match(html, /action="\/intent\?next=%2Fitem%2FWI-129"/, 'next must resolve to the item hub');
+  assert.ok(!html.includes('%2Fthreads%2Fconsole'), 'next must never point at the unresolvable /threads/console');
+});
+
+test('the reply form still redirects to /threads/<ref> for a resolvable externalRef', () => {
+  const html = ThreadDetailProjection(baseData({ externalRef: 'EXT-1', wiRef: 'WI-071' }));
+  assert.match(html, /action="\/intent\?next=%2Fthreads%2FEXT-1"/);
+});

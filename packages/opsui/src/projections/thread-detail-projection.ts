@@ -6,6 +6,7 @@
 // on consuming surfaces.
 
 import { StatusBadge } from '../components/StatusBadge.ts';
+import { isResolvableExternalRef } from './fold-adapter.ts';
 import { esc, formatLocal } from '../render/html.ts';
 import { deriveItemStatus, statusBadgeProps } from '../states/status-catalog.ts';
 
@@ -73,7 +74,10 @@ export function ThreadDetailProjection(data: ThreadDetailData): string {
   const { externalRef, wiRef, itemState, capturedAt, originalText, attachments, messages, outCount } = data;
   const status = deriveItemStatus({ state: itemState });
   const headerTs = capturedAt ? fmtTs(capturedAt) : '';
-  const nextPath = `/threads/${externalRef}`;
+  // A channel-style externalRef (e.g. 'console', stamped on every console-composer
+  // capture) isn't a resolvable per-intent address — redirect back to the canonical item
+  // hub instead of a /threads/<ref> page the router can never resolve for it.
+  const nextPath = isResolvableExternalRef(externalRef) ? `/threads/${externalRef}` : `/item/${wiRef}`;
   const actionUrl = `/intent?next=${encodeURIComponent(nextPath)}`;
   const inputId = `reply-${esc(wiRef || externalRef)}`;
 

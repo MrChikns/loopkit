@@ -157,6 +157,47 @@ test('GET /command — the opsui Recent work items strip still shows the EXT chi
   );
 });
 
+// WI-130 regression: the console's own /intent handler stamps every captured item with the
+// literal channel marker `source: 'ext:console'` — core's summary.ts still derives an
+// externalRef of 'console' from that prefix (so the item shows up as a thread immediately),
+// but 'console' is shared by every console-captured item (not a unique per-intent address) and
+// fails the /threads/:ref route's accepted shape, so the old href (`/threads/console`) 404d.
+test('GET /command — a channel-sourced (ext:console) capture gets a resolvable thread link, never /threads/console', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const ago = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
+      await appendEvents(ledgerDir, [
+        makeEvent('cli', 'WI-904', 'item.captured', { source: 'ext:console', text: 'a console-composer capture' }, ago(10)),
+        makeEvent('reactor', 'WI-904', 'msg.out', { text: 'on it' }, ago(9)),
+      ]);
+      const res = await fetch(`${base}/command`);
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /WI-904/);
+      assert.ok(!body.includes('/threads/console'), 'the strip must never link at the unresolvable /threads/console');
+      assert.match(body, /href="\/item\/WI-904"/);
+
+      // The href the adapter actually emitted must itself resolve — proving the adapter's
+      // href and the router's accepted ref shape (isResolvableExternalRef, shared from
+      // @loopkit/opsui) can never drift apart again.
+      const threadRes = await fetch(`${base}/item/WI-904`);
+      assert.equal(threadRes.status, 200);
+    }),
+  );
+});
+
+// Defense in depth: even a stale/bookmarked /threads/console URL (the pre-fix href) must 404
+// cleanly rather than resolving to the WRONG item — 'console' is shared by every
+// console-captured item, so matching on it by externalRef would be ambiguous, not just wrong.
+test('GET /threads/console — 404s rather than guessing at a shared channel-style ref', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/threads/console`);
+      assert.equal(res.status, 404);
+    }),
+  );
+});
+
 test('GET /work — renders 200 with the Missions marker', async () => {
   await withLedger((ledgerDir) =>
     withServer(ledgerDir, async (base) => {

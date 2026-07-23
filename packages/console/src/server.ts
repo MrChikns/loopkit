@@ -93,7 +93,7 @@ import {
   renderNotFoundPage,
 } from './opsPages.js';
 import type { OpsPageContext, KnowledgeSourceRecord, OpsData } from './opsPages.js';
-import { generateTokensCss as opsuiGenerateTokensCss, registeredStylesheets } from '@loopkit/opsui';
+import { generateTokensCss as opsuiGenerateTokensCss, registeredStylesheets, isResolvableExternalRef } from '@loopkit/opsui';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1075,8 +1075,13 @@ async function handleRequest(
       return;
     }
 
-    const threadDetailMatch = /^\/threads\/([A-Z]+-\d+)$/.exec(pathname);
-    if (threadDetailMatch) {
+    // The ref shape accepted here is the SAME `isResolvableExternalRef` predicate the opsui
+    // adapters gate a `/threads/<ref>` link on (fold-adapter.ts) — one source of truth, so a
+    // link generator and this route can never drift apart (a channel-style ref like the
+    // console composer's literal 'console' marker fails the shape and falls through to the
+    // generic 404 below rather than ever matching here).
+    const threadDetailMatch = /^\/threads\/([^/]+)$/.exec(pathname);
+    if (threadDetailMatch && isResolvableExternalRef(threadDetailMatch[1] as string)) {
       return send(res, 200, renderThreadDetailPage(data, threadDetailMatch[1] as string, theme));
     }
 

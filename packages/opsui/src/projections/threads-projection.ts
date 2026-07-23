@@ -13,6 +13,7 @@ import { ProjectionFailure } from '../components/ProjectionFailure.ts';
 import { StatusBadge } from '../components/StatusBadge.ts';
 import { esc , formatLocal } from '../render/html.ts';
 import type { GlanceMetric } from './command-projection.ts';
+import { isResolvableExternalRef } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 import { THREAD_STATE_BADGE } from './threads-adapter.ts';
 import type { ThreadsData, ThreadCard } from './threads-adapter.ts';
@@ -107,7 +108,12 @@ export function threadCard(thread: ThreadCard): string {
     ? `<span class="opsui-threads__last-ts">Last reply ${esc(formatTs(thread.lastOutTs))}</span>`
     : '';
 
-  const detailHref = `/threads/${thread.externalRef ?? thread.id}`;
+  // A channel-style externalRef (e.g. 'console', stamped on every console-composer capture)
+  // isn't a resolvable per-intent address — link the card at the canonical item hub instead
+  // of a /threads/<ref> page the router can never resolve for it.
+  const detailHref = thread.externalRef && isResolvableExternalRef(thread.externalRef)
+    ? `/threads/${thread.externalRef}`
+    : `/item/${thread.id}`;
   const title = thread.title || thread.label;
 
   return (
