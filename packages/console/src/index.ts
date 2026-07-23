@@ -10,7 +10,6 @@ export { startConsole } from './server.js';
 export type { ConsoleOptions, ConsoleHandle } from './server.js';
 
 export {
-  renderCommand,
   renderMissions,
   renderItemTimeline,
   renderAcceptance,
