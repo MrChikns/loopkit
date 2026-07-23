@@ -14,7 +14,7 @@ import type { OperationalState } from '../states/operational-state.ts';
 import { deriveItemStatus } from '../states/status-catalog.ts';
 import type { CommandData, CommandEvent, DecisionBlock, GlanceMetric, PipelineFlow, PipelineStage, RecentIntent } from './command-projection.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
-import { toCard as toThreadCard } from './threads-adapter.ts';
+import { toCard as toThreadCard, threadSortKey } from './threads-adapter.ts';
 import type { ThreadCard } from './threads-adapter.ts';
 
 /** The subset of `loopctl summary --json` the command projection reads (see
@@ -1305,7 +1305,7 @@ function buildThreads(fold: FoldSummary): ThreadCard[] {
     const ta = a.lastOutTs ? new Date(a.lastOutTs).getTime() : 0;
     const tb = b.lastOutTs ? new Date(b.lastOutTs).getTime() : 0;
     if (tb !== ta) return tb - ta;
-    return (a.externalRef ?? a.id).localeCompare(b.externalRef ?? b.id);
+    return threadSortKey(a).localeCompare(threadSortKey(b));
   });
   return sorted.map((t) => toThreadCard(t, fold));
 }

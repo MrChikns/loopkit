@@ -13,7 +13,7 @@ import { test } from 'node:test';
 
 import { deriveItemStatus, type ItemStatusInput } from '../src/states/status-catalog.ts';
 import type { FoldActiveItem, FoldMergedItem, FoldSummary, FoldThread } from '../src/projections/fold-adapter.ts';
-import { THREAD_STATE_BADGE, toCard } from '../src/projections/threads-adapter.ts';
+import { THREAD_STATE_BADGE, shortTitle, threadsProjectionFromFold, toCard } from '../src/projections/threads-adapter.ts';
 
 function fold(overrides: Partial<FoldSummary> = {}): FoldSummary {
   return {
@@ -129,3 +129,45 @@ for (const { label, buildFold, expected } of COHERENCE_CASES) {
     assert.equal(badgeTone, catalogTone, `thread badge tone for '${card.state}' must equal deriveItemStatus(...).tone`);
   });
 }
+
+// Channel-captured items must resolve to the WI id, with the channel carried as a tag, not
+// displacing the id-chip label (regression for the toCard label bug described at the top of
+// threads-adapter.ts).
+test('a channel-style externalRef (e.g. "console") never displaces the WI id in label — it is captured as channel', () => {
+  const channelThread: FoldThread = { id: 'WI-907', externalRef: 'console', outCount: 0 };
+  const card = toCard(channelThread, fold());
+
+  assert.equal(card.label, 'WI-907');
+  assert.equal(card.channel, 'console');
+  assert.equal(card.externalRef, 'console');
+});
+
+test('a genuinely resolvable per-intent externalRef (e.g. "EXT-77") keeps its existing behavior — no channel tag', () => {
+  const resolvableThread: FoldThread = { id: 'WI-908', externalRef: 'EXT-77', outCount: 0 };
+  const card = toCard(resolvableThread, fold());
+
+  assert.equal(card.label, 'WI-908');
+  assert.equal(card.externalRef, 'EXT-77');
+  assert.equal(card.channel, undefined);
+});
+
+test('sort order for channel-captured threads is by WI id, not the shared channel externalRef', () => {
+  const raw = fold({
+    threads: [
+      { id: 'WI-1', externalRef: 'zzz-channel', outCount: 0 },
+      { id: 'WI-2', externalRef: 'aaa-channel', outCount: 0 },
+    ],
+  });
+
+  const envelope = threadsProjectionFromFold(raw, { ledgerSequence: 1 });
+  assert.equal(envelope.state, 'fresh');
+  assert.deepEqual(envelope.data.threads.map((t) => t.id), ['WI-1', 'WI-2']);
+});
+
+test('shortTitle on a path-heavy first line cuts mid-token at 48 chars instead of collapsing to a near-empty title', () => {
+  const spec = 'In packages/opsui/src/projections/fold-adapter.ts, the Glance window picker should drive the headline';
+  const title = shortTitle(spec);
+
+  assert.ok(title.length >= 12, `expected a usable title, got "${title}" (length ${title.length})`);
+  assert.notEqual(title, 'In…');
+});

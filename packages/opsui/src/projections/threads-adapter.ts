@@ -8,7 +8,7 @@
 import type { OperationalState } from '../states/operational-state.ts';
 import { deriveItemStatus, STATUS_CATALOG, type StatusId } from '../states/status-catalog.ts';
 import type { GlanceMetric } from './command-projection.ts';
-import { isFoldSummary } from './fold-adapter.ts';
+import { isFoldSummary, isResolvableExternalRef } from './fold-adapter.ts';
 import type { FoldSummary, FoldThread } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 
@@ -101,8 +101,13 @@ export type ThreadCard = {
   outCount: number;
   lastOutTs?: string;
   messages: ThreadMessage[];
-  /** Display label: externalRef when available, otherwise id. */
+  /** Display label — always the WI id. A channel-style externalRef (e.g. 'console',
+   *  'telegram') is captured separately as {@link channel} rather than displacing it here. */
   label: string;
+  /** Present only when externalRef is a channel marker, not a genuinely resolvable
+   *  per-intent address (see isResolvableExternalRef, fold-adapter.ts) — rendered as a
+   *  small tag before the title instead of overriding the id-chip label. */
+  channel?: string;
   /** Joined work-item lifecycle state — drives the operator-facing status badge. */
   state: ThreadState;
   /** Present only when state is 'needs-you' — why an operator decision is pending. */
@@ -139,7 +144,12 @@ export function shortTitle(text: string | undefined | null): string {
   if (stripped.length <= MAX) return stripped;
   const truncated = stripped.slice(0, MAX);
   const lastSpace = truncated.lastIndexOf(' ');
-  const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
+  // A path-heavy first line (e.g. "In packages/opsui/src/projections/fold-adapter.ts, the
+  // Glance…") can have its only word boundary within the first few characters — cutting
+  // there collapses the title to something like "In…". When the word-boundary cut would be
+  // shorter than MIN_WORD_CUT, cut mid-token at MAX instead so the title stays usable.
+  const MIN_WORD_CUT = 12;
+  const cut = lastSpace >= MIN_WORD_CUT ? truncated.slice(0, lastSpace) : truncated;
   return `${cut}…`;
 }
 
@@ -235,6 +245,16 @@ function extractSupersededBy(messages: ThreadMessage[]): string | undefined {
   return undefined;
 }
 
+/** Most-recent-reply-first tie-break key, shared by threads-adapter.ts and fold-adapter.ts's
+ *  buildThreads: a genuinely resolvable per-intent external ref (isResolvableExternalRef,
+ *  fold-adapter.ts) is address-unique and may still order threads by it, but a channel-style
+ *  ref (e.g. 'console') is shared by every capture on that channel and must never displace the
+ *  WI id as the sort key — same channel-vs-resolvable-ref distinction as {@link toCard}'s
+ *  label/channel split. */
+export function threadSortKey(t: { id: string; externalRef?: string }): string {
+  return t.externalRef && isResolvableExternalRef(t.externalRef) ? t.externalRef : t.id;
+}
+
 /** Exported so Command can build the same ThreadCard shape for its "Conversations" region
  *  (nav IA rewire) without re-deriving the mapping. */
 export function toCard(t: FoldThread, fold: FoldSummary): ThreadCard {
@@ -256,7 +276,8 @@ export function toCard(t: FoldThread, fold: FoldSummary): ThreadCard {
     outCount: t.outCount,
     ...(t.lastOutTs ? { lastOutTs: t.lastOutTs } : {}),
     messages: msgs,
-    label: t.externalRef ?? t.id,
+    label: t.id,
+    ...(t.externalRef && !isResolvableExternalRef(t.externalRef) ? { channel: t.externalRef } : {}),
     state,
     ...(parkReason ? { parkReason } : {}),
     ...(supersededBy ? { supersededBy } : {}),
@@ -292,13 +313,13 @@ export function threadsProjectionFromFold(
   const nowMs = new Date(generatedAt).getTime();
   const freshUntil = new Date(nowMs + staleAfter * 1000).toISOString();
 
-  // Most-recent-reply first; ties broken by label (externalRef or id) alphabetically.
+  // Most-recent-reply first; ties broken by threadSortKey (resolvable externalRef, else id).
   const foldThreads = (fold.threads ?? []) as FoldThread[];
   const sorted = [...foldThreads].sort((a, b) => {
     const ta = a.lastOutTs ? new Date(a.lastOutTs).getTime() : 0;
     const tb = b.lastOutTs ? new Date(b.lastOutTs).getTime() : 0;
     if (tb !== ta) return tb - ta;
-    return (a.externalRef ?? a.id).localeCompare(b.externalRef ?? b.id);
+    return threadSortKey(a).localeCompare(threadSortKey(b));
   });
 
   const threads = sorted.map((t) => toCard(t, fold));

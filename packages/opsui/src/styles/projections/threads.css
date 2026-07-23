@@ -41,6 +41,15 @@ details.opsui-threads__card { padding: 0; display: block; }
   color: var(--text);
   flex-shrink: 0;
 }
+.opsui-threads__channel-tag {
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
 .opsui-threads__card-title {
   font-size: 13px;
   color: var(--text-2);
