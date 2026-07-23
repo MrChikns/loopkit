@@ -85,7 +85,7 @@ function passesFilter(origin: ItemOrigin | undefined, filter: AcceptanceFilter):
   return origin === 'target' || origin === 'mixed';
 }
 
-// Acceptance-tier tiering (WI-341): the chip must match what the founder actually needs to act on —
+// Acceptance-tier tiering (WI-341): the chip must match what the operator actually needs to act on —
 // only must/review items are "to test"; optional/auto auto-accept on a timer and are a
 // side mention, not part of the headline count (they already have their own collapsed
 // "Auto-accepting soon" section below).
@@ -167,8 +167,8 @@ export function acceptanceProjectionFromFold(
   const orderedFiltered = ordered.filter((_m, i) => passesFilter(origins[i], filter));
   const queue = orderedFiltered.map((m) => toItem(m, nowMs, fold.tierWindows));
   // The glance's "Oldest" tile mirrors the "Waiting on your test" section (acceptance-tier
-  // tiering, WI-341): an old optional/auto item that's about to auto-accept isn't founder debt, so
-  // it must not be reported as the oldest thing waiting on the founder.
+  // tiering, WI-341): an old optional/auto item that's about to auto-accept isn't operator debt, so
+  // it must not be reported as the oldest thing waiting on the operator.
   const waitingFiltered = orderedFiltered.filter((m) => !isAutoAcceptTier(m.tier));
   const oldestAgeMs = waitingFiltered.length ? nowMs - mergedAtMs(waitingFiltered[0]!) : NaN;
 
