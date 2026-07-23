@@ -115,11 +115,18 @@ export function threadCard(thread: ThreadCard): string {
     ? `/threads/${thread.externalRef}`
     : `/item/${thread.id}`;
   const title = thread.title || thread.label;
+  // A channel-style externalRef (e.g. 'console') is shared by every capture on that channel,
+  // so it never displaces the WI id in the id-chip slot (thread.label) — it renders as its
+  // own small tag ahead of the title instead.
+  const channelTag = thread.channel
+    ? `<span class="opsui-threads__channel-tag">${esc(thread.channel)}</span>`
+    : '';
 
   return (
     `<details class="opsui-threads__card" data-thread-id="${esc(thread.id)}"${thread.externalRef ? ` data-ext-id="${esc(thread.externalRef)}"` : ''}>` +
     `<summary class="opsui-threads__card-summary">` +
     `<span class="opsui-threads__card-id">${esc(thread.label)}</span>` +
+    channelTag +
     `<span class="opsui-threads__card-title">${esc(title)}</span>` +
     stateBadge +
     (thread.lastOutTs ? `<span class="opsui-threads__summary-ts">${esc(formatTs(thread.lastOutTs))}</span>` : '') +
