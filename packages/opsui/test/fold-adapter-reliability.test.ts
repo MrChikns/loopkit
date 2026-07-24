@@ -37,7 +37,6 @@ test('Reliability: a merged item with every lifetime counter ABSENT counts as cl
   const tile = reliabilityTile(fold, '7d');
   assert.equal(tile.value, '100%');
   assert.match(tile.footnote, /1\/1 clean landing \(7d\)/);
-  assert.match(tile.footnote, /1\/1 clean \(30d\)/);
 });
 
 test('Reliability: ANY non-zero lifetime counter marks the WI dirty, even if it merged first-attempt', () => {
@@ -69,18 +68,23 @@ test('Reliability: each of the four lifetime counters independently dirties a WI
 test('Reliability: 7d and 30d windows are read from their own pre-trimmed fold arrays, independently', () => {
   const clean: FoldMergedItem = { id: 'WI-720', mergedAt: NOW };
   const dirty: FoldMergedItem = { id: 'WI-721', mergedAt: NOW, lifetimeCrashCount: 3 };
-  // 7d only sees the clean one; 30d (the superset) also carries an older dirty merge.
+  // 7d only sees the clean one; 30d (the superset) also carries an older dirty merge — selecting
+  // 7d must show ONLY the 7d figure, never a second number scoped to the 30d superset.
   const fold = baseFold({ recentMerged: [clean], recentMerged30d: [clean, dirty] });
-  const tile = reliabilityTile(fold, '7d');
-  assert.match(tile.footnote, /1\/1 clean landing \(7d\)/);
-  assert.match(tile.footnote, /1\/2 clean \(30d\)/);
+  const tile7d = reliabilityTile(fold, '7d');
+  assert.match(tile7d.footnote, /1\/1 clean landing \(7d\)/);
+  assert.doesNotMatch(tile7d.footnote, /\(30d\)/);
+
+  const tile30d = reliabilityTile(fold, '30d');
+  assert.match(tile30d.footnote, /1\/2 clean landing \(30d\)/);
+  assert.doesNotMatch(tile30d.footnote, /\(7d\)/);
 });
 
 test('Reliability: absent recentMerged30d falls back to the 7d array (older CLI), never fabricates an empty 30d window', () => {
   const clean: FoldMergedItem = { id: 'WI-730', mergedAt: NOW };
   const fold = baseFold({ recentMerged: [clean] }); // no recentMerged30d key at all
-  const tile = reliabilityTile(fold);
-  assert.match(tile.footnote, /1\/1 clean \(30d\)/);
+  const tile = reliabilityTile(fold, '30d');
+  assert.match(tile.footnote, /1\/1 clean landing \(30d\)/);
 });
 
 test('Reliability: the footnote carries the 90% target marker and the relabeled attempt-level secondary', () => {
@@ -127,16 +131,19 @@ test('Reliability: the headline follows the selected Glance window, not a hardco
   const clean: FoldMergedItem = { id: 'WI-800', mergedAt: NOW };
   const dirty: FoldMergedItem = { id: 'WI-801', mergedAt: NOW, lifetimeCrashCount: 1 };
   // 7d (== recentMerged) sees both merges; 30d (the superset) adds nothing new here — the point
-  // is that the HEADLINE's count/label move when the window arg changes, not the 30d reference.
+  // is that the HEADLINE's count/label move when the window arg changes. The footnote must be
+  // single-window throughout: never mix a (7d) figure into a 30d-selected footnote or vice versa.
   const fold = baseFold({ recentMerged: [clean, dirty], recentMerged30d: [clean, dirty] });
 
   const tile7d = reliabilityTile(fold, '7d');
   assert.equal(tile7d.value, '50%');
   assert.match(tile7d.footnote, /1\/2 clean landing \(7d\)/);
+  assert.doesNotMatch(tile7d.footnote, /\(30d\)/);
 
   const tile30d = reliabilityTile(fold, '30d');
   assert.equal(tile30d.value, '50%');
   assert.match(tile30d.footnote, /1\/2 clean landing \(30d\)/);
+  assert.doesNotMatch(tile30d.footnote, /\(7d\)/);
 });
 
 // No explicit window ⇒ falls back to DEFAULT_GLANCE_WINDOW ('24h'), the SAME default the picker
@@ -147,4 +154,24 @@ test('Reliability: an unset window defaults the headline to 24h, matching the pi
   const fold = baseFold({ recentMerged: [clean], recentMerged30d: [clean] });
   const tile = reliabilityTile(fold);
   assert.match(tile.footnote, /1\/1 clean landing \(24h\)/);
+});
+
+// Bug fix: the footnote used to pack a SECOND figure hardcoded to 30d regardless of the
+// selected window ("3/4 clean landing (24h) · 8/10 clean (30d) · ..."), so a 24h
+// selection still showed a 30d-scoped number next to it — mirrors the Flow tile, which is
+// (and must stay) single-window throughout.
+test('Reliability: footnote is single-window — selecting 24h never surfaces a (30d) figure, and vice versa', () => {
+  const clean: FoldMergedItem = { id: 'WI-820', mergedAt: NOW, attempts: 1 };
+  const older: FoldMergedItem = { id: 'WI-821', mergedAt: NOW, attempts: 1, lifetimeCrashCount: 1 };
+  const fold = baseFold({ recentMerged: [clean], recentMerged30d: [clean, older] });
+
+  const tile24h = reliabilityTile(fold, '24h');
+  assert.match(tile24h.footnote, /\(24h\)/);
+  assert.doesNotMatch(tile24h.footnote, /\(30d\)/);
+  assert.doesNotMatch(tile24h.footnote, /\(7d\)/);
+
+  const tile30d = reliabilityTile(fold, '30d');
+  assert.match(tile30d.footnote, /\(30d\)/);
+  assert.doesNotMatch(tile30d.footnote, /\(24h\)/);
+  assert.doesNotMatch(tile30d.footnote, /\(7d\)/);
 });

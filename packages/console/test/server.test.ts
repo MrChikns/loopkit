@@ -2773,13 +2773,15 @@ test('GET /command — the Flow footnote keeps the "median cycle · N in / N out
   });
 });
 
-test('GET /command — the Reliability footnote keeps the "N/M clean landing (…) · N/M clean (30d) · target NN% · this try: N/M (…)" shape', async () => {
+test('GET /command — the Reliability footnote keeps the "N/M clean landing (…) · target NN% · this try: N/M (…)" shape', async () => {
   await withGlanceServer((body) => {
     // The sole recent merge landed clean (no lifetime park/crash/gate-red/escalation counts)
-    // and was also first-attempt ⇒ 1/1 on every axis, in both the 7d/30d windows and the
-    // selected reliability window. WI-129: the headline now follows the Glance window picker
-    // (no ?window= param ⇒ DEFAULT_GLANCE_WINDOW, "24h") instead of a hardcoded "(7d)" label.
-    assert.match(body, /1\/1 clean landing \(24h\) · 1\/1 clean \(30d\) · target 90% · this try: 1\/1 \([^)]+\)/);
+    // and was also first-attempt ⇒ 1/1 on every axis in the selected reliability window. WI-129:
+    // the headline follows the Glance window picker (no ?window= param ⇒ DEFAULT_GLANCE_WINDOW,
+    // "24h") instead of a hardcoded "(7d)" label. Bug fix: the footnote no longer packs a second,
+    // fixed-30d "clean (30d)" segment — it must be single-window throughout, matching Flow.
+    assert.match(body, /1\/1 clean landing \(24h\) · target 90% · this try: 1\/1 \([^)]+\)/);
+    assert.doesNotMatch(body.match(/Reliability[\s\S]{0,400}/)?.[0] ?? '', /clean \(30d\)/);
   });
 });
 
@@ -2793,8 +2795,10 @@ test('GET /command?window=7d — the Reliability headline follows the picker (WI
       const body = await res.text();
       // Same single clean merge, but the headline's window label now reads "(7d)" because the
       // picker selected it — before WI-129 this label never moved off "(7d)" regardless of the
-      // query param, which is exactly the bug this test guards against regressing.
-      assert.match(body, /1\/1 clean landing \(7d\) · 1\/1 clean \(30d\) · target 90%/);
+      // query param, which is exactly the bug this test guards against regressing. Bug fix: the
+      // footnote must be single-window — selecting 7d must never also surface a "(30d)" figure.
+      assert.match(body, /1\/1 clean landing \(7d\) · target 90%/);
+      assert.doesNotMatch(body.match(/Reliability[\s\S]{0,400}/)?.[0] ?? '', /\(30d\)/);
     });
   } finally {
     await rm(dir, { recursive: true, force: true });

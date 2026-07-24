@@ -656,8 +656,14 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   const cycleMedianMs = median(cycleTimesMs);
   const cycleLabel = cycleMedianMs !== undefined ? `${(cycleMedianMs / HOUR_MS).toFixed(1)}h` : '–';
 
-  // ── RELIABILITY: per-WI clean-landing rate over the selected window (+ a fixed 30d
-  //    reference), WI-089 / WI-129 ──
+  // ── RELIABILITY: per-WI clean-landing rate over the selected window, WI-089 / WI-129 ──
+  // Single-window throughout (headline + footnote), matching how the Flow tile is built —
+  // the footnote used to also pack a fixed-30d reference segment that never tracked the
+  // picker, so selecting 24h could show "3/4 clean landing (24h) · 8/10 clean (30d)"
+  // in the same line. Removed rather than windowized: the 30d figure only added information
+  // when it differed from the selected window, and the tile already carries two other
+  // window-tagged numbers (clean landing, this try) — a third copy of the same pair at a
+  // different window read as a second, disagreeing headline rather than useful context.
   // Headline switched from "first-attempt merge rate" (attempts===1, one attempt-count field)
   // to "clean landing" (WI-108 lifetime counters, one outcome per WI): a merged item is clean
   // iff it never parked/crashed/gate-failed/escalated ANYWHERE on its road to merge — a WI that
@@ -674,13 +680,6 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   const cleanHeadline = reliabilityMerged.filter(isCleanLanding).length;
   const totalHeadline = reliabilityMerged.length;
   const cleanPctHeadline = totalHeadline > 0 ? Math.round((cleanHeadline / totalHeadline) * 100) : undefined;
-  // Fixed 30d reference point, independent of the picker, so the operator keeps a longer-horizon
-  // comparison even while scrubbing the headline window narrower (24h/7d). fold.recentMerged30d
-  // is already pre-trimmed to 30d upstream (WI-360).
-  const merged30d = fold.recentMerged30d ?? fold.recentMerged;
-  const clean30d = merged30d.filter(isCleanLanding).length;
-  const total30d = merged30d.length;
-  const cleanPct30d = total30d > 0 ? Math.round((clean30d / total30d) * 100) : undefined;
   const RELIABILITY_TARGET_PCT = 90;
 
   // Secondary line — the ORIGINAL per-attempt computation (attempts===1 share of merges in the
@@ -749,11 +748,15 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
       // the value shown must be the one the target marker applies to.
       value: cleanPctHeadline !== undefined ? `${cleanPctHeadline}%` : '–',
       // Footnote packs: windowed clean-landing count (labelled with the window it's actually
-      // scoped to) · a fixed 30d clean-landing rate+count for longer-horizon context · the 90%
-      // target marker · the attempt-level secondary (explicitly relabeled "this try" so it can
-      // never be mistaken for the clean-landing headline) · a one-tap link to the dirty items.
+      // scoped to) · the 90% target marker · the attempt-level secondary (explicitly relabeled
+      // "this try" so it can never be mistaken for the clean-landing headline) · a one-tap link
+      // to the dirty items. WI-fix: dropped the old fixed-30d reference segment — it always read
+      // fold.recentMerged30d regardless of the selected window, so a 24h selection showed a
+      // "(30d)" figure next to a "(24h)" one (mixed-window footnote). Single-window throughout
+      // now, matching how the Flow tile is built (mergedInFlowWindow/flowWindow, no fixed extra
+      // window).
       footnote: totalHeadline > 0
-        ? `${cleanHeadline}/${totalHeadline} clean landing (${reliabilityWindow}) · ${cleanPct30d !== undefined ? `${clean30d}/${total30d} clean (30d)` : 'no merges (30d)'} · target ${RELIABILITY_TARGET_PCT}% · this try: ${mergedTotal > 0 ? `${firstAttempt}/${mergedTotal} (${reliabilityWindow})` : `no merges (${reliabilityWindow})`}`
+        ? `${cleanHeadline}/${totalHeadline} clean landing (${reliabilityWindow}) · target ${RELIABILITY_TARGET_PCT}% · this try: ${mergedTotal > 0 ? `${firstAttempt}/${mergedTotal} (${reliabilityWindow})` : `no merges (${reliabilityWindow})`}`
         : `no merges yet (${reliabilityWindow}) · target ${RELIABILITY_TARGET_PCT}%`,
       state: totalHeadline === 0 ? 'neutral' : cleanPctHeadline! >= RELIABILITY_TARGET_PCT ? 'success' : 'warning',
       // One-tap link to the current dirty-item list — /work is the Missions board every other
