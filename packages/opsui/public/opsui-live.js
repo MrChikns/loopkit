@@ -12,13 +12,17 @@
 // external file served at /ui/live.js + allowlist only).
 //
 // A second, independent enhancement lives in this same file: on the Command board page
-// (`.opsui-pipelineflow` present), it opens the server's board-level push (`/command/live`) and
-// patches the Pipeline flow card's numbers and the Glance card's health badge label in place as
-// `event: pipeline` frames arrive — so the card updates without a reload. That stream stays open
-// for the session (the server caps it and the client reconnects automatically); only the numbers
-// patch, never the lane event lists underneath. (The former "Ops health & pipeline" stage-count
-// strip and its `.opsui-pipeline__stage` patch targets are gone — that card was deleted; the
-// server route may still send a `stages` payload key, which the client now simply ignores.)
+// (`#opsui-glance-card` present — the unified Operating picture widget's own stable hook), it
+// opens the server's board-level push (`/command/live`) and patches that widget's live-patchable
+// Glance tiles (On hold / Preparing / Queued / Building) plus the in-flight list's stage counts
+// in place as `event: pipeline` frames arrive — so the card updates without a reload. That
+// stream stays open for the session (the server caps it and the client reconnects
+// automatically); only the numbers patch, never the event lists underneath, and only those four
+// tiles — Decisions/To test/Stuck/Flow/Reliability stay refresh-only (deliberate, a follow-up).
+// (The former "Ops health & pipeline" stage-count strip and its `.opsui-pipeline__stage` patch
+// targets are gone — that card was deleted; the server route may still send a `stages` payload
+// key, which the client now simply ignores. The header health badge is gone too — On hold is now
+// a Glance tile, patched from `payload.health.holdCount`, not the composed `headline` sentence.)
 //
 // A third, independent enhancement: the Glance card's window picker (24h/7d/30d) is a plain
 // `?window=` link (zero-JS baseline — see WindowPicker.ts). With JS, a click on one of those
@@ -81,14 +85,16 @@
     });
   }
 
-  // Board-level live push: patches the Pipeline card's numbers (stage counts, the three
-  // flow-stage counts, and the health badge label) as the server pushes `event: pipeline`
-  // frames. Only runs on the Command board page (`.opsui-pipeline` present) and is fully
-  // independent of the captured-banner tail above — either can run, both can run, neither
-  // depends on the other's state.
+  // Board-level live push: patches the unified Operating picture card's live-patchable tile
+  // values (On hold / Preparing / Queued / Building) as the server pushes `event: pipeline`
+  // frames. Only runs on the Command board page (`#opsui-glance-card` present — the unified
+  // widget's own stable hook; the in-flight list under it is now conditional and may not render
+  // at all on an idle board, so gating on it would silently disable live updates while idle) and
+  // is fully independent of the captured-banner tail above — either can run, both can run,
+  // neither depends on the other's state.
   function startBoardLive() {
     if (typeof EventSource === 'undefined') return; // no SSE support → page stays refresh-only
-    if (!document.querySelector('.opsui-pipelineflow')) return; // not the board page
+    if (!document.getElementById('opsui-glance-card')) return; // not the board page
 
     var source;
     try {
@@ -119,22 +125,25 @@
       // health & pipeline" card — the server route may still send `payload.stages`, harmless and
       // intentionally ignored here (no patch target exists for it anymore).
 
+      // Preparing/Queued/Building are BOTH a Glance tile (`data-opsui-live-tile`) and the
+      // in-flight list's stage count (`data-opsui-live-flow`) now — patch both hooks from the
+      // same payload.flow numbers so the tile and the list underneath it can never show
+      // different counts after a live push.
       if (payload && payload.flow) {
         for (var key in payload.flow) {
           if (!Object.prototype.hasOwnProperty.call(payload.flow, key)) continue;
           patchText('[data-opsui-live-flow="' + key + '"]', payload.flow[key]);
+          patchText('[data-opsui-live-tile="' + key + '"]', payload.flow[key]);
         }
       }
 
-      if (payload && payload.health && payload.health.headline) {
-        // The health badge renders via Card's own `headerAside` slot on the Glance card
-        // (moved there when the "Ops health & pipeline" strip card was deleted) — scoped to
-        // `#opsui-glance-card` (that card's stable id, also the in-place window-swap hook) so
-        // this never risks matching a header badge on any other card. No wrapper element is
-        // introduced: the badge is Card's normal aside markup, rendered ahead of the
-        // WindowPicker within the same aside.
-        var healthEl = document.querySelector('#opsui-glance-card .opsui-card__aside .opsui-status .opsui-status__label');
-        if (healthEl) healthEl.textContent = String(payload.health.headline);
+      // Unified operating picture: the header health badge is gone — On hold is now its own
+      // Glance tile, patched from `payload.health.holdCount` (deliberately NOT the composed
+      // `headline` sentence, which packs several unrelated counts into prose that would be
+      // fragile to parse client-side). Decisions/To test/Stuck/Flow/Reliability stay
+      // refresh-only, unchanged from before this build.
+      if (payload && payload.health && typeof payload.health.holdCount !== 'undefined') {
+        patchText('[data-opsui-live-tile="onhold"]', payload.health.holdCount);
       }
     });
 

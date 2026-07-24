@@ -611,6 +611,18 @@
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
 }
+.opsui-metric--progress .opsui-metric__value { color: var(--progress-fg); }
+
+/* Unified operating picture (2026-07-24): the "In flight now" list, rendered below the tile
+   grid only when preparing/queued/building carries at least one row — idle boards show the
+   tile grid alone with no heading/list underneath. */
+.opsui-inflightnow { margin-top: 16px; }
+.opsui-inflightnow__heading {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 620;
+  color: var(--text-2);
+}
 
 /* The All-clear collapse + pulse teaser that
  * replace the five alarm tiles when Decisions/To test/Stuck are all zero. */

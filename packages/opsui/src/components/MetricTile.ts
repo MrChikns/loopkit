@@ -19,6 +19,10 @@ export type MetricTileProps = {
   state?: OperationalState;
   /** What the tile opens. Required — a tile must be actionable. */
   open: MetricOpen;
+  /** Stable hook for board-live SSE patching (opsui-live.js): stamps
+   *  `data-opsui-live-tile="<key>"` on the value element so a live push can update just this
+   *  tile's number in place. Omitted tiles stay refresh-only (no hook rendered). */
+  liveTile?: string;
 };
 
 export function MetricTile(props: MetricTileProps): string {
@@ -26,9 +30,10 @@ export function MetricTile(props: MetricTileProps): string {
     'opsui-metric',
     props.state && `opsui-metric--${props.state}`,
   );
+  const liveAttr = props.liveTile ? ` data-opsui-live-tile="${esc(props.liveTile)}"` : '';
   const body =
     `<span class="opsui-metric__label">${esc(props.label)}</span>` +
-    `<span class="opsui-metric__value">${esc(props.value)}</span>` +
+    `<span class="opsui-metric__value"${liveAttr}>${esc(props.value)}</span>` +
     `<span class="opsui-metric__footnote">${esc(props.footnote)}</span>`;
   // Glance → drill is a navigation, not a scripted action: an href renders a real anchor
   // (founder finding — the data-attribute buttons had no wired listener).

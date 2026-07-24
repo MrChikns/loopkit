@@ -422,10 +422,11 @@ test('GET /ui/live.js — also references the board-live push route', async () =
       assert.equal(res.status, 200);
       const body = await res.text();
       assert.match(body, /\/command\/live/);
-      // The board-live client gates on the Pipeline flow card (`.opsui-pipelineflow`) — the
-      // former "Ops health & pipeline" stage-count strip (`.opsui-pipeline`) it used to gate on
-      // is deleted from the board.
-      assert.match(body, /opsui-pipelineflow/);
+      // The board-live client gates on the unified Operating picture widget's stable id
+      // (`#opsui-glance-card`) — the former Pipeline flow card (`.opsui-pipelineflow`) it used
+      // to gate on is now a conditional in-flight list nested inside that widget and may not
+      // render at all on an idle board, so gating on it would silently disable live updates.
+      assert.match(body, /opsui-glance-card/);
     }),
   );
 });

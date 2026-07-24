@@ -1,11 +1,12 @@
-// Founder-set board order (2026-07-24): Command's regions render as recent activity → pipeline
-// flow → glance → decision desk → to test → shipped → conversations → active ops-parks →
-// provenance. Recent activity and shipped are separate cards again (WI-128 had merged them into
-// one). The former "Ops health & pipeline" stage-count strip (a separate card ahead of the
-// "Pipeline" preparing/queued/building flow card) is deleted (same-day follow-up): it duplicated
-// data already shown elsewhere on the board (Queued/Building in the flow card's own lane counts,
-// Merged in Shipped, Parked in Decision desk/ops-parks). Its only unique element — the ops-health
-// badge — now renders in the Glance card's header, ahead of the WindowPicker.
+// Board order (2026-07-24, unified operating picture): Command's regions render as recent
+// activity → operating picture → decision desk → to test → shipped → conversations → active
+// ops-parks → provenance. Recent activity and shipped are separate cards again (WI-128 had
+// merged them into one). The former separate Glance card and Pipeline flow card are merged into
+// ONE "Operating picture" widget: a tile grid (Decisions/To test/Stuck/On hold/Preparing/Queued/
+// Building/Flow/Reliability) followed by a conditional "In flight now" list (preparing/queued/
+// building rows), rendered only when at least one of those three carries a row. The former "Ops
+// health & pipeline" stage-count strip is still deleted; its only unique element (the ops-health
+// badge) is NOT in this widget's header either — "On hold" is now a tile in the grid instead.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -32,8 +33,7 @@ test('Command sections render in operator-attention order', () => {
 
   const wrapperIndex = html.indexOf('data-projection="command"');
   const recentActivityIndex = html.indexOf('id="recent-activity"');
-  const pipelineFlowIndex = html.indexOf('id="pipeline-flow"');
-  const glanceIndex = html.indexOf('opsui-card--glance');
+  const operatingPictureIndex = html.indexOf('id="pipeline-flow"');
   const decisionDeskIndex = html.indexOf('id="decision-desk"');
   const toTestIndex = html.indexOf('id="to-test"');
   const shippedIndex = html.indexOf('id="shipped"');
@@ -43,8 +43,7 @@ test('Command sections render in operator-attention order', () => {
 
   for (const [label, index] of [
     ['recent-activity', recentActivityIndex],
-    ['pipeline-flow', pipelineFlowIndex],
-    ['glance', glanceIndex],
+    ['operating-picture', operatingPictureIndex],
     ['decision desk', decisionDeskIndex],
     ['to-test', toTestIndex],
     ['shipped', shippedIndex],
@@ -56,11 +55,14 @@ test('Command sections render in operator-attention order', () => {
   }
 
   assert.equal(html.indexOf('id="pipeline"'), -1, 'the "Ops health & pipeline" strip section no longer renders');
+  // The old separate Glance card is gone — its title/class marker no longer renders on its own;
+  // the unified widget renders "Operating picture" instead (asserted below).
+  assert.equal(html.indexOf('>Glance<'), -1, 'the old standalone "Glance" card title no longer renders');
+  assert.ok(html.includes('>Operating picture<'), 'the unified "Operating picture" widget renders');
 
   assert.ok(wrapperIndex < recentActivityIndex, 'workspace wrapper opens before the first region');
-  assert.ok(recentActivityIndex < pipelineFlowIndex, 'Recent activity renders before the Pipeline flow card');
-  assert.ok(pipelineFlowIndex < glanceIndex, 'Pipeline flow card renders before Glance');
-  assert.ok(glanceIndex < decisionDeskIndex, 'Glance renders before Decision desk');
+  assert.ok(recentActivityIndex < operatingPictureIndex, 'Recent activity renders before the Operating picture widget');
+  assert.ok(operatingPictureIndex < decisionDeskIndex, 'Operating picture renders before Decision desk');
   assert.ok(decisionDeskIndex < toTestIndex, 'Decision desk renders before To test');
   assert.ok(toTestIndex < shippedIndex, 'To test renders before Shipped');
   assert.ok(shippedIndex < conversationsIndex, 'Shipped renders before Conversations');
@@ -68,7 +70,7 @@ test('Command sections render in operator-attention order', () => {
   assert.ok(opsParksIndex < provenanceIndex, 'Active ops-parks renders before Provenance');
 });
 
-test('the pipeline flow card has no separate Conductor card and Conversations is a link, not a full list', () => {
+test('the unified widget has no separate Conductor card and Conversations is a link, not a full list', () => {
   const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
@@ -77,44 +79,75 @@ test('the pipeline flow card has no separate Conductor card and Conversations is
   assert.ok(html.includes('View all conversations'), 'Conversations renders as a link to the full /threads page');
 });
 
-test('the ops-health badge renders inside the Glance card header, and the pipeline flow card carries board-live client-patch hooks', () => {
+test('the tile grid renders all nine tiles, Decisions/Stuck carry critical when non-zero, and On hold/Preparing/Queued/Building carry their board-live tile hooks', () => {
   const fold = baseFold({
     counts: { queued: 2, routed: 1, building: 3, testing: 1, approved: 2, parked: 1 },
+    active: [
+      { id: 'WI-900', state: 'parked', parkKind: 'decision', spec: 'needs a call' },
+    ],
   });
   const envelope = commandProjectionFromFold(fold, { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
-  // Health badge patch target — the console's /command/live pushes health.headline into the
-  // badge's label node, selected structurally as `#opsui-glance-card .opsui-card__aside
-  // .opsui-status .opsui-status__label` (opsui-live.js). The badge renders via Card's normal
-  // `headerAside` slot — no bespoke wrapper element — so it's byte-identical to every other
-  // card's header badge on this board, scoped by the Glance card's stable `#opsui-glance-card`
-  // id (the same hook the in-place window swap already uses), and rendered ahead of the
-  // WindowPicker within that same aside.
+  // No header health badge — the design deliberately does NOT add it back; On hold is a tile.
   assert.ok(
     !html.includes('data-opsui-live="pipeline-health"'),
-    'health badge is patched structurally, not via a layout-shifting wrapper',
+    'no legacy pipeline-health live-patch wrapper renders',
   );
   const glanceSectionStart = html.indexOf('id="opsui-glance-card"');
   const glanceSectionHtml = html.slice(glanceSectionStart, html.indexOf('</section>', glanceSectionStart));
-  assert.match(
-    glanceSectionHtml,
-    /<div class="opsui-card__aside"><span class="opsui-status/,
-    'the Glance card renders the health StatusBadge via the normal Card aside slot, ahead of the WindowPicker',
-  );
-  assert.ok(
-    glanceSectionHtml.indexOf('opsui-status') < glanceSectionHtml.indexOf('opsui-window'),
-    'the health badge renders before the WindowPicker within the shared aside',
+  assert.doesNotMatch(
+    glanceSectionHtml.slice(0, glanceSectionHtml.indexOf('opsui-card__body')),
+    /opsui-status/,
+    'the header aside carries only the WindowPicker, no health StatusBadge',
   );
 
-  // The former "Ops health & pipeline" strip and its per-stage patch hooks are gone.
-  assert.equal(html.indexOf('id="pipeline"'), -1, 'the strip section no longer renders');
-  assert.ok(!html.includes('opsui-pipeline__stage'), 'no strip stage markup renders');
-  assert.ok(!html.includes('data-opsui-live-stage'), 'no per-stage board-live hooks render');
+  // All nine tiles render, in the specified order.
+  for (const label of ['Decisions', 'To test', 'Stuck', 'On hold', 'Preparing', 'Queued', 'Building', 'Flow', 'Reliability']) {
+    assert.ok(html.includes(`>${label}<`), `the "${label}" tile renders`);
+  }
+  const idx = (label: string) => html.indexOf(`>${label}<`);
+  assert.ok(idx('Decisions') < idx('To test'));
+  assert.ok(idx('To test') < idx('Stuck'));
+  assert.ok(idx('Stuck') < idx('On hold'));
+  assert.ok(idx('On hold') < idx('Preparing'));
+  assert.ok(idx('Preparing') < idx('Queued'));
+  assert.ok(idx('Queued') < idx('Building'));
+  assert.ok(idx('Building') < idx('Flow'));
+  assert.ok(idx('Flow') < idx('Reliability'));
 
-  // Flow-stage patch targets — fixed preparing/queued/building order — are unchanged.
+  // Decisions carries critical (not warning) when a decision park exists.
+  assert.match(html, /opsui-metric opsui-metric--critical" href="#decision-desk"/, 'the Decisions tile carries the critical state class when >0');
+
+  // Board-live tile hooks — On hold / Preparing / Queued / Building only (the deliberate,
+  // narrower live-patch surface for this build).
+  for (const key of ['onhold', 'preparing', 'queued', 'building']) {
+    assert.ok(html.includes(`data-opsui-live-tile="${key}"`), `the "${key}" tile carries its board-live hook`);
+  }
+  // Decisions/To test/Stuck/Flow/Reliability stay refresh-only — no live-tile hook on those.
+  assert.ok(!html.includes('data-opsui-live-tile="decisions"'));
+  assert.ok(!html.includes('data-opsui-live-tile="stuck"'));
+});
+
+test('the in-flight list is absent when idle and present when preparing/queued/building carries work', () => {
+  const idleEnvelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
+  const idleHtml = CommandProjection(idleEnvelope);
+  assert.ok(!idleHtml.includes('In flight now'), 'idle board renders the tile grid alone, no in-flight heading');
+  assert.ok(!idleHtml.includes('opsui-pipelineflow'), 'idle board renders no in-flight list markup at all');
+
+  const busyFold = baseFold({
+    counts: { building: 1 },
+    active: [{ id: 'WI-901', state: 'building', spec: 'in progress' }],
+  });
+  const busyEnvelope = commandProjectionFromFold(busyFold, { ledgerSequence: 1 });
+  const busyHtml = CommandProjection(busyEnvelope);
+  assert.ok(busyHtml.includes('In flight now'), 'a busy board renders the in-flight heading');
+  assert.ok(busyHtml.includes('opsui-pipelineflow'), 'a busy board renders the in-flight stage list');
+
+  // Flow-stage patch targets (the in-flight list itself) — fixed preparing/queued/building
+  // order — are unchanged from before this build.
   for (const key of ['preparing', 'queued', 'building']) {
-    assert.ok(html.includes(`data-opsui-live-flow="${key}"`), `flow stage "${key}" carries its board-live hook`);
+    assert.ok(busyHtml.includes(`data-opsui-live-flow="${key}"`), `flow stage "${key}" carries its board-live hook`);
   }
 });
 

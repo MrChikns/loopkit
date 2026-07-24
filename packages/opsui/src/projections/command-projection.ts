@@ -45,6 +45,10 @@ export type GlanceMetric = {
   footnote: string;
   state: OperationalState;
   open: MetricOpen;
+  /** Board-live SSE patch hook (see {@link import('../components/MetricTile.ts').MetricTileProps.liveTile}).
+   *  Only tiles the `/command/live` payload actually carries a value for should set this —
+   *  everything else stays refresh-only. */
+  liveTile?: string;
 };
 
 /** Structured 4-field decision block for parked items (WI-195).
@@ -243,33 +247,68 @@ function pulseRegion(pulse: GlancePulse): string {
   return `<div class="opsui-glance-pulse">${rows.join('')}</div>`;
 }
 
-function glanceRegion(
-  d: Pick<CommandData, 'glance' | 'glanceAllClear' | 'glancePulse' | 'opsHealth'>,
+/** The in-flight section — preparing/queued/building rows, rendered ONLY when at least one
+ *  stage is non-empty (idle ⇒ the tile grid alone is the operating picture, nothing more to
+ *  show underneath). Reuses the same flow-stage markup the old standalone Pipeline flow card
+ *  rendered (stage title + live-patchable count + eventList), just nested under the unified
+ *  widget instead of its own Card. The conductor sub-badge on Building is unchanged. */
+function inFlightRegion(flow: PipelineFlow, conductor: CommandData['conductor']): string {
+  const stages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
+    { key: 'preparing', label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
+    { key: 'queued', label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
+    // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
+    { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
+  ];
+  if (stages.every((s) => s.events.length === 0)) return '';
+  const body = stages
+    .map(
+      (s) =>
+        `<div class="opsui-pipelineflow__stage">` +
+        `<h3 class="opsui-pipelineflow__stage-title">${esc(s.label)}` +
+        `<span class="opsui-pipelineflow__stage-count" data-opsui-live-flow="${s.key}">${s.events.length}</span>` +
+        (s.sub ? StatusBadge({ state: s.sub.state, label: s.sub.label, size: 'sm' }) : '') +
+        `</h3>` +
+        eventList(s.events, s.empty) +
+        `</div>`,
+    )
+    .join('');
+  return (
+    `<div class="opsui-inflightnow">` +
+    `<h3 class="opsui-inflightnow__heading">In flight now</h3>` +
+    `<div class="opsui-pipelineflow">${body}</div>` +
+    `</div>`
+  );
+}
+
+/** The unified "Operating picture" widget — Glance's tile grid plus the (conditional) in-flight
+ *  list, merged into ONE card (the former separate Glance + Pipeline flow cards duplicated the
+ *  same "what's happening right now" question across two widgets). The tile grid IS the
+ *  at-a-glance view now, so the old all-clear collapse (a single "All clear" line replacing the
+ *  five alarm tiles) is dropped — the tiles always render; `glanceAllClear`/`glancePulse` stay on
+ *  `CommandData` (still read by other call sites — the pulse teaser code itself is unused here
+ *  but left in place as-is, not deleted, since removing an exported region is out of this
+ *  slice's scope). */
+function operatingPictureRegion(
+  d: Pick<CommandData, 'glance' | 'opsHealth' | 'pipelineFlow' | 'conductor'>,
   activeWindow: GlanceWindow,
 ): string {
-  const body = d.glanceAllClear
-    ? `<div class="opsui-glance-allclear">` +
-      `<span class="opsui-glance-allclear__dot" aria-hidden="true"></span>` +
-      `<span class="opsui-glance-allclear__label">All clear — no decisions · nothing to test · none stuck</span>` +
-      `</div>${pulseRegion(d.glancePulse)}`
-    : `<div class="opsui-glancegrid">${d.glance.map((m) => MetricTile(m)).join('')}</div>`;
+  const body =
+    `<div class="opsui-glancegrid">${d.glance.map((m) => MetricTile(m)).join('')}</div>` +
+    inFlightRegion(d.pipelineFlow, d.conductor);
   return Card({
     id: 'opsui-glance-card',
     variant: 'glance',
-    title: 'Glance',
-    subtitle: 'The operating picture at a glance',
+    title: 'Operating picture',
+    subtitle: 'What needs you, and what is happening right now',
     // The window filter lives on the title row (headerAside), never in the body;
     // WindowPicker is the shared component for this. The `id` above (WI-glance-window-inplace)
     // is a stable hook so the Command board's client JS can swap this one card's markup in
     // place on a window-picker click, without a full page reload/scroll reset — see
     // packages/opsui/public/opsui-live.js. Purely additive: no visual/behavioral change when
     // JS is off, the picker's links still navigate normally.
-    // The ops-health badge (formerly the deleted "Ops health & pipeline" strip's only unique
-    // element) now renders here too, ahead of the WindowPicker within the same aside — the
-    // strip duplicated data already shown elsewhere on the board (Queued/Building in the
-    // Pipeline flow card, Merged in Shipped, Parked in Decision desk/ops-parks), so it was
-    // deleted; the health signal itself was not, and Glance's header is where it reads best.
-    headerAside: `${StatusBadge({ state: d.opsHealth.state, label: d.opsHealth.headline })}${WindowPicker({ active: activeWindow })}`,
+    // The ops-health badge stays OUT of this header (founder decision): "On hold" is now its
+    // own tile in the grid below, so the header carries only the window picker.
+    headerAside: WindowPicker({ active: activeWindow }),
     body,
   });
 }
@@ -343,40 +382,6 @@ function opsParksRegion(events: OpsParksCard): string {
       label: events.length ? `${events.length} parked` : 'Clear',
     }),
     body: note + eventList(events, 'No ops-parks outside the Stuck tile right now.'),
-  });
-}
-
-/** Pipeline flow card — preparing/queued/building. The former "Ops health & pipeline" stage-
- *  count strip that used to sit above this card is deleted (Queued/Building duplicated this
- *  card's own lane counts, Merged duplicated Shipped, Parked duplicated Decision desk/
- *  ops-parks); the strip's only unique element — the ops-health badge — moved into Glance's
- *  header (see {@link glanceRegion}). The Conductor widget stays folded into the Building
- *  stage as a sub-badge (WI-128) rather than reappearing as a third card — `conductor.workers` and
- *  `flow.building` are the same `buildBuildingEvents` rows (fold-adapter.ts), so a separate
- *  Conductor card would only duplicate this list under a second header. */
-function pipelineFlowRegion(flow: PipelineFlow, conductor: CommandData['conductor']): string {
-  const stages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
-    { key: 'preparing', label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
-    { key: 'queued', label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
-    // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
-    { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
-  ];
-  const body = stages
-    .map(
-      (s) =>
-        `<div class="opsui-pipelineflow__stage">` +
-        `<h3 class="opsui-pipelineflow__stage-title">${esc(s.label)}` +
-        `<span class="opsui-pipelineflow__stage-count" data-opsui-live-flow="${s.key}">${s.events.length}</span>` +
-        (s.sub ? StatusBadge({ state: s.sub.state, label: s.sub.label, size: 'sm' }) : '') +
-        `</h3>` +
-        eventList(s.events, s.empty) +
-        `</div>`,
-    )
-    .join('');
-  return Card({
-    title: 'Pipeline',
-    subtitle: 'What is being prepared, queued, and built',
-    body: `<div class="opsui-pipelineflow">${body}</div>`,
   });
 }
 
@@ -550,20 +555,18 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   }
 
   const d = env.data;
-  // Founder-set board order (2026-07-24): recent activity → pipeline flow → glance → decision
-  // desk → to test → shipped → conversations → active ops-parks → provenance. The transient
-  // captured banner stays pinned above everything as a momentary confirmation. Pipeline flow
-  // and glance sit adjacent near the top by request; recent activity is the top card as it
-  // historically was. The former "Ops health & pipeline" stage-count strip (a separate section
-  // ahead of pipeline-flow) is deleted — it duplicated data already shown elsewhere on the
-  // board; its only unique element (the ops-health badge) now renders in Glance's header
-  // (see {@link glanceRegion}).
+  // Board order (2026-07-24, unified operating picture): recent activity → operating picture →
+  // decision desk → to test → shipped → conversations → active ops-parks → provenance. The
+  // transient captured banner stays pinned above everything as a momentary confirmation. The
+  // former separate Glance + Pipeline flow cards are merged into ONE "Operating picture" widget
+  // (see {@link operatingPictureRegion}) — a single tile grid (Decisions/To test/Stuck/On hold/
+  // Preparing/Queued/Building/Flow/Reliability) with a conditional "in flight now" list beneath
+  // it, wrapped in `#pipeline-flow` so the section id (and the board-live page-gate) stay stable.
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
     `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [])}</section>` +
-    `<section id="pipeline-flow">${pipelineFlowRegion(d.pipelineFlow, d.conductor)}</section>` +
-    glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
+    `<section id="pipeline-flow">${operatingPictureRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW)}</section>` +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
     `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
     `<section id="shipped">${shippedRegion(d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +

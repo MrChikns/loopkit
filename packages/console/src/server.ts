@@ -710,10 +710,16 @@ async function serveBoardLive(req: IncomingMessage, res: ServerResponse, ledgerD
     }
     const envelope = commandProjectionFromFold(data.fold, { ledgerSequence: 0, staleAfterSeconds: 45 });
     if (envelope.state === 'failed') return; // never push a falsely-calm/empty picture
-    const { pipeline, pipelineFlow, opsHealth } = envelope.data;
+    const { pipeline, pipelineFlow, opsHealth, glance } = envelope.data;
 
     const stages: Record<string, number> = {};
     for (const s of pipeline) stages[s.label.toLowerCase()] = s.count;
+    // Unified operating picture (2026-07-24): the On-hold GLANCE TILE replaced the header health
+    // badge, so the client needs a bare number to patch that tile's value — `opsHealth.headline`
+    // is a composed sentence ("2 on hold · 1 stuck") the client would otherwise have to parse.
+    // Sourced from the SAME `glance` array /command itself renders (find the tile by label), not
+    // a second count derivation — one parser, single-reader discipline.
+    const onHoldTile = glance.find((m) => m.label === 'On hold');
     const payload = {
       stages,
       flow: {
@@ -721,7 +727,11 @@ async function serveBoardLive(req: IncomingMessage, res: ServerResponse, ledgerD
         queued: pipelineFlow.queued.length,
         building: pipelineFlow.building.length,
       },
-      health: { state: opsHealth.state, headline: opsHealth.headline },
+      health: {
+        state: opsHealth.state,
+        headline: opsHealth.headline,
+        ...(onHoldTile ? { holdCount: onHoldTile.value } : {}),
+      },
     };
     if (closed) return;
     res.write(`event: pipeline\ndata: ${JSON.stringify(payload)}\n\n`);

@@ -443,6 +443,15 @@ function isOpsPark(i: FoldActiveItem): boolean {
   return i.state === 'parked' && !isDecisionPark(i);
 }
 
+/** Deliberately-deferred parks ("parked without urgency" — parkKind 'hold', or the legacy
+ *  `parkReason` prefix predating that field) — shared by the ops-health headline
+ *  ({@link buildHealth}) and the Glance "On hold" tile ({@link buildGlance}) so the two counts
+ *  can never disagree about which parks are a deliberate hold vs. a mechanical ops-park
+ *  (one-parser rule). */
+function isHoldPark(i: FoldActiveItem): boolean {
+  return isOpsPark(i) && (i.parkKind === 'hold' || (i.parkReason ?? '').startsWith('hold:'));
+}
+
 /** Parse the planner successor id out of a decomposition park reason (reactor.ts stamps
  *  "queued for planner decomposition as WI-NNN"). Returns undefined when unparseable — the
  *  caller falls back to a generic "planner lane" label rather than guessing. Exported
@@ -698,6 +707,16 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   // (mergedInFlowWindow / flowWindow), not a fixed calendar "today" — so the pulse tracks the picker.
   const pulse = buildPulse(fold, nowMs, cycleLabel, { count: mergedInFlowWindow, window: flowWindow });
 
+  // ── ON HOLD / PREPARING / QUEUED / BUILDING: the former Pipeline flow card's stage counts,
+  // folded into Glance as tiles so the operating picture is ONE widget (unified operating
+  // picture). Reuses the SAME row builders (buildPreparing/buildQueuedPipelineStage/
+  // buildBuildingEvents, isHoldPark) the in-flight list below renders from — one parser, never
+  // a second re-derivation of "how many are preparing/queued/building/on hold".
+  const holdCount = fold.active.filter(isHoldPark).length;
+  const preparingCount = buildPreparing(fold).length;
+  const queuedCount = buildQueuedPipelineStage(fold).length;
+  const buildingCount = buildBuildingEvents(fold).length;
+
   const metrics: GlanceMetric[] = [
     {
       label: 'Decisions',
@@ -705,7 +724,8 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
       footnote: decisionParks.length > 0
         ? `waiting on you${decisionAge ? ` (oldest ${decisionAge})` : ''}`
         : 'all clear',
-      state: decisionParks.length > 0 ? 'warning' : 'success',
+      // Blocking, needs immediate human attention ⇒ critical (STATE_MEANING), not warning.
+      state: decisionParks.length > 0 ? 'critical' : 'success',
       href: '#decision-desk',
       open: { kind: 'projection', id: 'decisions' },
     },
@@ -725,9 +745,49 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
       footnote: stuckParts.length > 0
         ? `${stuckParts.join(' · ')}${stuckOldest ? ` (oldest ${stuckOldest})` : ''}`
         : 'none stuck',
-      state: stuckIds.size > 0 ? 'warning' : 'success',
+      // Blocking/failed, needs a look ⇒ critical (STATE_MEANING), not warning.
+      state: stuckIds.size > 0 ? 'critical' : 'success',
       href: '/work',
       open: { kind: 'projection', id: 'workforce' },
+    },
+    {
+      label: 'On hold',
+      value: holdCount,
+      // "Parked without urgency" (STATE_MEANING) — always neutral, never an alarm color,
+      // regardless of count: a hold is a deliberate deferral, not something needing eyes.
+      footnote: holdCount > 0 ? 'deliberately deferred' : 'none on hold',
+      state: 'neutral',
+      href: '/work',
+      open: { kind: 'projection', id: 'work' },
+      liveTile: 'onhold',
+    },
+    {
+      label: 'Preparing',
+      value: preparingCount,
+      footnote: preparingCount > 0 ? 'captured, not yet queued' : 'nothing preparing',
+      state: 'neutral',
+      href: '/work',
+      open: { kind: 'projection', id: 'work' },
+      liveTile: 'preparing',
+    },
+    {
+      label: 'Queued',
+      value: queuedCount,
+      footnote: queuedCount > 0 ? 'waiting for a worker' : 'queue is clear',
+      state: 'neutral',
+      href: '/work',
+      open: { kind: 'projection', id: 'work' },
+      liveTile: 'queued',
+    },
+    {
+      label: 'Building',
+      value: buildingCount,
+      footnote: buildingCount > 0 ? 'in flight now' : 'no workers running',
+      // Actively changing/running ⇒ progress when non-zero (STATE_MEANING); idle is neutral.
+      state: buildingCount > 0 ? 'progress' : 'neutral',
+      href: '/work',
+      open: { kind: 'projection', id: 'work' },
+      liveTile: 'building',
     },
     {
       label: 'Flow',
@@ -1029,7 +1089,7 @@ function buildHealth(fold: FoldSummary): CommandData['opsHealth'] {
   // warning when a bucket that actually needs attention is non-empty.
   const nonDecisionParks = fold.active.filter(isOpsPark);
   const decomposition = nonDecisionParks.filter((i) => i.parkKind === 'decomposition');
-  const hold = nonDecisionParks.filter((i) => i.parkKind === 'hold' || (i.parkReason ?? '').startsWith('hold:'));
+  const hold = nonDecisionParks.filter(isHoldPark);
   const opsParks = nonDecisionParks.filter((i) => i.parkKind !== 'decomposition' && !hold.includes(i));
 
   if (opsParks.length === 0 && decomposition.length === 0 && hold.length === 0) {
