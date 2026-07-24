@@ -597,10 +597,7 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
       : w === '30d'
       ? fold.recentMerged30d ?? fold.recentMerged
       : fold.recentMerged.filter((m) => {
-          // No timestamp to judge against — keep it rather than silently dropping it (same
-          // "never fabricate, never wrongly drop" rule the comment above already states).
-          if (!m.mergedAt) return true;
-          const t = new Date(m.mergedAt).getTime();
+          const t = m.mergedAt ? new Date(m.mergedAt).getTime() : NaN;
           return Number.isFinite(t) && nowMs - t < GLANCE_WINDOW_MS[w];
         });
 

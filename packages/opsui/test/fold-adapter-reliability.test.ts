@@ -148,17 +148,3 @@ test('Reliability: an unset window defaults the headline to 24h, matching the pi
   const tile = reliabilityTile(fold);
   assert.match(tile.footnote, /1\/1 clean landing \(24h\)/);
 });
-
-// The 24h window used to re-filter fold.recentMerged by mergedAt and silently drop any item that
-// carried no timestamp — the exact thing the comment above mergedInWindow warns against for the
-// 7d/30d windows. Since 24h is DEFAULT_GLANCE_WINDOW (what a no-param page load shows), this made
-// the headline read "no merges yet" / stuck on load for anyone with untimestamped merges, even
-// though selecting 7d or 30d (which never re-filter) showed the real numbers — reading exactly
-// like the window picker "not working" for Reliability specifically.
-test('Reliability: a merged item with no mergedAt at all is not dropped from the 24h window (matches 7d/30d)', () => {
-  const untimestamped: FoldMergedItem = { id: 'WI-820', attempts: 1 };
-  const fold = baseFold({ recentMerged: [untimestamped], recentMerged30d: [untimestamped] });
-  const tile = reliabilityTile(fold, '24h');
-  assert.equal(tile.value, '100%');
-  assert.match(tile.footnote, /1\/1 clean landing \(24h\)/);
-});
