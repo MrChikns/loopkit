@@ -131,9 +131,12 @@
       }
 
       if (payload && payload.health && payload.health.headline) {
-        // The health badge is the only direct status-chip child of the pipeline header — patched
-        // structurally so the server render needs no wrapper element (which would shift the layout).
-        var healthEl = document.querySelector('.opsui-pipeline__header > .opsui-status .opsui-status__label');
+        // The health badge renders via Card's own `headerAside` slot on the "Ops health &
+        // pipeline" strip card — scoped to `#pipeline` (that card's stable section id, also
+        // pinned by the section-order test) so this never risks matching a header badge on any
+        // other card. No wrapper element is introduced: the badge is Card's normal aside markup,
+        // identical to every other card's header badge on this board.
+        var healthEl = document.querySelector('#pipeline .opsui-card__aside .opsui-status .opsui-status__label');
         if (healthEl) healthEl.textContent = String(payload.health.headline);
       }
     });

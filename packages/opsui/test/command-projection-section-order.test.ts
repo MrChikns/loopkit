@@ -1,6 +1,9 @@
 // Founder-set board order (2026-07-24): Command's regions render as recent activity → pipeline →
 // glance → decision desk → to test → shipped → conversations → active ops-parks → provenance.
 // Recent activity and shipped are separate cards again (WI-128 had merged them into one).
+// The "pipeline" slot itself is two adjacent cards again too (WI-128 had unified the "Ops
+// health & pipeline" stage-count strip and the "Pipeline" preparing/queued/building flow card
+// into one cramped card; restored to the pre-WI-128 two-card presentation the same day).
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -28,6 +31,7 @@ test('Command sections render in operator-attention order', () => {
   const wrapperIndex = html.indexOf('data-projection="command"');
   const recentActivityIndex = html.indexOf('id="recent-activity"');
   const pipelineIndex = html.indexOf('id="pipeline"');
+  const pipelineFlowIndex = html.indexOf('id="pipeline-flow"');
   const glanceIndex = html.indexOf('opsui-card--glance');
   const decisionDeskIndex = html.indexOf('id="decision-desk"');
   const toTestIndex = html.indexOf('id="to-test"');
@@ -39,6 +43,7 @@ test('Command sections render in operator-attention order', () => {
   for (const [label, index] of [
     ['recent-activity', recentActivityIndex],
     ['pipeline', pipelineIndex],
+    ['pipeline-flow', pipelineFlowIndex],
     ['glance', glanceIndex],
     ['decision desk', decisionDeskIndex],
     ['to-test', toTestIndex],
@@ -51,8 +56,9 @@ test('Command sections render in operator-attention order', () => {
   }
 
   assert.ok(wrapperIndex < recentActivityIndex, 'workspace wrapper opens before the first region');
-  assert.ok(recentActivityIndex < pipelineIndex, 'Recent activity renders before Pipeline');
-  assert.ok(pipelineIndex < glanceIndex, 'Pipeline renders before Glance');
+  assert.ok(recentActivityIndex < pipelineIndex, 'Recent activity renders before Pipeline (strip)');
+  assert.ok(pipelineIndex < pipelineFlowIndex, 'Pipeline strip renders before the Pipeline flow card');
+  assert.ok(pipelineFlowIndex < glanceIndex, 'Pipeline flow card renders before Glance');
   assert.ok(glanceIndex < decisionDeskIndex, 'Glance renders before Decision desk');
   assert.ok(decisionDeskIndex < toTestIndex, 'Decision desk renders before To test');
   assert.ok(toTestIndex < shippedIndex, 'To test renders before Shipped');
@@ -61,7 +67,7 @@ test('Command sections render in operator-attention order', () => {
   assert.ok(opsParksIndex < provenanceIndex, 'Active ops-parks renders before Provenance');
 });
 
-test('the unified Pipeline card has no separate Conductor card and Conversations is a link, not a full list', () => {
+test('the pipeline flow card has no separate Conductor card and Conversations is a link, not a full list', () => {
   const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
@@ -70,7 +76,7 @@ test('the unified Pipeline card has no separate Conductor card and Conversations
   assert.ok(html.includes('View all conversations'), 'Conversations renders as a link to the full /threads page');
 });
 
-test("the unified pipeline card's stage counts equal the fold summary buckets", () => {
+test("the pipeline strip card's stage counts equal the fold summary buckets", () => {
   const fold = baseFold({
     counts: { queued: 2, routed: 1, building: 3, testing: 1, approved: 2, parked: 1 },
     recentMerged: [
@@ -92,7 +98,7 @@ test("the unified pipeline card's stage counts equal the fold summary buckets", 
   }
 });
 
-test('the pipeline card carries board-live client-patch hooks without changing visible counts', () => {
+test('the pipeline cards carry board-live client-patch hooks without changing visible counts', () => {
   const fold = baseFold({
     counts: { queued: 2, routed: 1, building: 3, testing: 1, approved: 2, parked: 1 },
   });
@@ -100,17 +106,20 @@ test('the pipeline card carries board-live client-patch hooks without changing v
   const html = CommandProjection(envelope);
 
   // Health badge patch target — the console's /command/live pushes health.headline into the
-  // badge's label node, selected structurally (`.opsui-pipeline__header > .opsui-status ...`).
-  // The badge must be the header's FIRST child (no wrapper element — an earlier wrapper span
-  // shifted the header layout), so the structural selector resolves to it.
+  // badge's label node, selected structurally as `#pipeline .opsui-card__aside .opsui-status
+  // .opsui-status__label` (opsui-live.js). The badge renders via Card's normal `headerAside`
+  // slot — no bespoke wrapper element — so it's byte-identical to every other card's header
+  // badge on this board, scoped only by the strip card's stable `#pipeline` section id.
   assert.ok(
     !html.includes('data-opsui-live="pipeline-health"'),
     'health badge is patched structurally, not via a layout-shifting wrapper',
   );
+  const pipelineSectionStart = html.indexOf('id="pipeline"');
+  const pipelineSectionHtml = html.slice(pipelineSectionStart, html.indexOf('id="pipeline-flow"'));
   assert.match(
-    html,
-    /<div class="opsui-pipeline__header"><span class="opsui-status/,
-    'pipeline header renders the health StatusBadge as its first (direct) child',
+    pipelineSectionHtml,
+    /<div class="opsui-card__aside"><span class="opsui-status/,
+    'pipeline strip card renders the health StatusBadge via the normal Card aside slot',
   );
 
   // Flow-stage patch targets — fixed preparing/queued/building order.

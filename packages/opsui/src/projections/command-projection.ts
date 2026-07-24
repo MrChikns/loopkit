@@ -338,14 +338,14 @@ function opsParksRegion(events: OpsParksCard): string {
   });
 }
 
-/** WI-128: ONE unified Pipeline card — the former separate "Ops health & pipeline" stage-count
- *  strip and "Pipeline" preparing/queued/building card, merged: the counts strip becomes this
- *  card's header, the three flow stages render underneath, and the Conductor widget folds into
- *  the Building stage (both `conductor.workers` and `flow.building` are the SAME
- *  `buildBuildingEvents` rows — fold-adapter.ts — so folding them costs no information, only a
- *  second header for the identical list). */
-function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHealth'], flow: PipelineFlow, conductor: CommandData['conductor']): string {
-  const countCells = stages
+/** Ops health & pipeline strip — the stage-count row (Queued/Building/Approved/Parked/Merged)
+ *  as its own card, restored to a separate card from the flow card below it (WI-128 had merged
+ *  the two into one cramped card; the founder asked for the pre-WI-128 two-card presentation
+ *  back). The health badge renders via `Card`'s own `headerAside` slot — the same mechanism
+ *  every other card on this board uses for its header badge — so no bespoke wrapper/layout is
+ *  needed here. */
+function pipelineRegion(stages: PipelineStage[], health: CommandData['opsHealth']): string {
+  const cells = stages
     .map(
       (s) =>
         // `data-opsui-live-stage` (the stage's own label, lowercased) is the board-live client's
@@ -357,23 +357,31 @@ function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHea
         `<span class="opsui-pipeline__count">${esc(s.count)}</span></div>`,
     )
     .join('');
-  const headerAside =
-    `<div class="opsui-pipeline__header">` +
-    // The board-live SSE client (console /command/live) patches this health badge's label in place
-    // via the structural selector `.opsui-pipeline__header > .opsui-status .opsui-status__label` —
-    // the badge is the header's only direct status-chip child, so no wrapper element is needed. (An
-    // earlier wrapper span here shifted the header's flex layout; the badge renders bare again now.)
-    StatusBadge({ state: health.state, label: health.headline }) +
-    `<div class="opsui-pipeline">${countCells}</div>` +
-    `</div>`;
+  return Card({
+    title: 'Ops health & pipeline',
+    subtitle: 'The build lane, end to end',
+    // The board-live SSE client (console /command/live) patches this health badge's label in
+    // place via `.opsui-card__aside .opsui-status .opsui-status__label` — Card's own aside slot,
+    // the same structural hook every other card's header badge already renders through, so no
+    // extra wrapper/markup is introduced here.
+    headerAside: StatusBadge({ state: health.state, label: health.headline }),
+    body: `<div class="opsui-pipeline">${cells}</div>`,
+  });
+}
 
-  const flowStages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
+/** Pipeline flow card — preparing/queued/building, restored as its own card (see
+ *  {@link pipelineRegion}). The Conductor widget stays folded into the Building stage as a
+ *  sub-badge (WI-128) rather than reappearing as a third card — `conductor.workers` and
+ *  `flow.building` are the same `buildBuildingEvents` rows (fold-adapter.ts), so a separate
+ *  Conductor card would only duplicate this list under a second header. */
+function pipelineFlowRegion(flow: PipelineFlow, conductor: CommandData['conductor']): string {
+  const stages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
     { key: 'preparing', label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
     { key: 'queued', label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
     // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
     { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
   ];
-  const body = flowStages
+  const body = stages
     .map(
       (s) =>
         `<div class="opsui-pipelineflow__stage">` +
@@ -387,8 +395,7 @@ function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHea
     .join('');
   return Card({
     title: 'Pipeline',
-    subtitle: 'The build lane, end to end — captured to merged',
-    headerAside,
+    subtitle: 'What is being prepared, queued, and built',
     body: `<div class="opsui-pipelineflow">${body}</div>`,
   });
 }
@@ -567,11 +574,15 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   // to test → shipped → conversations → active ops-parks → provenance. The transient captured
   // banner stays pinned above everything as a momentary confirmation. Pipeline and glance sit
   // adjacent near the top by request; recent activity is the top card as it historically was.
+  // The "pipeline" slot is two adjacent cards (restored from WI-128's single unified card,
+  // 2026-07-24): the "Ops health & pipeline" stage-count strip first, then the "Pipeline" flow
+  // card immediately after — each its own `<section>` for deep-link/test stability.
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
     `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [])}</section>` +
-    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
+    `<section id="pipeline">${pipelineRegion(d.pipeline, d.opsHealth)}</section>` +
+    `<section id="pipeline-flow">${pipelineFlowRegion(d.pipelineFlow, d.conductor)}</section>` +
     glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
     `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
