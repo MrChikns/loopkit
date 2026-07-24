@@ -55,6 +55,65 @@ them and renders them live on each request — it stores nothing, so a card cann
 source. The one durable, expensive layer is the event contract; projections, screens, and prompts
 are disposable by construction, and rewriting them is the intended iteration mode, not drift.
 
+## Orchestrator-workers — with the orchestrator as a fold, not a context window
+
+The reference taxonomy for agent systems — Anthropic's
+[Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) —
+names the shape this plane implements: **orchestrator-workers**. A central LLM dynamically
+decomposes a task, delegates the pieces to worker LLMs, and a synthesizer combines their results.
+Put that diagram next to this repo and the nodes line up:
+
+| Reference node | loopkit |
+|---|---|
+| **In** | operator intent → `item.captured`, whatever the transport |
+| **Orchestrator** *(decompose)* | the reactor's grooming beat — an LLM event-models raw intent into a work item with acceptance criteria and a `Touches` set |
+| **Orchestrator** *(delegate)* | the dispatch picker — **deterministic, no model**: `Touches`-disjoint grouping under claims |
+| **Worker LLM calls** | build agents, one git worktree each |
+| **Synthesizer** | the target's gate, then `git merge --no-ff` — per item, serial |
+| **Out** | `item.merged`, and the acceptance tier that decides whether you ever see it |
+
+Two divergences from the reference carry the whole method.
+
+**Workers return commits, not text — so the synthesizer stops being a model.** In the reference
+workflow, parallel calls produce overlapping opinions about the same artifact, and an LLM
+aggregator is needed to reconcile them. Here, disjointness is enforced *before* the work: two
+in-flight builds may never share a `Touches` set, so no two workers can produce two answers to the
+same file. Each worker side-effects into its own branch and hands up a verdict, not prose.
+Combining is then git's job and judging is the gate's job — both mechanical, both replayable. The
+aggregator does not get replaced by a better aggregator; it **disappears**, because scheduling
+already did its work. Where genuine multi-perspective judgment *is* wanted, it is applied to
+decisions — an independent second opinion with a named arbiter — never as a synthesis step over
+worker output.
+
+**The orchestrator holds no context.** This is the real architectural difference, and it is the
+one that makes the difference between a session and a plane. In the reference workflow the
+orchestrator is a live LLM whose *context window is the coordination state* — it remembers what it
+delegated and adapts as results come back. loopkit's orchestrator is a **fold over the append-only
+ledger** ([event model](event-model.md)): it holds nothing between beats and is reconstructed from
+events every time it runs. Coordination state is not in anyone's head or anyone's context; it is on
+disk, immutable, and re-derivable.
+
+The trade is explicit, and stating it honestly is the more important half. **Decomposition happens
+at intake, not mid-flight.** Routing classifies an oversized intent and queues a planning-lane
+child that splits it *before* any builder runs. Once a build worker is running it cannot re-plan:
+it has no channel to re-queue work, so it ships the smallest safe slice and records what it
+deferred in its manifest — and that deferral is *evidence, not a work item*. *Anything left over
+needs the operator to notice and re-capture it.* A live in-context orchestrator would have heard
+that worker and adapted; this one cannot, and claiming otherwise would be exactly the kind of
+aspiration this document refuses. It is a real cost, recorded in [limitations](limitations.md)
+rather than argued away.
+
+What the trade buys is everything a context-window orchestrator cannot survive: process death,
+machine restart, and two operators working at once. A context window is lost when its process is;
+a ledger is not.
+
+Both postures are the same topology, which is why they compose. The attended coordinator mode is
+*literally* the reference diagram — a live session decomposing, spawning workers, and merging,
+with the human as the orchestrator. The unattended beats are that same topology projected onto
+durable state. [ADR-007](decisions/ADR-007-claim-arbitration.md) is what lets the two run
+simultaneously without double-delivering the same item — an arbitration that is only *expressible*
+because ownership is an event, not a conversation.
+
 ## Autonomy scales with proven competence — certify, don't brief
 
 The plane does not get blanket trust, and it does not stay on a leash forever either. Autonomy

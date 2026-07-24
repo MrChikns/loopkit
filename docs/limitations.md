@@ -84,6 +84,25 @@ Each entry states *what's bounded* and *when it would actually matter*.
   its spec/diff — routing is correct but nothing scrubs the payload. The content DLP guard is
   explicitly roadmap, and `trust-boundaries.md` already frames it as such.
 
+## Re-planning is intake-only (a running build worker cannot re-scope its item)
+
+- **Decomposition happens before a builder runs, and never after.** Routing classifies an oversized
+  intent and queues a planning-lane child that splits it; that is the only automatic path into
+  decomposition. A **build** worker has no channel to re-queue work — its toolset grants no capture
+  verb, and while its manifest carries free-text `notes`/`confidence`, only `filesTouched` and the
+  certification ever reach an event. So a worker that discovers mid-build that its item is
+  mis-scoped does the instructed thing: it ships the smallest safe slice and records the deferral in
+  its manifest, where the deferral is **evidence in the run directory, not a queued work item**.
+  *Bounded:* the item still gates and merges normally, and nothing is silently dropped from the
+  ledger — the partial slice is real, proven work. *Matters when:* the deferred remainder is the
+  part you actually cared about. The item closes as `merged` with no trace on the board that
+  anything is outstanding, so the remainder is only recovered if the **operator notices and
+  re-captures it**. Failure paths are covered (bounded auto-requeue of the same spec, then pathology
+  buckets, then a `decision` park), but *successful-but-partial* is not a failure and so triggers
+  none of them. The honest framing: mid-flight re-planning is a capability an in-context
+  orchestrator has and this one trades away for durability — see
+  [method](method.md#orchestrator-workers--with-the-orchestrator-as-a-fold-not-a-context-window).
+
 ## Deliberately deferred (not bugs — scope)
 
 These are out of scope for v0.1 by choice, not oversight:
