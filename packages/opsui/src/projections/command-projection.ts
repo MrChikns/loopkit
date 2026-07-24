@@ -537,16 +537,17 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   }
 
   const d = env.data;
-  // Operator-attention order (WI-128): decision desk → to test → the unified pipeline card →
-  // glance → the unified recent-activity feed (Conversations demoted to a link within it) →
+  // Operator-attention order (WI-158): decision desk → to test → glance (so the operating
+  // picture is visible immediately on load) → the unified pipeline/ops-health card →
+  // the unified recent-activity feed (Conversations demoted to a link within it) →
   // active ops-parks → provenance.
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
     `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
-    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
     glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
+    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
     `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [], d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
     `<section id="conversations">${conversationsLinkRegion(d.threads ?? [], opts.threadsPage)}</section>` +
     `<section id="ops-parks">${opsParksRegion(d.opsParks)}</section>` +

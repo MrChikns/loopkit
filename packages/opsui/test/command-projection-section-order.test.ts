@@ -1,6 +1,7 @@
-// Operator request (WI-128): Command's regions render operator-attention first — decision desk,
-// then To test, then the unified Pipeline card, then Glance, then the unified recent-activity
-// feed (Conversations demoted to a link within it), then Active ops-parks, then Provenance.
+// Operator request (WI-128, reordered WI-158): Command's regions render operator-attention
+// first — decision desk, then To test, then Glance (so current status is visible immediately
+// on load), then the unified Pipeline/ops-health card, then the unified recent-activity feed
+// (Conversations demoted to a link within it), then Active ops-parks, then Provenance.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -27,6 +28,7 @@ test('Command sections render in operator-attention order', () => {
 
   const decisionDeskIndex = html.indexOf('id="decision-desk"');
   const toTestIndex = html.indexOf('id="to-test"');
+  const glanceIndex = html.indexOf('opsui-card--glance');
   const pipelineIndex = html.indexOf('id="pipeline"');
   const wrapperIndex = html.indexOf('data-projection="command"');
   const recentActivityIndex = html.indexOf('id="recent-activity"');
@@ -37,6 +39,7 @@ test('Command sections render in operator-attention order', () => {
   for (const [label, index] of [
     ['decision desk', decisionDeskIndex],
     ['to-test', toTestIndex],
+    ['glance', glanceIndex],
     ['pipeline', pipelineIndex],
     ['recent-activity', recentActivityIndex],
     ['conversations', conversationsIndex],
@@ -48,7 +51,8 @@ test('Command sections render in operator-attention order', () => {
 
   assert.ok(wrapperIndex < decisionDeskIndex, 'workspace wrapper opens before the first region');
   assert.ok(decisionDeskIndex < toTestIndex, 'Decision desk renders before To test');
-  assert.ok(toTestIndex < pipelineIndex, 'To test renders before the unified Pipeline card');
+  assert.ok(toTestIndex < glanceIndex, 'To test renders before Glance');
+  assert.ok(glanceIndex < pipelineIndex, 'Glance renders before the unified Pipeline/ops-health card');
   assert.ok(pipelineIndex < recentActivityIndex, 'Pipeline renders before the recent-activity feed');
   assert.ok(recentActivityIndex < conversationsIndex, 'Recent activity renders before the demoted Conversations link');
   assert.ok(conversationsIndex < opsParksIndex, 'Conversations renders before Active ops-parks');
