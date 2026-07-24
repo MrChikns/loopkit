@@ -22,13 +22,14 @@
  *   - Legacy markdown seams, if any ever existed, are retired; the ledger is the sole store.
  */
 
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { loadAllEventsWithQuarantine, appendEvents, withLock, diffMissingEvents } from '../ledger.js';
 import { fold, FoldResult, ItemRecord, computeAcceptanceDebt, projectEngagement, UnansweredReply, isDecisionPark, isFirstSeenPark, shouldRequeueOpsPark } from '../fold.js';
 import { runDoctor, defaultPidProbe, DoctorConfig, ProgressProbe, ExitFileProbe, WorktreeProbe, reapStaleClaims } from '../doctor.js';
+import { reapLeakedWorktrees } from '../worktree-reaper.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
 import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets } from '../schema.js';
@@ -3462,8 +3463,35 @@ async function stepDoctor(
       });
     }
 
+    // Leaked-worktree reaper: remove build worktrees the beats' own cleanup missed (a
+    // worker killed mid-cleanup orphans its dir with no fold owner; runDoctor only sees
+    // fold-attached worktrees, so these accumulate — the leaked-worktree class). Filesystem-truth
+    // sweep, best-effort, never touches a worktree a live build/lock owns or one younger
+    // than the stall window. Non-destructive: removing a worktree keeps its branch ref.
+    // Runs before the early-return below because leaked dirs are independent of whether
+    // the fold produced any orphan/stale-claim actions this beat.
+    let reapedWt = 0;
+    if (!opts.dryRun) {
+      try {
+        const wr = reapLeakedWorktrees(opts.repoRoot, foldResult, {
+          now,
+          graceMs: cfg.stalledBuildMinutes * 60_000,
+          pidProbe,
+        });
+        reapedWt = wr.reaped.length;
+        if (reapedWt > 0) {
+          process.stderr.write(`[doctor] reaped ${reapedWt} leaked worktree(s): ${wr.reaped.map(x => `${basename(x.path)}(${x.reason})`).join(', ')}\n`);
+        }
+      } catch (e) {
+        process.stderr.write(`[doctor] worktree reaper error: ${e}\n`);
+      }
+    }
+
     if (doctorResult.actions.length === 0 && reapEvents.length === 0) {
-      return { step, ok: true, eventsWritten: reapEvents.length, mdWritten: false, detail: reapEvents.length === 0 ? 'no orphans' : `${reapEvents.length} stale claims reaped` };
+      const bits = [];
+      if (reapEvents.length > 0) bits.push(`${reapEvents.length} stale claims reaped`);
+      if (reapedWt > 0) bits.push(`${reapedWt} leaked worktrees reaped`);
+      return { step, ok: true, eventsWritten: reapEvents.length, mdWritten: false, detail: bits.length ? bits.join('; ') : 'no orphans' };
     }
 
     const events = [...doctorResult.actions.flatMap(a => a.events)];
@@ -3547,7 +3575,7 @@ async function stepDoctor(
       ok: true,
       eventsWritten: events.length + reapEvents.length,
       mdWritten: false,
-      detail: `${doctorResult.orphans.length} orphans; ${doctorResult.stalled.length} stalled; ${doctorResult.actions.filter(a => a.type === 'park-breaker').length} breaker trips; ${reapEvents.length} stale claims reaped`,
+      detail: `${doctorResult.orphans.length} orphans; ${doctorResult.stalled.length} stalled; ${doctorResult.actions.filter(a => a.type === 'park-breaker').length} breaker trips; ${reapEvents.length} stale claims reaped; ${reapedWt} leaked worktrees reaped`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
