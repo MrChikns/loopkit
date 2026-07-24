@@ -837,37 +837,34 @@
 .opsui-inflight__phase--active { color: var(--progress-fg); }
 .opsui-inflight__phase--pending { color: var(--text-3); }
 
-/* Pipeline stages — the build lane end to end. */
-.opsui-pipeline {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-.opsui-pipeline__stage { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.opsui-pipeline__count {
-  font-size: 22px;
-  font-weight: 640;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-/* WI-355: the Pipeline region — preparing → queued → building, each stage an EventRow list. */
+/* WI-355: the Pipeline region — preparing → queued → building, each stage an EventRow list.
+   Each stage is a structured panel matching the Glance tiles' (.opsui-metric) treatment —
+   founder-reported the lanes read "dim and different" beside Glance/Health; panel background/
+   border/radius/padding and the title/count colors below are copied verbatim from
+   .opsui-metric so the two read as one consistent visual language. */
 .opsui-pipelineflow { display: flex; flex-direction: column; gap: 16px; }
+.opsui-pipelineflow__stage {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  padding: 14px 16px;
+}
 .opsui-pipelineflow__stage-title {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin: 0 0 6px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 640;
-  color: var(--text-2);
+  color: var(--text);
 }
 .opsui-pipelineflow__stage-count {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-3);
+  font-size: 14px;
+  font-weight: 640;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
+.opsui-pipelineflow__stage .opsui-empty { color: var(--text-2); }
 .opsui-pipelineflow__stage .opsui-eventrow { margin-bottom: 8px; }
 .opsui-pipelineflow__stage .opsui-eventrow:last-child { margin-bottom: 0; }
 

@@ -12,11 +12,13 @@
 // external file served at /ui/live.js + allowlist only).
 //
 // A second, independent enhancement lives in this same file: on the Command board page
-// (`.opsui-pipeline` present), it opens the server's board-level push (`/command/live`) and
-// patches the Pipeline card's numbers in place as `event: pipeline` frames arrive — the stage
-// counts, the three flow-stage counts, and the health badge label — so the card updates
-// without a reload. That stream stays open for the session (the server caps it and the client
-// reconnects automatically); only the numbers patch, never the lane event lists underneath.
+// (`.opsui-pipelineflow` present), it opens the server's board-level push (`/command/live`) and
+// patches the Pipeline flow card's numbers and the Glance card's health badge label in place as
+// `event: pipeline` frames arrive — so the card updates without a reload. That stream stays open
+// for the session (the server caps it and the client reconnects automatically); only the numbers
+// patch, never the lane event lists underneath. (The former "Ops health & pipeline" stage-count
+// strip and its `.opsui-pipeline__stage` patch targets are gone — that card was deleted; the
+// server route may still send a `stages` payload key, which the client now simply ignores.)
 //
 // A third, independent enhancement: the Glance card's window picker (24h/7d/30d) is a plain
 // `?window=` link (zero-JS baseline — see WindowPicker.ts). With JS, a click on one of those
@@ -86,7 +88,7 @@
   // depends on the other's state.
   function startBoardLive() {
     if (typeof EventSource === 'undefined') return; // no SSE support → page stays refresh-only
-    if (!document.querySelector('.opsui-pipeline')) return; // not the board page
+    if (!document.querySelector('.opsui-pipelineflow')) return; // not the board page
 
     var source;
     try {
@@ -113,15 +115,9 @@
         return; // malformed frame — skip, the next tick tries again
       }
 
-      if (payload && payload.stages) {
-        for (var state in payload.stages) {
-          if (!Object.prototype.hasOwnProperty.call(payload.stages, state)) continue;
-          patchText(
-            '.opsui-pipeline__stage[data-opsui-live-stage="' + state + '"] .opsui-pipeline__count',
-            payload.stages[state],
-          );
-        }
-      }
+      // The former stage-count strip (`.opsui-pipeline__stage`) is deleted along with the "Ops
+      // health & pipeline" card — the server route may still send `payload.stages`, harmless and
+      // intentionally ignored here (no patch target exists for it anymore).
 
       if (payload && payload.flow) {
         for (var key in payload.flow) {
@@ -131,12 +127,13 @@
       }
 
       if (payload && payload.health && payload.health.headline) {
-        // The health badge renders via Card's own `headerAside` slot on the "Ops health &
-        // pipeline" strip card — scoped to `#pipeline` (that card's stable section id, also
-        // pinned by the section-order test) so this never risks matching a header badge on any
-        // other card. No wrapper element is introduced: the badge is Card's normal aside markup,
-        // identical to every other card's header badge on this board.
-        var healthEl = document.querySelector('#pipeline .opsui-card__aside .opsui-status .opsui-status__label');
+        // The health badge renders via Card's own `headerAside` slot on the Glance card
+        // (moved there when the "Ops health & pipeline" strip card was deleted) — scoped to
+        // `#opsui-glance-card` (that card's stable id, also the in-place window-swap hook) so
+        // this never risks matching a header badge on any other card. No wrapper element is
+        // introduced: the badge is Card's normal aside markup, rendered ahead of the
+        // WindowPicker within the same aside.
+        var healthEl = document.querySelector('#opsui-glance-card .opsui-card__aside .opsui-status .opsui-status__label');
         if (healthEl) healthEl.textContent = String(payload.health.headline);
       }
     });

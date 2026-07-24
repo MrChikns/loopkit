@@ -243,7 +243,10 @@ function pulseRegion(pulse: GlancePulse): string {
   return `<div class="opsui-glance-pulse">${rows.join('')}</div>`;
 }
 
-function glanceRegion(d: Pick<CommandData, 'glance' | 'glanceAllClear' | 'glancePulse'>, activeWindow: GlanceWindow): string {
+function glanceRegion(
+  d: Pick<CommandData, 'glance' | 'glanceAllClear' | 'glancePulse' | 'opsHealth'>,
+  activeWindow: GlanceWindow,
+): string {
   const body = d.glanceAllClear
     ? `<div class="opsui-glance-allclear">` +
       `<span class="opsui-glance-allclear__dot" aria-hidden="true"></span>` +
@@ -261,7 +264,12 @@ function glanceRegion(d: Pick<CommandData, 'glance' | 'glanceAllClear' | 'glance
     // place on a window-picker click, without a full page reload/scroll reset — see
     // packages/opsui/public/opsui-live.js. Purely additive: no visual/behavioral change when
     // JS is off, the picker's links still navigate normally.
-    headerAside: WindowPicker({ active: activeWindow }),
+    // The ops-health badge (formerly the deleted "Ops health & pipeline" strip's only unique
+    // element) now renders here too, ahead of the WindowPicker within the same aside — the
+    // strip duplicated data already shown elsewhere on the board (Queued/Building in the
+    // Pipeline flow card, Merged in Shipped, Parked in Decision desk/ops-parks), so it was
+    // deleted; the health signal itself was not, and Glance's header is where it reads best.
+    headerAside: `${StatusBadge({ state: d.opsHealth.state, label: d.opsHealth.headline })}${WindowPicker({ active: activeWindow })}`,
     body,
   });
 }
@@ -338,40 +346,12 @@ function opsParksRegion(events: OpsParksCard): string {
   });
 }
 
-/** Ops health & pipeline strip — the stage-count row (Queued/Building/Approved/Parked/Merged)
- *  as its own card, restored to a separate card from the flow card below it (WI-128 had merged
- *  the two into one cramped card; the founder asked for the pre-WI-128 two-card presentation
- *  back). The health badge renders via `Card`'s own `headerAside` slot — the same mechanism
- *  every other card on this board uses for its header badge — so no bespoke wrapper/layout is
- *  needed here. */
-function pipelineRegion(stages: PipelineStage[], health: CommandData['opsHealth']): string {
-  const cells = stages
-    .map(
-      (s) =>
-        // `data-opsui-live-stage` (the stage's own label, lowercased) is the board-live client's
-        // patch key — `data-state` alone is NOT unique (Building and Approved both render the
-        // `progress` color), so a live patcher keyed off it would silently mispatch counts between
-        // the two. The label is the actual unique discriminator the fold already guarantees.
-        `<div class="opsui-pipeline__stage" data-state="${s.state}" data-opsui-live-stage="${esc(s.label.toLowerCase())}">` +
-        `${StatusBadge({ state: s.state, label: s.label })}` +
-        `<span class="opsui-pipeline__count">${esc(s.count)}</span></div>`,
-    )
-    .join('');
-  return Card({
-    title: 'Ops health & pipeline',
-    subtitle: 'The build lane, end to end',
-    // The board-live SSE client (console /command/live) patches this health badge's label in
-    // place via `.opsui-card__aside .opsui-status .opsui-status__label` — Card's own aside slot,
-    // the same structural hook every other card's header badge already renders through, so no
-    // extra wrapper/markup is introduced here.
-    headerAside: StatusBadge({ state: health.state, label: health.headline }),
-    body: `<div class="opsui-pipeline">${cells}</div>`,
-  });
-}
-
-/** Pipeline flow card — preparing/queued/building, restored as its own card (see
- *  {@link pipelineRegion}). The Conductor widget stays folded into the Building stage as a
- *  sub-badge (WI-128) rather than reappearing as a third card — `conductor.workers` and
+/** Pipeline flow card — preparing/queued/building. The former "Ops health & pipeline" stage-
+ *  count strip that used to sit above this card is deleted (Queued/Building duplicated this
+ *  card's own lane counts, Merged duplicated Shipped, Parked duplicated Decision desk/
+ *  ops-parks); the strip's only unique element — the ops-health badge — moved into Glance's
+ *  header (see {@link glanceRegion}). The Conductor widget stays folded into the Building
+ *  stage as a sub-badge (WI-128) rather than reappearing as a third card — `conductor.workers` and
  *  `flow.building` are the same `buildBuildingEvents` rows (fold-adapter.ts), so a separate
  *  Conductor card would only duplicate this list under a second header. */
 function pipelineFlowRegion(flow: PipelineFlow, conductor: CommandData['conductor']): string {
@@ -570,18 +550,18 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   }
 
   const d = env.data;
-  // Founder-set board order (2026-07-24): recent activity → pipeline → glance → decision desk →
-  // to test → shipped → conversations → active ops-parks → provenance. The transient captured
-  // banner stays pinned above everything as a momentary confirmation. Pipeline and glance sit
-  // adjacent near the top by request; recent activity is the top card as it historically was.
-  // The "pipeline" slot is two adjacent cards (restored from WI-128's single unified card,
-  // 2026-07-24): the "Ops health & pipeline" stage-count strip first, then the "Pipeline" flow
-  // card immediately after — each its own `<section>` for deep-link/test stability.
+  // Founder-set board order (2026-07-24): recent activity → pipeline flow → glance → decision
+  // desk → to test → shipped → conversations → active ops-parks → provenance. The transient
+  // captured banner stays pinned above everything as a momentary confirmation. Pipeline flow
+  // and glance sit adjacent near the top by request; recent activity is the top card as it
+  // historically was. The former "Ops health & pipeline" stage-count strip (a separate section
+  // ahead of pipeline-flow) is deleted — it duplicated data already shown elsewhere on the
+  // board; its only unique element (the ops-health badge) now renders in Glance's header
+  // (see {@link glanceRegion}).
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
     `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [])}</section>` +
-    `<section id="pipeline">${pipelineRegion(d.pipeline, d.opsHealth)}</section>` +
     `<section id="pipeline-flow">${pipelineFlowRegion(d.pipelineFlow, d.conductor)}</section>` +
     glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +

@@ -422,7 +422,10 @@ test('GET /ui/live.js — also references the board-live push route', async () =
       assert.equal(res.status, 200);
       const body = await res.text();
       assert.match(body, /\/command\/live/);
-      assert.match(body, /opsui-pipeline/);
+      // The board-live client gates on the Pipeline flow card (`.opsui-pipelineflow`) — the
+      // former "Ops health & pipeline" stage-count strip (`.opsui-pipeline`) it used to gate on
+      // is deleted from the board.
+      assert.match(body, /opsui-pipelineflow/);
     }),
   );
 });
