@@ -251,11 +251,16 @@ function glanceRegion(d: Pick<CommandData, 'glance' | 'glanceAllClear' | 'glance
       `</div>${pulseRegion(d.glancePulse)}`
     : `<div class="opsui-glancegrid">${d.glance.map((m) => MetricTile(m)).join('')}</div>`;
   return Card({
+    id: 'opsui-glance-card',
     variant: 'glance',
     title: 'Glance',
     subtitle: 'The operating picture at a glance',
     // The window filter lives on the title row (headerAside), never in the body;
-    // WindowPicker is the shared component for this.
+    // WindowPicker is the shared component for this. The `id` above (WI-glance-window-inplace)
+    // is a stable hook so the Command board's client JS can swap this one card's markup in
+    // place on a window-picker click, without a full page reload/scroll reset — see
+    // packages/opsui/public/opsui-live.js. Purely additive: no visual/behavioral change when
+    // JS is off, the picker's links still navigate normally.
     headerAside: WindowPicker({ active: activeWindow }),
     body,
   });

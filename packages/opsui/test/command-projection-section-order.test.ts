@@ -133,3 +133,21 @@ test('the pipeline card carries board-live client-patch hooks without changing v
     assert.ok(html.includes(`<span class="opsui-pipeline__count">${stage.count}</span>`));
   }
 });
+
+test('the Glance card carries a stable id hook for the client in-place window swap, with no visible change', () => {
+  const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
+  const html = CommandProjection(envelope);
+
+  // The client (opsui-live.js) targets #opsui-glance-card to swap only this card's markup on a
+  // window-picker click, without a full page navigation/scroll reset.
+  assert.match(
+    html,
+    /<section class="opsui-card opsui-card--glance" id="opsui-glance-card">/,
+    'the Glance card outer section carries the id hook, additive-only (same class list as before)',
+  );
+
+  // Visible output is unchanged: the window picker still renders as plain `?window=` links with
+  // aria-current on the active option — the zero-JS contract this hook must not disturb.
+  assert.match(html, /href="\?window=24h"[^>]*aria-current="true"/, 'the default (24h) window link stays a plain marked-active anchor');
+  assert.match(html, /class="opsui-window__btn"[^>]*href="\?window=7d"/, 'the 7d window link stays a plain anchor, unmodified');
+});

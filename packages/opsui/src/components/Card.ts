@@ -14,11 +14,16 @@ export type CardProps = {
   subtitle?: string;
   /** Optional pre-rendered HTML placed at the end of the header row (e.g. a badge). */
   headerAside?: string;
+  /** Optional `id` on the outer `<section>` — a stable hook for progressive-enhancement
+   *  client JS to target one specific card instance (e.g. an in-place AJAX swap). Purely
+   *  additive: no visual effect, so callers that omit it are byte-identical to before. */
+  id?: string;
 };
 
 export function Card(props: CardProps): string {
   const variant: CardVariant = props.variant ?? 'default';
   const className = cx('opsui-card', `opsui-card--${variant}`);
+  const idAttr = props.id ? ` id="${esc(props.id)}"` : '';
 
   let header = '';
   if (props.title || props.headerAside) {
@@ -36,5 +41,5 @@ export function Card(props: CardProps): string {
     header = `<header class="opsui-card__header">${titleBlock}${aside}</header>`;
   }
 
-  return `<section class="${className}">${header}<div class="opsui-card__body">${props.body}</div></section>`;
+  return `<section class="${className}"${idAttr}>${header}<div class="opsui-card__body">${props.body}</div></section>`;
 }

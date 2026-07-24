@@ -458,6 +458,20 @@ test('GET /ui/live.js — served with a JS content-type, opens the item SSE tail
   );
 });
 
+test('GET /ui/live.js — also wires the Glance window picker in-place swap', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/ui/live.js`);
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      // Targets the stable Card id hook and pushes history so the URL stays bookmarkable.
+      assert.match(body, /opsui-glance-card/);
+      assert.match(body, /pushState/);
+      assert.match(body, /popstate/);
+    }),
+  );
+});
+
 test('GET /command — links the live-reply client so a fresh capture can upgrade to a live reply', async () => {
   await withLedger((ledgerDir) =>
     withServer(ledgerDir, async (base) => {
@@ -2675,6 +2689,16 @@ test('No-JS verb sweep: reject round-trips via a plain POST', async () => {
 // ---------------------------------------------------------------------------
 // Command window chips (?window=24h|7d|30d) change the shipped-count region
 // ---------------------------------------------------------------------------
+
+test('GET /command — the Glance card carries the #opsui-glance-card hook the client swap targets', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/command`);
+      const body = await res.text();
+      assert.match(body, /id="opsui-glance-card"/);
+    }),
+  );
+});
 
 test('GET /command?window= — the window chips render and the active one carries aria-current', async () => {
   await withLedger((ledgerDir) =>

@@ -17,6 +17,15 @@
 // counts, the three flow-stage counts, and the health badge label — so the card updates
 // without a reload. That stream stays open for the session (the server caps it and the client
 // reconnects automatically); only the numbers patch, never the lane event lists underneath.
+//
+// A third, independent enhancement: the Glance card's window picker (24h/7d/30d) is a plain
+// `?window=` link (zero-JS baseline — see WindowPicker.ts). With JS, a click on one of those
+// links is intercepted, the target URL is fetched, and only the Glance card's markup
+// (`#opsui-glance-card`, a stable additive hook — see Card.ts / command-projection.ts) is
+// swapped in place — no full navigation, no reload, no scroll-position loss. The URL is
+// updated via history.pushState so the window choice stays bookmarkable and back/forward
+// still works. Any failure (fetch error, non-200, missing card in the response) falls back to
+// a normal `location.href` navigation — the enhancement must never leave the picker inert.
 (function () {
   'use strict';
 
@@ -136,9 +145,106 @@
     });
   }
 
+  // Glance window picker: in-place swap on click, progressive enhancement over the
+  // zero-JS `?window=` links. Scoped to `#opsui-glance-card` only — the WindowPicker
+  // component is reused on other pages (e.g. analytics' self-heal window), and those must
+  // keep navigating normally; this handler never touches them.
+  function startGlanceWindowSwap() {
+    if (typeof window.fetch === 'undefined') return; // no fetch → links stay plain navigation
+
+    var card = document.getElementById('opsui-glance-card');
+    if (!card) return; // not the Command board, or the hook isn't present
+
+    function activePicker() {
+      return document.getElementById('opsui-glance-card');
+    }
+
+    function swapFromHtml(html, url) {
+      var parser = new DOMParser();
+      var doc;
+      try {
+        doc = parser.parseFromString(html, 'text/html');
+      } catch (e) {
+        return false;
+      }
+      var freshCard = doc.getElementById('opsui-glance-card');
+      var current = activePicker();
+      if (!freshCard || !current) return false;
+      current.replaceWith(freshCard);
+      return true;
+    }
+
+    function navigateFallback(url) {
+      window.location.href = url;
+    }
+
+    function onWindowLinkClick(event) {
+      var link = event.target && event.target.closest ? event.target.closest('a') : null;
+      if (!link) return;
+      var container = activePicker();
+      if (!container || !container.contains(link)) return; // click outside this card's picker
+      if (!link.classList || !link.classList.contains('opsui-window__btn')) return;
+
+      // Respect modified clicks (new tab / new window / etc) — let the browser handle those.
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey ||
+          event.shiftKey || event.altKey) {
+        return;
+      }
+
+      var href = link.getAttribute('href');
+      if (!href) return;
+      var url = new URL(href, window.location.href);
+      if (url.origin !== window.location.origin) return; // same-origin only
+
+      event.preventDefault();
+
+      fetch(url.href, { credentials: 'same-origin' })
+        .then(function (res) {
+          if (!res.ok) throw new Error('bad status ' + res.status);
+          return res.text();
+        })
+        .then(function (html) {
+          var ok = swapFromHtml(html, url.href);
+          if (!ok) {
+            navigateFallback(url.href);
+            return;
+          }
+          try {
+            window.history.pushState({ opsuiGlanceWindow: true }, '', url.href);
+          } catch (e) {
+            /* pushState failure is non-fatal — the swap already happened */
+          }
+        })
+        .catch(function () {
+          navigateFallback(url.href); // any failure degrades to a normal navigation
+        });
+    }
+
+    document.addEventListener('click', onWindowLinkClick);
+
+    // Back/forward after an in-place swap: re-fetch and re-swap so the card matches the URL.
+    // Non-Glance popstate navigations (any other history entry) are ignored — the browser's
+    // own default handling already applies to those since we never called pushState for them.
+    window.addEventListener('popstate', function (event) {
+      if (!event.state || !event.state.opsuiGlanceWindow) return;
+      fetch(window.location.href, { credentials: 'same-origin' })
+        .then(function (res) {
+          if (!res.ok) throw new Error('bad status ' + res.status);
+          return res.text();
+        })
+        .then(function (html) {
+          swapFromHtml(html, window.location.href);
+        })
+        .catch(function () {
+          window.location.reload(); // fall back to a real reload rather than a stale card
+        });
+    });
+  }
+
   function start() {
     startCapturedBannerLive();
     startBoardLive();
+    startGlanceWindowSwap();
   }
 
   if (document.readyState === 'loading') {
