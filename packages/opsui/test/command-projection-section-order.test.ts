@@ -89,3 +89,35 @@ test("the unified pipeline card's stage counts equal the fold summary buckets", 
     );
   }
 });
+
+test('the pipeline card carries board-live client-patch hooks without changing visible counts', () => {
+  const fold = baseFold({
+    counts: { queued: 2, routed: 1, building: 3, testing: 1, approved: 2, parked: 1 },
+  });
+  const envelope = commandProjectionFromFold(fold, { ledgerSequence: 1 });
+  const html = CommandProjection(envelope);
+
+  // Health badge patch target — the console's /command/live pushes health.headline into this
+  // wrapper's StatusBadge label node.
+  assert.ok(html.includes('data-opsui-live="pipeline-health"'), 'health badge carries its board-live hook');
+
+  // Flow-stage patch targets — fixed preparing/queued/building order.
+  for (const key of ['preparing', 'queued', 'building']) {
+    assert.ok(html.includes(`data-opsui-live-flow="${key}"`), `flow stage "${key}" carries its board-live hook`);
+  }
+
+  // Stage-count patch targets — one per pipeline stage, keyed by the stage's own label (lower-
+  // cased) rather than `state`, since two stages (Building/Approved) share the same `progress`
+  // state and would otherwise collide on a single data-state selector.
+  for (const stage of envelope.data.pipeline) {
+    assert.ok(
+      html.includes(`data-opsui-live-stage="${stage.label.toLowerCase()}"`),
+      `stage "${stage.label}" carries its own board-live hook`,
+    );
+  }
+
+  // No visible-output change: the same count cell markup from the prior test still renders.
+  for (const stage of envelope.data.pipeline) {
+    assert.ok(html.includes(`<span class="opsui-pipeline__count">${stage.count}</span>`));
+  }
+});

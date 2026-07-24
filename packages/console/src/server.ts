@@ -93,7 +93,7 @@ import {
   renderNotFoundPage,
 } from './opsPages.js';
 import type { OpsPageContext, KnowledgeSourceRecord, OpsData } from './opsPages.js';
-import { generateTokensCss as opsuiGenerateTokensCss, registeredStylesheets, isResolvableExternalRef } from '@loopkit/opsui';
+import { generateTokensCss as opsuiGenerateTokensCss, registeredStylesheets, isResolvableExternalRef, commandProjectionFromFold } from '@loopkit/opsui';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -635,6 +635,107 @@ async function serveItemLive(req: IncomingMessage, res: ServerResponse, ledgerDi
   req.on('close', finish);
 }
 
+// ---------------------------------------------------------------------------
+// Board-level live push — /command/live. Unlike serveItemLive (which forwards one reply and
+// closes), this is a monitoring stream: it stays open, re-polling the ledger for a cheap
+// change signature and, only on a change, recomputing the Pipeline card's numbers through the
+// SAME builder the /command page itself renders with (loadOpsData + commandProjectionFromFold)
+// so a pushed count can never drift from what a manual reload would show. Read-only — it never
+// writes the ledger. Bounded like serveItemLive: a hard BOARD_LIVE_MAX_MS cap (the client's
+// EventSource auto-reconnects), a heartbeat so idle connections survive proxies, and every
+// timer stops the moment the client disconnects.
+// ---------------------------------------------------------------------------
+
+/** Hard cap on connection lifetime for the board-level stream — much longer than the
+ *  single-reply item tail's LIVE_MAX_MS since this is meant to stay open for a whole console
+ *  session; the client reconnects automatically once this fires. */
+const BOARD_LIVE_MAX_MS = 30 * 60 * 1000;
+
+/** Cheap fold-change signature: length + id of the last event. Good enough to detect "the
+ *  ledger changed since we last looked" without diffing or re-running the fold on every tick —
+ *  the actual pipeline numbers are only recomputed when this changes. */
+function ledgerSignature(events: ReadonlyArray<{ id: string }>): string {
+  const last = events.length > 0 ? events[events.length - 1]?.id ?? '' : '';
+  return `${events.length}:${last}`;
+}
+
+/** Tail the Pipeline card's numbers over SSE. Never writes to the ledger; every tick just
+ *  re-reads it, same as any GET route. Baseline signature is taken at connect time so the
+ *  first push only happens once something actually changes after the tab opened. */
+async function serveBoardLive(req: IncomingMessage, res: ServerResponse, ledgerDir: string, repoRoot: string): Promise<void> {
+  let lastSignature: string;
+  try {
+    lastSignature = ledgerSignature(await loadAllEvents(ledgerDir));
+  } catch {
+    lastSignature = '';
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(': connected\n\n');
+
+  let closed = false;
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    clearInterval(pollTimer);
+    clearInterval(heartbeatTimer);
+    clearTimeout(maxTimer);
+    res.end();
+  };
+
+  const poll = async (): Promise<void> => {
+    if (closed) return;
+    let events;
+    try {
+      events = await loadAllEvents(ledgerDir);
+    } catch {
+      return; // transient read failure — the next tick tries again, within BOARD_LIVE_MAX_MS
+    }
+    const signature = ledgerSignature(events);
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+
+    // Recompute through the exact same path /command renders with, so the pushed numbers can
+    // never disagree with a manual reload of the page.
+    let data;
+    try {
+      data = await loadOpsData(ledgerDir, repoRoot);
+    } catch {
+      return; // transient — the next change re-triggers a recompute
+    }
+    const envelope = commandProjectionFromFold(data.fold, { ledgerSequence: 0, staleAfterSeconds: 45 });
+    if (envelope.state === 'failed') return; // never push a falsely-calm/empty picture
+    const { pipeline, pipelineFlow, opsHealth } = envelope.data;
+
+    const stages: Record<string, number> = {};
+    for (const s of pipeline) stages[s.label.toLowerCase()] = s.count;
+    const payload = {
+      stages,
+      flow: {
+        preparing: pipelineFlow.preparing.length,
+        queued: pipelineFlow.queued.length,
+        building: pipelineFlow.building.length,
+      },
+      health: { state: opsHealth.state, headline: opsHealth.headline },
+    };
+    if (closed) return;
+    res.write(`event: pipeline\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const pollTimer = setInterval(() => void poll(), LIVE_POLL_MS);
+  const heartbeatTimer = setInterval(() => {
+    if (!closed) res.write(': heartbeat\n\n');
+  }, LIVE_HEARTBEAT_MS);
+  const maxTimer = setTimeout(finish, BOARD_LIVE_MAX_MS);
+
+  req.on('close', finish);
+}
+
 function send(res: ServerResponse, status: number, body: string, contentType = 'text/html; charset=utf-8'): void {
   res.writeHead(status, { 'Content-Type': contentType, 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
@@ -994,6 +1095,11 @@ async function handleRequest(
     const itemLiveMatch = ITEM_LIVE_RE.exec(pathname);
     if (itemLiveMatch && req.method === 'GET') {
       return await serveItemLive(req, res, ledgerDir, itemLiveMatch[1] as string);
+    }
+
+    // Board-level live push (Pipeline card) — GET only, same HEAD discipline as the item tail.
+    if (pathname === '/command/live' && req.method === 'GET') {
+      return await serveBoardLive(req, res, ledgerDir, repoRoot);
     }
 
     if (pathname !== '/' && extname(pathname)) {

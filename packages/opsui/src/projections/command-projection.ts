@@ -343,29 +343,35 @@ function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHea
   const countCells = stages
     .map(
       (s) =>
-        `<div class="opsui-pipeline__stage" data-state="${s.state}">` +
+        // `data-opsui-live-stage` (the stage's own label, lowercased) is the board-live client's
+        // patch key — `data-state` alone is NOT unique (Building and Approved both render the
+        // `progress` color), so a live patcher keyed off it would silently mispatch counts between
+        // the two. The label is the actual unique discriminator the fold already guarantees.
+        `<div class="opsui-pipeline__stage" data-state="${s.state}" data-opsui-live-stage="${esc(s.label.toLowerCase())}">` +
         `${StatusBadge({ state: s.state, label: s.label })}` +
         `<span class="opsui-pipeline__count">${esc(s.count)}</span></div>`,
     )
     .join('');
   const headerAside =
     `<div class="opsui-pipeline__header">` +
-    StatusBadge({ state: health.state, label: health.headline }) +
+    // data-opsui-live="pipeline-health" — hook for the board-live SSE client (console
+    // /command/live) to patch this badge's label in place without a page reload.
+    `<span data-opsui-live="pipeline-health">${StatusBadge({ state: health.state, label: health.headline })}</span>` +
     `<div class="opsui-pipeline">${countCells}</div>` +
     `</div>`;
 
-  const flowStages: Array<{ label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
-    { label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
-    { label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
+  const flowStages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
+    { key: 'preparing', label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
+    { key: 'queued', label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
     // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
-    { label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
+    { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
   ];
   const body = flowStages
     .map(
       (s) =>
         `<div class="opsui-pipelineflow__stage">` +
         `<h3 class="opsui-pipelineflow__stage-title">${esc(s.label)}` +
-        `<span class="opsui-pipelineflow__stage-count">${s.events.length}</span>` +
+        `<span class="opsui-pipelineflow__stage-count" data-opsui-live-flow="${s.key}">${s.events.length}</span>` +
         (s.sub ? StatusBadge({ state: s.sub.state, label: s.sub.label, size: 'sm' }) : '') +
         `</h3>` +
         eventList(s.events, s.empty) +

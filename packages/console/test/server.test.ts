@@ -339,6 +339,94 @@ test('HEAD /item/<id>/live — not a route (SSE is GET-only)', async () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Board-level live push (SSE) — /command/live
+// ---------------------------------------------------------------------------
+
+test('GET /command/live — SSE headers + connect comment, then pushes a pipeline frame on a ledger change and stays open', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const controller = new AbortController();
+      const res = await fetch(`${base}/command/live`, { signal: controller.signal });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/event-stream/);
+      assert.ok(res.body);
+      const reader = res.body!.getReader();
+
+      await readSseUntil(reader, ': connected', 2000);
+
+      // sampleLedger() starts WI-001 queued (item.captured → item.routed → item.queued); a
+      // fresh capture changes the ledger signature and should push updated pipeline numbers —
+      // "Queued" now covers WI-001 and WI-006, so the stage count goes from 1 to 2.
+      await appendEvents(ledgerDir, [
+        makeEvent('cli', 'WI-006', 'item.captured', { source: 'cli', text: 'a second queued item' }, '2026-07-01T13:00:00.000Z'),
+        makeEvent('reactor', 'WI-006', 'item.routed', { route: 'build', reply: 'queuing' }, '2026-07-01T13:01:00.000Z'),
+        makeEvent('reactor', 'WI-006', 'item.queued', { spec: 'a second queued item' }, '2026-07-01T13:02:00.000Z'),
+      ]);
+
+      const buffer = await readSseUntil(reader, 'event: pipeline', 3000);
+      const dataLine = buffer.split('\n').find((line) => line.startsWith('data: '));
+      assert.ok(dataLine, `expected a data: line in the pipeline frame; got: ${buffer}`);
+      const payload = JSON.parse(dataLine!.slice('data: '.length));
+      assert.equal(payload.stages.queued, 2);
+      assert.ok(typeof payload.flow.preparing === 'number');
+      assert.ok(typeof payload.flow.queued === 'number');
+      assert.ok(typeof payload.flow.building === 'number');
+      assert.ok(typeof payload.health.state === 'string');
+      assert.ok(typeof payload.health.headline === 'string');
+
+      // Unlike the item tail, this stream stays open after forwarding a push — it's a
+      // monitoring stream, not a one-shot reply. Prove it's still readable a moment later
+      // rather than having self-closed.
+      const closedRightAway = await Promise.race([
+        reader.read().then((r) => r.done === true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500)),
+      ]);
+      assert.equal(closedRightAway, false, 'expected the board-live connection to stay open after one push');
+
+      controller.abort();
+    }),
+  );
+});
+
+test('GET /command/live — an empty ledger still connects and stays open (bounded, never 500s)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'loopkit-console-test-'));
+  try {
+    await withServer(dir, async (base) => {
+      const controller = new AbortController();
+      const res = await fetch(`${base}/command/live`, { signal: controller.signal });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /^text\/event-stream/);
+      const reader = res.body!.getReader();
+      await readSseUntil(reader, ': connected', 2000);
+      controller.abort();
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('HEAD /command/live — not a route (SSE is GET-only)', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/command/live`, { method: 'HEAD' });
+      assert.equal(res.status, 404);
+    }),
+  );
+});
+
+test('GET /ui/live.js — also references the board-live push route', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/ui/live.js`);
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /\/command\/live/);
+      assert.match(body, /opsui-pipeline/);
+    }),
+  );
+});
+
 test('GET /console-live.js — served with a JS content-type, references EventSource + captured', async () => {
   await withLedger((ledgerDir) =>
     withServer(ledgerDir, async (base) => {

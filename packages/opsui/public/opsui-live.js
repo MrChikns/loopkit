@@ -10,6 +10,13 @@
 // the server's own ~2min cap; this closes its side on the first reply too so a
 // forgotten tab never holds the stream open. No framework, no inline script (CSP:
 // external file served at /ui/live.js + allowlist only).
+//
+// A second, independent enhancement lives in this same file: on the Command board page
+// (`.opsui-pipeline` present), it opens the server's board-level push (`/command/live`) and
+// patches the Pipeline card's numbers in place as `event: pipeline` frames arrive — the stage
+// counts, the three flow-stage counts, and the health badge label — so the card updates
+// without a reload. That stream stays open for the session (the server caps it and the client
+// reconnects automatically); only the numbers patch, never the lane event lists underneath.
 (function () {
   'use strict';
 
@@ -29,7 +36,7 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
-  function start() {
+  function startCapturedBannerLive() {
     if (typeof EventSource === 'undefined') return; // no SSE support → banner stays static
     var id = capturedItemId();
     if (!id) return; // no fresh capture on this page
@@ -61,6 +68,75 @@
     source.addEventListener('error', function () {
       if (source.readyState === EventSource.CLOSED) done();
     });
+  }
+
+  // Board-level live push: patches the Pipeline card's numbers (stage counts, the three
+  // flow-stage counts, and the health badge label) as the server pushes `event: pipeline`
+  // frames. Only runs on the Command board page (`.opsui-pipeline` present) and is fully
+  // independent of the captured-banner tail above — either can run, both can run, neither
+  // depends on the other's state.
+  function startBoardLive() {
+    if (typeof EventSource === 'undefined') return; // no SSE support → page stays refresh-only
+    if (!document.querySelector('.opsui-pipeline')) return; // not the board page
+
+    var source;
+    try {
+      source = new EventSource('/command/live');
+    } catch (e) {
+      return;
+    }
+
+    function done() {
+      try { source.close(); } catch (e) { /* already closed */ }
+    }
+
+    function patchText(selector, text) {
+      var el = document.querySelector(selector);
+      if (!el) return; // defensive: missing node just means no patch, never an error
+      el.textContent = String(text);
+    }
+
+    source.addEventListener('pipeline', function (event) {
+      var payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (e) {
+        return; // malformed frame — skip, the next tick tries again
+      }
+
+      if (payload && payload.stages) {
+        for (var state in payload.stages) {
+          if (!Object.prototype.hasOwnProperty.call(payload.stages, state)) continue;
+          patchText(
+            '.opsui-pipeline__stage[data-opsui-live-stage="' + state + '"] .opsui-pipeline__count',
+            payload.stages[state],
+          );
+        }
+      }
+
+      if (payload && payload.flow) {
+        for (var key in payload.flow) {
+          if (!Object.prototype.hasOwnProperty.call(payload.flow, key)) continue;
+          patchText('[data-opsui-live-flow="' + key + '"]', payload.flow[key]);
+        }
+      }
+
+      if (payload && payload.health && payload.health.headline) {
+        var healthEl = document.querySelector('[data-opsui-live="pipeline-health"] .opsui-status__label');
+        if (healthEl) healthEl.textContent = String(payload.health.headline);
+      }
+    });
+
+    // Transient errors are exactly what EventSource auto-reconnect is for — only stop once
+    // the browser itself has given up (readyState CLOSED), same discipline as the item tail.
+    source.addEventListener('error', function () {
+      if (source.readyState === EventSource.CLOSED) done();
+    });
+  }
+
+  function start() {
+    startCapturedBannerLive();
+    startBoardLive();
   }
 
   if (document.readyState === 'loading') {
