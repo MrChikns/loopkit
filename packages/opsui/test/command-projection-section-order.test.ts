@@ -1,7 +1,6 @@
-// Operator request (WI-128, reordered WI-158): Command's regions render operator-attention
-// first — decision desk, then To test, then Glance (so current status is visible immediately
-// on load), then the unified Pipeline/ops-health card, then the unified recent-activity feed
-// (Conversations demoted to a link within it), then Active ops-parks, then Provenance.
+// Founder-set board order (2026-07-24): Command's regions render as recent activity → pipeline →
+// glance → decision desk → to test → shipped → conversations → active ops-parks → provenance.
+// Recent activity and shipped are separate cards again (WI-128 had merged them into one).
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -26,22 +25,24 @@ test('Command sections render in operator-attention order', () => {
   const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
-  const decisionDeskIndex = html.indexOf('id="decision-desk"');
-  const toTestIndex = html.indexOf('id="to-test"');
-  const glanceIndex = html.indexOf('opsui-card--glance');
-  const pipelineIndex = html.indexOf('id="pipeline"');
   const wrapperIndex = html.indexOf('data-projection="command"');
   const recentActivityIndex = html.indexOf('id="recent-activity"');
+  const pipelineIndex = html.indexOf('id="pipeline"');
+  const glanceIndex = html.indexOf('opsui-card--glance');
+  const decisionDeskIndex = html.indexOf('id="decision-desk"');
+  const toTestIndex = html.indexOf('id="to-test"');
+  const shippedIndex = html.indexOf('id="shipped"');
   const conversationsIndex = html.indexOf('id="conversations"');
   const opsParksIndex = html.indexOf('id="ops-parks"');
   const provenanceIndex = html.indexOf('Provenance');
 
   for (const [label, index] of [
+    ['recent-activity', recentActivityIndex],
+    ['pipeline', pipelineIndex],
+    ['glance', glanceIndex],
     ['decision desk', decisionDeskIndex],
     ['to-test', toTestIndex],
-    ['glance', glanceIndex],
-    ['pipeline', pipelineIndex],
-    ['recent-activity', recentActivityIndex],
+    ['shipped', shippedIndex],
     ['conversations', conversationsIndex],
     ['ops-parks', opsParksIndex],
     ['provenance', provenanceIndex],
@@ -49,12 +50,13 @@ test('Command sections render in operator-attention order', () => {
     assert.ok(index >= 0, `the ${label} section renders`);
   }
 
-  assert.ok(wrapperIndex < decisionDeskIndex, 'workspace wrapper opens before the first region');
+  assert.ok(wrapperIndex < recentActivityIndex, 'workspace wrapper opens before the first region');
+  assert.ok(recentActivityIndex < pipelineIndex, 'Recent activity renders before Pipeline');
+  assert.ok(pipelineIndex < glanceIndex, 'Pipeline renders before Glance');
+  assert.ok(glanceIndex < decisionDeskIndex, 'Glance renders before Decision desk');
   assert.ok(decisionDeskIndex < toTestIndex, 'Decision desk renders before To test');
-  assert.ok(toTestIndex < glanceIndex, 'To test renders before Glance');
-  assert.ok(glanceIndex < pipelineIndex, 'Glance renders before the unified Pipeline/ops-health card');
-  assert.ok(pipelineIndex < recentActivityIndex, 'Pipeline renders before the recent-activity feed');
-  assert.ok(recentActivityIndex < conversationsIndex, 'Recent activity renders before the demoted Conversations link');
+  assert.ok(toTestIndex < shippedIndex, 'To test renders before Shipped');
+  assert.ok(shippedIndex < conversationsIndex, 'Shipped renders before Conversations');
   assert.ok(conversationsIndex < opsParksIndex, 'Conversations renders before Active ops-parks');
   assert.ok(opsParksIndex < provenanceIndex, 'Active ops-parks renders before Provenance');
 });
@@ -97,9 +99,19 @@ test('the pipeline card carries board-live client-patch hooks without changing v
   const envelope = commandProjectionFromFold(fold, { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
-  // Health badge patch target — the console's /command/live pushes health.headline into this
-  // wrapper's StatusBadge label node.
-  assert.ok(html.includes('data-opsui-live="pipeline-health"'), 'health badge carries its board-live hook');
+  // Health badge patch target — the console's /command/live pushes health.headline into the
+  // badge's label node, selected structurally (`.opsui-pipeline__header > .opsui-status ...`).
+  // The badge must be the header's FIRST child (no wrapper element — an earlier wrapper span
+  // shifted the header layout), so the structural selector resolves to it.
+  assert.ok(
+    !html.includes('data-opsui-live="pipeline-health"'),
+    'health badge is patched structurally, not via a layout-shifting wrapper',
+  );
+  assert.match(
+    html,
+    /<div class="opsui-pipeline__header"><span class="opsui-status/,
+    'pipeline header renders the health StatusBadge as its first (direct) child',
+  );
 
   // Flow-stage patch targets — fixed preparing/queued/building order.
   for (const key of ['preparing', 'queued', 'building']) {

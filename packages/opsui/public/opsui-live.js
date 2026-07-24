@@ -122,7 +122,9 @@
       }
 
       if (payload && payload.health && payload.health.headline) {
-        var healthEl = document.querySelector('[data-opsui-live="pipeline-health"] .opsui-status__label');
+        // The health badge is the only direct status-chip child of the pipeline header — patched
+        // structurally so the server render needs no wrapper element (which would shift the layout).
+        var healthEl = document.querySelector('.opsui-pipeline__header > .opsui-status .opsui-status__label');
         if (healthEl) healthEl.textContent = String(payload.health.headline);
       }
     });

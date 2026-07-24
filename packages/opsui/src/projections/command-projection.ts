@@ -354,9 +354,11 @@ function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHea
     .join('');
   const headerAside =
     `<div class="opsui-pipeline__header">` +
-    // data-opsui-live="pipeline-health" — hook for the board-live SSE client (console
-    // /command/live) to patch this badge's label in place without a page reload.
-    `<span data-opsui-live="pipeline-health">${StatusBadge({ state: health.state, label: health.headline })}</span>` +
+    // The board-live SSE client (console /command/live) patches this health badge's label in place
+    // via the structural selector `.opsui-pipeline__header > .opsui-status .opsui-status__label` —
+    // the badge is the header's only direct status-chip child, so no wrapper element is needed. (An
+    // earlier wrapper span here shifted the header's flex layout; the badge renders bare again now.)
+    StatusBadge({ state: health.state, label: health.headline }) +
     `<div class="opsui-pipeline">${countCells}</div>` +
     `</div>`;
 
@@ -390,10 +392,24 @@ function pipelineCardRegion(stages: PipelineStage[], health: CommandData['opsHea
  *  zero-JS prev/next pager. Collapsible day groups are a possible future follow-up, not built here. */
 export const DELIVERY_PAGE_SIZE = 20;
 
-/** WI-128: ONE unified recent-activity feed — the former separate "Recent work items" strip
- *  (captured intents) and "Recent deliveries" card (shipped merges), merged into a single
- *  card so an operator scanning "what's been happening" reads one widget, not two. */
-function recentActivityRegion(intents: RecentIntent[], events: CommandEvent[], page: number): string {
+/** Recent activity — the recently-captured-intents strip. Split back out from the shipped
+ *  deliveries feed ({@link shippedRegion}) that WI-128 had merged it with, so the board can
+ *  order the two independently (recent activity on top, shipped further down). */
+function recentActivityRegion(intents: RecentIntent[]): string {
+  return Card({
+    title: 'Recent activity',
+    subtitle: 'Recently captured intents',
+    headerAside: StatusBadge({
+      state: intents.length ? 'neutral' : 'success',
+      label: intents.length ? `${intents.length} recent` : 'Nothing recent',
+    }),
+    body: recentIntentsRegion(intents) || `<p class="opsui-empty">No recent captures.</p>`,
+  });
+}
+
+/** WI-177: the shipped-deliveries feed can be long, so it paginates at DELIVERY_PAGE_SIZE with a
+ *  zero-JS prev/next pager. Split from {@link recentActivityRegion} (WI-128 had merged them). */
+function shippedRegion(events: CommandEvent[], page: number): string {
   const total = events.length;
   const pageCount = Math.max(1, Math.ceil(total / DELIVERY_PAGE_SIZE));
   const safePage = Math.min(Math.max(1, Math.floor(page) || 1), pageCount);
@@ -404,18 +420,17 @@ function recentActivityRegion(intents: RecentIntent[], events: CommandEvent[], p
     pageCount,
     total,
     itemNoun: 'shipped',
-    label: 'Recent deliveries pages',
-    hrefFor: (p) => (p <= 1 ? '/command#recent-activity' : `/command?page=${p}#recent-activity`),
+    label: 'Shipped pages',
+    hrefFor: (p) => (p <= 1 ? '/command#shipped' : `/command?page=${p}#shipped`),
   });
-  const shippedHeading = `<p class="opsui-intent-strip__heading">Shipped</p>`;
   return Card({
-    title: 'Recent activity',
-    subtitle: 'Captured intents and shipped deliveries',
+    title: 'Shipped',
+    subtitle: 'Shipped deliveries',
     headerAside: StatusBadge({
       state: total ? 'success' : 'neutral',
       label: total ? `${total} shipped` : 'Nothing shipped yet',
     }),
-    body: recentIntentsRegion(intents) + shippedHeading + eventList(pageItems, 'No shipped work in the recent window.') + pager,
+    body: eventList(pageItems, 'No shipped work in the recent window.') + pager,
   });
 }
 
@@ -543,18 +558,19 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
   }
 
   const d = env.data;
-  // Operator-attention order (WI-158): decision desk → to test → glance (so the operating
-  // picture is visible immediately on load) → the unified pipeline/ops-health card →
-  // the unified recent-activity feed (Conversations demoted to a link within it) →
-  // active ops-parks → provenance.
+  // Founder-set board order (2026-07-24): recent activity → pipeline → glance → decision desk →
+  // to test → shipped → conversations → active ops-parks → provenance. The transient captured
+  // banner stays pinned above everything as a momentary confirmation. Pipeline and glance sit
+  // adjacent near the top by request; recent activity is the top card as it historically was.
   return (
     `<div class="opsui-command" data-projection="command" data-state="${env.state}">` +
     capturedBannerRegion(opts.capturedId) +
+    `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [])}</section>` +
+    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
+    glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
     `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
-    glanceRegion(d, opts.window ?? DEFAULT_GLANCE_WINDOW) +
-    `<section id="pipeline">${pipelineCardRegion(d.pipeline, d.opsHealth, d.pipelineFlow, d.conductor)}</section>` +
-    `<section id="recent-activity">${recentActivityRegion(d.recentIntents ?? [], d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
+    `<section id="shipped">${shippedRegion(d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
     `<section id="conversations">${conversationsLinkRegion(d.threads ?? [], opts.threadsPage)}</section>` +
     `<section id="ops-parks">${opsParksRegion(d.opsParks)}</section>` +
     provenanceRegion(env) +
