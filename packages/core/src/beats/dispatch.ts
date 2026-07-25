@@ -1135,7 +1135,14 @@ function isWithinTouches(file: string, prefixes: string[]): boolean {
   return false;
 }
 
-/** package-lock.json anywhere, and test files under the same package root as a touched prefix. */
+/**
+ * package-lock.json anywhere, and test files under the same package root as a touched prefix.
+ * "Package root" is monorepo-shaped (first two segments, e.g. `packages/engine`) when the prefix
+ * is that deep, falling back to the repo root itself for a shallow, flat-layout prefix (e.g. a
+ * standalone target repo's `src/` with a sibling top-level `test/` — no `packages/<name>/`
+ * wrapper to key off). Both shapes forgive the same thing: a worker adding a test beside the
+ * code it changed, one level up from the touched dir.
+ */
 function isTouchesExempt(file: string, prefixes: string[]): boolean {
   if (file.endsWith('package-lock.json')) return true;
   const isTestFile = /\/test\//.test(file) || /\.(test|spec)\.[jt]sx?$/.test(file);
@@ -1144,6 +1151,9 @@ function isTouchesExempt(file: string, prefixes: string[]): boolean {
     const segs = p.split('/').filter(Boolean);
     const pkgRoot = segs.slice(0, 2).join('/');
     if (pkgRoot && (file.startsWith(pkgRoot + '/') || file.startsWith(p + '/'))) return true;
+    // Shallow prefix (single top-level segment, e.g. `src`) — no monorepo package wrapper, so
+    // the package root IS the repo root: any test-shaped file anywhere in the repo qualifies.
+    if (segs.length <= 1) return true;
   }
   return false;
 }

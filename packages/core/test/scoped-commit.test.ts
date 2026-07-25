@@ -108,6 +108,19 @@ test('planScopedCommit: package-lock.json and a co-located test file are in-scop
   assert.ok(plan.residue.includes('unrelated/file.txt'), 'unrelated file is residue');
 });
 
+test('planScopedCommit: a co-located test file is exempt for a FLAT (target-repo) layout too — ' +
+  'not just the packages/<name>/ monorepo shape (regression guard: this exemption must apply ' +
+  'identically in the target lane, which has no packages/ wrapper)', () => {
+  const plan = planScopedCommit(
+    ['src/extra.js', 'test/extra.test.js', 'unrelated/file.txt'],
+    ['src'],
+    [],
+  );
+  assert.ok(plan.inScope.includes('src/extra.js'), 'the touched-prefix file is in-scope');
+  assert.ok(plan.inScope.includes('test/extra.test.js'), 'a sibling top-level test file is exempt (co-located, same repo root)');
+  assert.ok(plan.residue.includes('unrelated/file.txt'), 'unrelated file is still residue');
+});
+
 // ---------------------------------------------------------------------------
 // Fallback stages only in-scope files + surfaces residue (integration)
 // ---------------------------------------------------------------------------
