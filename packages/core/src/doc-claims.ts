@@ -418,6 +418,7 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'criteriaGate', file: 'criteria', mustContain: 'export function criteriaGate(' },
   { id: 'criteriaAuthors', file: 'criteria', mustContain: 'export const CRITERIA_AUTHORS' },
   { id: 'judgeAdvisoryOnly', file: 'judge', mustContain: 'ADVISORY-ONLY' },
+  { id: 'judgeCriteriaBar', file: 'judge', mustContain: 'SPEC_SATISFIED is about the CRITERIA' },
   { id: 'ledgerAppendWrite', file: 'ledger', mustContain: 'await fh.write(line);' },
   { id: 'ledgerCorruptSkip', file: 'ledger', mustContain: 'Corrupt line — skip with a warning' },
   { id: 'ledgerLockAcquire', file: 'ledger', mustContain: 'async function acquireLock(' },

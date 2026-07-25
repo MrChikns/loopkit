@@ -3850,7 +3850,7 @@ async function stepMergeJudge(
       if (!diff) continue;
 
       const spec = rec.spec ?? rec.sourceText ?? '';
-      const prompt = buildJudgePrompt(rec.id, spec, diff, rec.touches);
+      const prompt = buildJudgePrompt(rec.id, spec, diff, rec.touches, rec.criteria);
       const runResult = await runJudge(judgeProvider, judgeModel, prompt, judgeTimeoutMs);
 
       // review.verdict (advisory) shaped by the SHARED mergeVerdictData so a reactor-backstop verdict
