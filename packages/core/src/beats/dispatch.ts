@@ -1635,6 +1635,24 @@ export interface JudgeStageResult {
   providerName: string;
 }
 
+/**
+ * THE ONE producer of a no-commit park reason (WI-198).
+ *
+ * `no-commit:` is the token every downstream reader keys on — `classifyReason` (trajectory.ts,
+ * the failure-class projection), `REQUEUABLE_OPS_PARK_REASON` (fold.ts's transient-ops-park
+ * requeue allowlist), the `noCommitParkCount24h` SLO probe (reactor.ts) and the console's park
+ * classifier. A lane that hand-formats its own reason string drops out of ALL of them at once:
+ * the target lane parked bare `target build produced no commit` for months, so 22 real parks of
+ * the plane's single biggest failure class were counted as 'other' and the projection reported
+ * zero. Every lane formats through this function, so a new lane cannot repeat that by omission.
+ *
+ * Pinned end-to-end (emitted reason → classifyReason) per lane by
+ * `packages/core/test/no-commit-classification.test.ts`.
+ */
+export function noCommitParkReason(detail: string): string {
+  return `no-commit: ${detail}`;
+}
+
 /** One item's outcome from {@link runPostBuildGuards} — the caller decides what to DO with it
  * (merge into which repo, push or not) since that varies legitimately by lane; this pipeline
  * only decides whether the build's diff is fit to merge at all. */
@@ -2495,7 +2513,16 @@ async function finalizeTargetBuild(
   });
 
   if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
-    const reason = `target build ${guardOutcome.reason}`;
+    // WI-198: a no-commit park is formatted through the ONE producer so it carries the
+    // `no-commit:` token every downstream reader keys on (see noCommitParkReason). The lane
+    // provenance stays in the text — `guardOutcome.reason` is already 'build produced no
+    // commit', so `target ${…}` reads 'target build produced no commit', byte-identical to the
+    // literal in the archived events, now prefixed. A dirty-worktree park is a DIFFERENT class
+    // (classifyReason reads it as 'dirty-tree' off the worktree-issue text) and keeps its own
+    // unprefixed shape — prefixing it would misfile it as no-commit.
+    const reason = guardOutcome.kind === 'no-commit'
+      ? noCommitParkReason(`target ${guardOutcome.reason}`)
+      : `target build ${guardOutcome.reason}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
@@ -4118,7 +4145,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         const residueNote = fallbackResidue.length > 0
           ? ` — worker left ${fallbackResidue.length} out-of-scope change(s), all outside declared Touches: ${fallbackResidue.slice(0, 8).join(', ')}`
           : '';
-        const reason = `no-commit: agent produced no commit${denialNote}${residueNote} (log: ${logPath})`;
+        const reason = noCommitParkReason(`agent produced no commit${denialNote}${residueNote} (log: ${logPath})`);
         gateEvents = forItems(id => {
           // Reality check: a "no-commit" is frequently a STALE requeue of work that already
           // merged — each attempt correctly produces nothing, the gate reads it as

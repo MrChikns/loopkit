@@ -79,7 +79,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target lane does not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4415`<!--cite:postIntegrationRegate-->). The target build lane
+  (`packages/core/src/beats/dispatch.ts:4442`<!--cite:postIntegrationRegate-->). The target build lane
   does not carry that invariant: it gates once, on its own branch, and merges. *Bounded:* it is an
   opt-in path that runs against the target's own repo and still gates before merging. *Matters when:*
   the destination branch advances during the build — the merged result is then a combination nothing
@@ -96,7 +96,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3189`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3216`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -117,7 +117,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4601`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4628`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if

@@ -107,6 +107,23 @@ export type ReasonClass =
   | 'other';
 
 /**
+ * Pre-WI-198 no-commit park literals, kept readable FOREVER.
+ *
+ * Until WI-198 the target lane parked a commit-less build with a bare, unprefixed literal
+ * ('target build produced no commit' — 22 events in the live ledger; the retired conductor lane
+ * wrote 'cluster produced no commit'). The fix converged the emitters onto the one prefixed form
+ * (`noCommitParkReason`, dispatch.ts), which is why this is not a second live pattern: the set of
+ * events that can match it is CLOSED — no code writes these strings any more. Deleting this
+ * clause would not tidy anything; it would silently push a documented, historical failure class
+ * back into 'other' and corrupt every before/after reliability comparison over the archive.
+ *
+ * Deliberately anchored to the known lane phrasings rather than a loose 'no commit' sniff, so the
+ * 'other' bucket keeps meaning "genuinely unclassified" — an operator note that merely mentions a
+ * commit must not be swallowed into this class.
+ */
+const LEGACY_UNPREFIXED_NO_COMMIT = /^(target build|cluster|build) produced no commit\b/i;
+
+/**
  * Classify a raw terminal-event `reason` string into a normalized ReasonClass.
  *
  * Pure and deterministic — no guessing. Matches are based on the literal reason
@@ -125,6 +142,10 @@ export type ReasonClass =
  *   - '...merge conflict...'                     → 'merge-conflict'
  *   - 'tests-red' / 'gate exited ...' / other test-failure text → 'gate-red'
  *   - anything else (including undefined)        → 'other'
+ *
+ * Plus ONE closed, historical clause: {@link LEGACY_UNPREFIXED_NO_COMMIT}. This function reads an
+ * IMMUTABLE event stream, so it can never be brought into sync with a producer by changing the
+ * producer alone — see that constant's own comment.
  */
 export function classifyReason(reason: string | undefined): ReasonClass {
   if (!reason) return 'other';
@@ -132,6 +153,7 @@ export function classifyReason(reason: string | undefined): ReasonClass {
   const lower = r.toLowerCase();
 
   if (lower.startsWith('no-commit:') || lower === 'no-commit') return 'no-commit';
+  if (LEGACY_UNPREFIXED_NO_COMMIT.test(r)) return 'no-commit';
   if (r === 'touches-overstep') return 'touches-overstep';
   if (r === 'spine') return 'spine';
   if (lower === 'dirty-tree' || lower.includes('dirty tree') || lower.includes('dirty-tree')) return 'dirty-tree';
