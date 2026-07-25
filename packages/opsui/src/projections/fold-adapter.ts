@@ -902,7 +902,7 @@ function buildOpsParks(fold: FoldSummary): CommandEvent[] {
 }
 
 /** Building/approved items reshaped to `CommandEvent[]` — the one place this extraction
- *  happens, shared by the Conductor region and the pipeline's building stage (WI-355) so
+ *  happens, shared by the in-flight summary and the pipeline's building stage (WI-355) so
  *  the two never drift apart (one-parser rule). */
 function buildBuildingEvents(fold: FoldSummary): CommandEvent[] {
   const nowMs = new Date(fold.generatedAt).getTime();
@@ -927,7 +927,7 @@ function buildBuildingEvents(fold: FoldSummary): CommandEvent[] {
     });
 }
 
-function buildConductor(fold: FoldSummary): CommandData['conductor'] {
+function buildInFlight(fold: FoldSummary): CommandData['inFlight'] {
   const workers = buildBuildingEvents(fold);
   const headline = workers.length ? `${workers.length} in flight` : 'Idle';
   return { headline, state: workers.length ? 'progress' : 'neutral', workers };
@@ -1349,7 +1349,7 @@ export function commandProjectionFromFold(
       glance: glance.metrics,
       glanceAllClear: glance.allClear,
       glancePulse: glance.pulse,
-      conductor: buildConductor(fold),
+      inFlight: buildInFlight(fold),
       deliveryStream: buildDeliveryStream(fold),
       decisionDesk: buildDecisionDesk(fold),
       toTest: buildToTest(fold),
@@ -1387,7 +1387,7 @@ function emptyCommandData(): CommandData {
     glance: [],
     glanceAllClear: false,
     glancePulse: { building: [], queue: { depth: 0 }, shipped: { count: 0, window: DEFAULT_GLANCE_WINDOW, cycleLabel: '–' } },
-    conductor: { headline: 'unavailable', state: 'critical', workers: [] },
+    inFlight: { headline: 'unavailable', state: 'critical', workers: [] },
     deliveryStream: [],
     decisionDesk: [],
     toTest: [],

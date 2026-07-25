@@ -38,7 +38,7 @@ test('a captured+merged item with zero messages and no externalRef appears on th
     recentMerged: [
       { id: 'WI-900', spec: 'Add the widget', mergedAt: '2026-07-20T10:00:00.000Z' },
     ],
-    // No `threads` at all — this item never received a conductor reply and carries no
+    // No `threads` at all — this item never received a router reply and carries no
     // externalRef, so under the old thread-only sourcing it would never appear here.
   });
 

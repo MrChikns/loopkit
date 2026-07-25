@@ -70,6 +70,9 @@ test('Command sections render in operator-attention order', () => {
   assert.ok(opsParksIndex < provenanceIndex, 'Active ops-parks renders before Provenance');
 });
 
+// 'Conductor' was this card's title before WI-128 folded it into the unified widget as the
+// Building sub-badge (the data behind it is `CommandData.inFlight` now). The guard keeps the
+// old title from coming back as a separate card.
 test('the unified widget has no separate Conductor card and Conversations is a link, not a full list', () => {
   const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
