@@ -22,11 +22,12 @@
  *   - Breaker: N consecutive gate.failed/no-commit parks stop new dispatches.
  *   - Attempt-unique branches (wi-NNN-a<attempt>) so a re-dispatch never clobbers a
  *     prior attempt's operator-reviewable parked branch.
- *   - The engineering (batch) lane's worker never commits (WI-161): dispatch stages + commits
- *     the worker's in-scope output itself (DISPATCH_BUILDER_TOOLS grants no git add/commit),
- *     so a compound-shell-denied commit command is no longer a failure class this lane can
- *     reach. The target lane and conductor.ts's attended lane are unchanged — their workers
- *     still commit their own output (BUILDER_TOOLS).
+ *   - The engineering (batch) lane's worker never commits (WI-161), and neither does the
+ *     target lane's (WI-166): dispatch stages + commits the worker's in-scope output itself
+ *     (DISPATCH_BUILDER_TOOLS grants no git add/commit), so a compound-shell-denied commit
+ *     command is no longer a failure class either lane can reach. Only conductor.ts's attended
+ *     lane is unchanged — a human is present there, so its worker still commits its own output
+ *     (BUILDER_TOOLS).
  */
 
 import { join, resolve, dirname } from 'node:path';
@@ -80,9 +81,10 @@ export const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
  * Builder worker allowed-tools list — passed as --allowedTools to every headless build spawn.
- * Used by the TARGET lane (runTargetLane/finalizeTargetBuild, this file) and by conductor.ts's
- * attended session lane — neither has a dispatch-side commit fallback, so the worker is still
- * the only thing that can commit its own output there and needs `git add`/`git commit`.
+ * Used ONLY by conductor.ts's attended session lane now: a human is present there, so the
+ * worker still commits its own output and needs `git add`/`git commit`. The batch/engineering
+ * lane (WI-161) and the target lane (WI-166) both migrated to {@link DISPATCH_BUILDER_TOOLS} —
+ * dispatch commits their output itself, so their workers hold no commit tool at all.
  * A spawn that omits this list gets permission-prompted on every file write, and a headless
  * session has no approver — the worker then honestly parks with "no commit" instead. Every
  * lane that spawns a headless build must pass the list appropriate to it; a lane that forgets
@@ -104,12 +106,15 @@ export const BUILDER_TOOLS = [
 ];
 
 /**
- * Builder worker allowed-tools list for the engineering (batch) lane ONLY (WI-161). Identical
- * to {@link BUILDER_TOOLS} minus `git add`/`git commit`: this lane's dispatch-side scoped
- * commit (see the "Dispatch-side scoped commit" block below) is now the PRIMARY commit path,
- * so the worker is never granted a commit tool to race against or fall back from — a compound
- * shell command silently denied by the allowlist is no longer a failure class this lane can
- * even reach, because there is no worker-side commit attempt to deny.
+ * Builder worker allowed-tools list for lanes with a dispatch-side scoped commit: the
+ * batch/engineering lane (WI-161) AND the target lane (WI-166). Identical to
+ * {@link BUILDER_TOOLS} minus `git add`/`git commit`: dispatch's own scoped commit (see
+ * `attemptScopedCommit` and the "Dispatch-side scoped commit" block below) is the PRIMARY
+ * commit path for both lanes, so their workers are never granted a commit tool to race against
+ * or fall back from — a compound shell command silently denied by the allowlist is no longer a
+ * failure class either lane can even reach, because there is no worker-side commit attempt to
+ * deny. conductor.ts's attended lane is unaffected (BUILDER_TOOLS, unchanged) — a human is
+ * present there.
  */
 export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
   t => t !== 'Bash(git add:*)' && t !== 'Bash(git commit:*)',
@@ -886,6 +891,52 @@ export function assembleRepairEvidence(
   return undefined; // no artifacts found — fail-open, prompt built cold
 }
 
+// Operator notes section caps (WI-168): most recent N notes, ~4000 chars total — sized like
+// the CONTEXT PACK brief cap (parseBrief, 4000 chars), since this is the same class of
+// "trust but verify" background material, not raw evidence.
+const OPERATOR_NOTES_MAX_COUNT = 5;
+const OPERATOR_NOTES_MAX_CHARS = 4_000;
+
+/**
+ * Assemble an OPERATOR NOTES section from an item's own `msg.out` ledger history (WI-168).
+ * The ledger records far more `msg.out` than a human ever writes — reactor/dispatch append
+ * routing acknowledgements, pathology re-queue notes, and engagement replies under actor
+ * 'reactor'/'dispatch' on nearly every beat, which would drown a worker's prompt in bookkeeping
+ * chatter if included unfiltered. Restricts to actor === 'cli': every msg.out actually observed
+ * from a human diagnosing an item (e.g. WI-164's ruled-out-hypotheses note) was appended under
+ * 'cli' — the two known machine-generated 'cli'-actor exceptions (verbs.ts's "could not parse
+ * your reply" rejections) are short, harmless noise in this context, and excluding them would
+ * require a dedicated authorship flag the schema doesn't carry; narrowing by actor is the
+ * available signal, not a guarantee of pure human authorship.
+ *
+ * Newest-first, capped to the most recent {@link OPERATOR_NOTES_MAX_COUNT} notes and
+ * ~{@link OPERATOR_NOTES_MAX_CHARS} total chars (each note further capped so one long note
+ * cannot crowd out the rest) — same truncate-and-say-so convention as assembleRepairEvidence.
+ * Returns undefined when the item has no operator-authored msg.out (fail-open: cold prompt).
+ */
+export function operatorNotesFor(allEvents: LedgerEvent[], itemId: string): string | undefined {
+  const notes = allEvents
+    .filter((e): e is LedgerEvent<'msg.out'> => e.type === 'msg.out' && e.item === itemId && e.actor === 'cli')
+    .map(e => ({ ts: e.ts, text: typeof (e.data as { text?: unknown }).text === 'string' ? (e.data as { text: string }).text : '' }))
+    .filter(n => n.text.trim().length > 0)
+    .reverse() // newest first
+    .slice(0, OPERATOR_NOTES_MAX_COUNT);
+  if (notes.length === 0) return undefined;
+
+  const perNoteMax = Math.floor(OPERATOR_NOTES_MAX_CHARS / notes.length);
+  let used = 0;
+  const rendered: string[] = [];
+  for (const n of notes) {
+    const remaining = OPERATOR_NOTES_MAX_CHARS - used;
+    if (remaining <= 0) break;
+    const cap = Math.min(perNoteMax, remaining);
+    const text = n.text.length > cap ? n.text.slice(0, cap) + ' [truncated]' : n.text;
+    rendered.push(`[${n.ts}] ${text}`);
+    used += text.length;
+  }
+  return `OPERATOR NOTES (most recent first — a human's own diagnosis on this item; trust this over your own re-derivation where they conflict):\n${rendered.join('\n\n')}`;
+}
+
 /**
  * Verify the worktree is in a mergeable shape after the worker exits: still on the
  * expected branch AND a clean tree (no uncommitted changes). A dirty tree means the
@@ -1185,6 +1236,84 @@ function readManifestSubject(wtPath: string, id: string): string | undefined {
   }
 }
 
+/** Result of {@link attemptScopedCommit}. */
+export interface ScopedCommitResult {
+  /** HEAD after the attempt — unchanged from the caller's `headBranch` when nothing was committed. */
+  headEffective: string;
+  /** Dirty paths left uncommitted (outside scope) — surfaced in park reasons / msg.out notes. */
+  residue: string[];
+  /** True when this call actually made a commit. */
+  committed: boolean;
+  /** Human-readable note describing what happened, for logging/msg.out — '' when nothing was dirty. */
+  note: string;
+}
+
+/**
+ * Shared dispatch-side scoped-commit attempt (WI-161, generalized WI-166): given a worktree that
+ * a worker just finished in, stage ONLY the files within scope (declared Touches ∪ manifest
+ * filesTouched) and commit them under dispatch's own identity — the worker never holds a
+ * git-commit tool in either lane that calls this. Used by the batch/engineering lane (worker
+ * runs with {@link DISPATCH_BUILDER_TOOLS}) and the target lane (WI-166 migration). A blanket
+ * `git add -A` would sweep scratch/residue into the commit and trip the Touches-overstep park;
+ * scoped staging avoids that by leaving residue uncommitted and reporting it. Manifests +
+ * node_modules plumbing are never staged. No-op (returns the input `headBranch` unchanged) when
+ * the tree is already clean or nothing dirty falls in scope.
+ *
+ * `touches` — the effective declared-Touches string for the item(s) in this worktree ('*' or
+ * undefined = wildcard, no prefix narrowing — everything falls back to manifest-file matching).
+ * `manifestIds` — ids whose `MANIFEST-<id>.json` may be read for `filesTouched` + `subject`
+ * (the batch lane passes every group member; the target lane passes just the one item).
+ * `subjectId` — whose manifest `subject` field is used verbatim for the commit message, when
+ * present (the batch lane's carrier; the target lane's sole item).
+ * `fallbackKind` — short description of why dispatch is committing (folded into the generated
+ * commit message when no `subject` is supplied).
+ */
+export function attemptScopedCommit(
+  wtPath: string,
+  headBranch: string,
+  branchBase: string,
+  touches: string | undefined,
+  manifestIds: string[],
+  subjectId: string,
+  fallbackKind: string,
+): ScopedCommitResult {
+  let headEffective = headBranch;
+  let residue: string[] = [];
+  let note = '';
+  let committed = false;
+  if (!existsSync(wtPath)) return { headEffective, residue, committed, note };
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: wtPath, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER })
+    .stdout.toString().split('\n')
+    .filter(l => l.trim() && !/MANIFEST-WI-\d+\.json/.test(l) && !isDependencyPlumbing(l))
+    .map(l => l.slice(3).trim())
+    .filter(Boolean);
+  if (dirty.length === 0) return { headEffective, residue, committed, note };
+
+  const touchPrefixes = (touches && touches !== '*') ? normalizeTouches(touches) : [];
+  const manifestFiles = readManifestFilesTouched(wtPath, manifestIds);
+  const plan = planScopedCommit(dirty, touchPrefixes, manifestFiles);
+  residue = plan.residue;
+  if (plan.inScope.length === 0) return { headEffective, residue, committed, note };
+
+  const added = spawnSync('git', ['add', '--', ...plan.inScope], { cwd: wtPath, stdio: 'pipe' });
+  if (added.status !== 0) return { headEffective, residue, committed, note };
+
+  const workerSubject = readManifestSubject(wtPath, subjectId);
+  const commitMessage = workerSubject
+    ? workerSubject
+    : `feat(${subjectId}): worker output, committed by dispatch (${fallbackKind})`;
+  const commitResult = spawnSync('git', ['commit', '-m', commitMessage], { cwd: wtPath, stdio: 'pipe' });
+  if (commitResult.status !== 0) return { headEffective, residue, committed, note };
+
+  headEffective = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout.toString().trim();
+  committed = true;
+  const residueNote = residue.length > 0
+    ? ` — left ${residue.length} out-of-scope change(s) uncommitted: ${residue.slice(0, 8).join(', ')}`
+    : '';
+  note = `${fallbackKind} — dispatch committed ${plan.inScope.length} in-scope change(s)${residueNote}, proceeding to gate`;
+  return { headEffective, residue, committed, note };
+}
+
 // ---------------------------------------------------------------------------
 // Scout prompt
 // ---------------------------------------------------------------------------
@@ -1246,6 +1375,7 @@ export function buildPrompt(
   resumeNote?: string,
   playbookContent?: string,
   touches?: string,
+  operatorNotes?: string,
 ): string {
   const touchesSection = touches
     ? ` DECLARED FOOTPRINT: this item's declared Touches (the only files you are authorized to write) is: ${touches}. If the change genuinely requires writing outside this footprint, do NOT silently write there — escalate it in the manifest "notes" field using the INTENT/EVIDENCE/RISK/RECOMMENDATION format below instead, and make the smallest in-footprint change you safely can.`
@@ -1257,13 +1387,20 @@ export function buildPrompt(
   const briefSection = brief
     ? `\n\nCONTEXT PACK (prepared by a read-only scout at branch point; trust but verify against the code):\n${brief}`
     : '';
+  // OPERATOR NOTES (WI-168): sits right after CONTEXT PACK, before RESUME NOTE/REPAIR EVIDENCE.
+  // Rationale: CONTEXT PACK and OPERATOR NOTES are both general "trust but verify" background —
+  // read once, up front, before the worker turns to attempt-specific mechanics (RESUME NOTE and
+  // REPAIR EVIDENCE describe what THIS attempt's predecessor did/broke). A human's own diagnosis
+  // is higher-trust than a scout's, so it is read early, not buried after the failure mechanics.
+  const operatorNotesSection = operatorNotes ? `\n\n${operatorNotes}` : '';
   const resumeSection = resumeNote ? `\n\n${resumeNote}` : '';
   const attachSuffix = attachments?.length
     ? `\n\nATTACHMENTS (operator uploaded — Read these paths before implementing):\n${attachments.map(p => '- ' + p).join('\n')}`
     : '';
-  // Section order: base → REPO PLAYBOOK → CONTEXT PACK → RESUME NOTE → REPAIR EVIDENCE → REQUEST.
-  // MANIFEST instruction is appended to every prompt so the worker writes a self-report.
-  const prefix = `${base}${playbookSection}${briefSection}`;
+  // Section order: base → REPO PLAYBOOK → CONTEXT PACK → OPERATOR NOTES → RESUME NOTE →
+  // REPAIR EVIDENCE → REQUEST. MANIFEST instruction is appended to every prompt so the worker
+  // writes a self-report.
+  const prefix = `${base}${playbookSection}${briefSection}${operatorNotesSection}`;
   if (repairEvidence) {
     return `${prefix}${resumeSection}\n\n${repairEvidence}\n\nREQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
   }
@@ -1283,7 +1420,7 @@ export function buildPrompt(
  * intersecting the merged diff, so every item MUST write its own accurate manifest.
  * @internal exported for tests
  */
-export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string }[], playbookContent?: string): string {
+export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string; operatorNotes?: string }[], playbookContent?: string): string {
   const playbookSection = playbookContent
     ? `\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout):\n${playbookContent}\n`
     : '';
@@ -1292,13 +1429,16 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
       const briefSection = it.brief
         ? `\nCONTEXT PACK for ${it.id} (prepared by a read-only scout at branch point; trust but verify against the code):\n${it.brief}`
         : '';
+      // OPERATOR NOTES sits right after CONTEXT PACK, before REPAIR EVIDENCE — same rationale
+      // as buildPrompt (WI-168): general background before attempt-specific failure mechanics.
+      const operatorNotesSection = it.operatorNotes ? `\n${it.operatorNotes}` : '';
       const evidenceSection = it.repairEvidence
         ? `\n${it.repairEvidence}`
         : '';
       const touchesSection = it.touches
         ? `\nDeclared Touches for ${it.id} (the only files this item is authorized to write): ${it.touches}`
         : '';
-      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${evidenceSection}\n${it.spec}`;
+      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${operatorNotesSection}${evidenceSection}\n${it.spec}`;
     })
     .join('\n\n');
   const batchManifestInstruction = `
@@ -1665,13 +1805,13 @@ export function targetWorktreeDirName(
 }
 
 /**
- * Terminal half of a targeted build — commit-check → manifest gate → merge into the target's
- * default branch → evidence. Shared by BOTH the sync spawn path and the detached-collection path
- * (ADR-008 §3): a collected detached target build reuses the EXACT gate/merge pipeline the sync
- * path uses, never a forked second implementation. `outcome` is the decoded provider (sync) or
- * exit-file (collection) result; `providerName` is best-effort cost attribution (a cross-beat
- * collector may not know which provider ran the detached worker → 'unknown'). Returns the single
- * DispatchStepResult the caller pushes.
+ * Terminal half of a targeted build — dispatch-side scoped commit (WI-166) → commit-check →
+ * manifest gate → merge into the target's default branch → evidence. Shared by BOTH the sync
+ * spawn path and the detached-collection path (ADR-008 §3): a collected detached target build
+ * reuses the EXACT gate/merge pipeline the sync path uses, never a forked second implementation.
+ * `outcome` is the decoded provider (sync) or exit-file (collection) result; `providerName` is
+ * best-effort cost attribution (a cross-beat collector may not know which provider ran the
+ * detached worker → 'unknown'). Returns the single DispatchStepResult the caller pushes.
  */
 async function finalizeTargetBuild(
   opts: DispatchOptions,
@@ -1708,10 +1848,39 @@ async function finalizeTargetBuild(
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
   }
 
-  // The worker must have committed. An empty branch (no commit past HEAD) is a no-commit park.
-  const branchHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
+  // ── Dispatch-side scoped commit (WI-166, target lane) ────────────────────
+  // The target lane's worker holds no git-commit tool (DISPATCH_BUILDER_TOOLS — see
+  // runTargetLane), so dispatch commits the worker's in-scope output itself here, mirroring
+  // the batch/engineering lane's WI-161 fallback via the shared attemptScopedCommit helper.
+  // headBranch/branchBase distinguish "worker finished, nothing committed yet" from "residue
+  // left after an already-landed commit" for the fallback commit message only.
+  let branchHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
+  const scopedResult = attemptScopedCommit(
+    wtPath,
+    branchHead ?? baseSha,
+    baseSha,
+    rec.touches,
+    [rec.id],
+    rec.id,
+    (branchHead ?? baseSha) === baseSha
+      ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
+      : 'residue the worker left uncommitted after a prior dispatch commit',
+  );
+  if (scopedResult.committed) {
+    branchHead = scopedResult.headEffective;
+    process.stderr.write(`[dispatch] ${rec.id}: ${scopedResult.note}\n`);
+    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'msg.out', {
+      text: `dispatch committed the worker's in-scope output — gate judges it normally (${scopedResult.note})`,
+    })]);
+  }
+
+  // The worker must have committed (directly, or via the scoped-commit attempt above). An
+  // empty branch (no commit past HEAD) is a no-commit park.
   if (!branchHead || branchHead === baseSha) {
-    const reason = 'target build produced no commit';
+    const residueNote = scopedResult.residue.length > 0
+      ? ` — left ${scopedResult.residue.length} out-of-scope change(s), all outside declared Touches: ${scopedResult.residue.slice(0, 8).join(', ')}`
+      : '';
+    const reason = `target build produced no commit${residueNote}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
@@ -1972,7 +2141,11 @@ export async function runTargetLane(
 
     // ── Build worker in the target worktree ──────────────────────────────────
     const baseSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
-    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches);
+    // WI-168: OPERATOR NOTES — a lazy per-item ledger read (mirrors the tailEvents re-reads
+    // elsewhere in this file), not a threaded parameter: this lane dispatches serially (one
+    // item at a time), so the cost is one read per build, not per beat.
+    const operatorNotes = operatorNotesFor(await loadAllEventsWithQuarantine(opts.ledgerDir), rec.id);
+    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches, operatorNotes);
 
     // ── ADR-008 §2 detached branch: spawn, record pgid, DON'T await this beat ──
     // onSpawn fires synchronously (claudeCli.ts) before run() resolves, so spawnedPgid is set right
@@ -1985,7 +2158,10 @@ export async function runTargetLane(
         prompt,
         model: rec.model ?? cfg.models.builderDefault,
         cwd: wtPath,
-        tools: BUILDER_TOOLS,
+        // WI-166: this lane's dispatch-side scoped commit (finalizeTargetBuild) is now the
+        // primary commit path — DISPATCH_BUILDER_TOOLS grants no git add/commit, mirroring the
+        // batch lane (WI-161).
+        tools: DISPATCH_BUILDER_TOOLS,
         timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
         detached: true,
         onSpawn: pgid => { spawnedPgid = pgid; },
@@ -2011,9 +2187,11 @@ export async function runTargetLane(
       prompt,
       model: rec.model ?? cfg.models.builderDefault,
       cwd: wtPath,
-      // Same allowed-tools contract as the batch lane — omitting it permission-blocks every
-      // write in a headless session (no approver) and the build parks with "no commit".
-      tools: BUILDER_TOOLS,
+      // WI-166: dispatch commits this lane's output too now (finalizeTargetBuild's scoped-commit
+      // attempt) — DISPATCH_BUILDER_TOOLS, same as the batch lane (WI-161). Omitting a tools list
+      // entirely would still permission-block every write in a headless session (no approver)
+      // and the build would park with "no commit"; that invariant is unchanged.
+      tools: DISPATCH_BUILDER_TOOLS,
       timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
     });
     results.push(await finalizeTargetBuild(opts, rec, {
@@ -2917,6 +3095,14 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         }
       }
 
+      // Operator notes (WI-168): reuses the beat-start `allEvents` snapshot (loaded once above)
+      // rather than a fresh read per group — good enough for background context, unlike the
+      // cancel-poll's tailEvents re-read below, which needs a live read for a real-time decision.
+      const operatorNotesByItem = new Map<string, string | undefined>();
+      for (const r of group) {
+        operatorNotesByItem.set(r.id, operatorNotesFor(allEvents, r.id));
+      }
+
       // Salvage resume: if the highest prior attempt left a .salvage.patch,
       // try to apply it to the new worktree. Fail-open: apply failure → reference wording only.
       // Section order in prompt: CONTEXT PACK → RESUME NOTE → REPAIR EVIDENCE → REQUEST.
@@ -2945,11 +3131,11 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
 
       // One prompt: single spec, or a batch prompt listing every co-located spec.
-      // Brief (context pack) is injected when available; repair evidence after it.
-      // Resume note sits between CONTEXT PACK and REPAIR EVIDENCE.
+      // Brief (context pack) is injected when available; operator notes after it, then repair
+      // evidence. Resume note sits between OPERATOR NOTES and REPAIR EVIDENCE.
       const prompt = group.length > 1
-        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches })), playbookContent)
-        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches);
+        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches, operatorNotes: operatorNotesByItem.get(r.id) })), playbookContent)
+        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches, operatorNotesByItem.get(rec.id));
 
       // Run-controls hard-stop cancel poll: re-reads the ledger tail and fires when ANY member
       // of the co-located group has an

@@ -91,6 +91,10 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
 
     // Fake provider: writes a real, TEST-GREEN change into the TARGET worktree (req.cwd is the
     // target repo's worktree) and commits it. It adds a passing test so the manifest gate stays green.
+    // (This provider self-commits, which the real headless worker no longer can — see the
+    // "WI-166: target lane merges via dispatch's own scoped commit" test below for the no-worker-
+    // commit path the fix actually targets. Kept here to prove the pre-existing self-commit path
+    // still works unchanged: the scoped-commit attempt is a no-op against an already-clean tree.)
     const provider: LlmProvider = {
       name: 'fake',
       async run(req: ProviderRequest): Promise<ProviderResult> {
@@ -99,8 +103,12 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
         assert.ok(existsSync(join(cwd, 'src', 'notes.js')), 'worker cwd must be a worktree of the target repo');
         // The target lane MUST pass the builder allowed-tools list — a headless spawn without
         // it gets permission-prompted on every write (no approver) and parks with "no commit".
+        // WI-166: the target lane migrated to DISPATCH_BUILDER_TOOLS (dispatch commits the
+        // worker's output itself now) — the worker holds no git-commit tool at all.
         assert.ok(req.tools?.includes('Edit') && req.tools?.includes('Write'),
           `target-lane build request must carry builder tools (got: ${JSON.stringify(req.tools)})`);
+        assert.ok(!req.tools?.includes('Bash(git commit:*)'),
+          'WI-166: the target lane must NOT grant a commit tool — dispatch commits on the worker\'s behalf');
         writeFileSync(join(cwd, 'src', 'extra.js'), 'export const marker = 42;\n', 'utf8');
         writeFileSync(join(cwd, 'test', 'extra.test.js'),
           "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 42); });\n",
@@ -139,6 +147,75 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
     assert.notEqual(commitInPlane.stdout.toString().trim(), 'commit', 'merge commit must NOT exist in the plane repo');
 
     // The manifest gate (node --test) actually ran green — proven by the extra passing test surviving.
+    const gate = spawnSync('sh', ['-c', 'npm test'], { cwd: targetRoot, stdio: 'pipe' });
+    assert.equal(gate.status, 0, 'the merged target repo main must be gate-green');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-166: target lane merges via dispatch\'s own scoped commit when the worker never commits', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-scoped-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add deleteNote', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-001', 'item.queued', { spec: 'add a deleteNote helper', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    // Fake provider: writes a real, TEST-GREEN change but does NOT commit and does NOT hold a
+    // commit tool (mirrors the real headless worker under DISPATCH_BUILDER_TOOLS post-WI-166).
+    // Also writes a manifest with a "subject" — proving dispatch's scoped commit picks it up,
+    // exactly as the batch lane's WI-161 fallback does.
+    const provider: LlmProvider = {
+      name: 'fake',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        const cwd = req.cwd!;
+        assert.ok(!req.tools?.includes('Bash(git commit:*)'),
+          'worker must not be able to self-commit in this scenario');
+        writeFileSync(join(cwd, 'src', 'extra.js'), 'export const marker = 43;\n', 'utf8');
+        writeFileSync(join(cwd, 'test', 'extra.test.js'),
+          "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 43); });\n",
+          'utf8');
+        writeFileSync(join(cwd, 'MANIFEST-WI-001.json'), JSON.stringify({
+          wi: 'WI-001', filesTouched: ['src/extra.js', 'test/extra.test.js'], testsAdded: ['test/extra.test.js'],
+          confidence: 0.9, notes: 'added marker', subject: 'feat(WI-001): dispatch-committed marker',
+        }), 'utf8');
+        // Deliberately NO git add/commit — dispatch's scoped-commit attempt must do it.
+        return { ok: true, text: 'done, left uncommitted for dispatch' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-001')?.state, 'merged', `WI-001 must be merged via dispatch's scoped commit; result: ${JSON.stringify(result.dispatched)}`);
+    const merged = events.filter(e => e.type === 'item.merged' && e.item === 'WI-001');
+    assert.equal(merged.length, 1, 'exactly one item.merged for the targeted item');
+
+    // The worker's manifest "subject" reached the actual commit message.
+    const targetLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(targetLog, /dispatch-committed marker/, 'dispatch used the worker manifest\'s subject for the commit');
+
     const gate = spawnSync('sh', ['-c', 'npm test'], { cwd: targetRoot, stdio: 'pipe' });
     assert.equal(gate.status, 0, 'the merged target repo main must be gate-green');
   } finally {
