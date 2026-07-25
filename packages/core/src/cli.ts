@@ -1007,6 +1007,15 @@ async function cmdTrajectory(rest: string[]): Promise<void> {
   console.log(`  Avg duration/attempt: ${agg.avgDurationMinutes > 0 ? agg.avgDurationMinutes.toFixed(1) + 'm' : 'n/a'}`);
   console.log(`  Scout coverage:       ${(agg.scoutCoverage * 100).toFixed(1)}%`);
   console.log(`  Judge fail share:     ${agg.judgeFailShare > 0 ? (agg.judgeFailShare * 100).toFixed(1) + '%' : 'n/a (no verdicts)'}`);
+  // WI-165: share of failures that reached the operator (parkKind:'decision') vs. were
+  // handled mechanically (parkKind:'ops'); 'hold' is excluded from both sides. This is the
+  // number that shows whether an interface change cut founder interruptions.
+  const attentionTotal = agg.decisionParks + agg.opsParks;
+  console.log(
+    `  Attention cost:       ${attentionTotal > 0
+      ? `${(agg.attentionCostShare * 100).toFixed(1)}% (${agg.decisionParks} decision / ${agg.opsParks} ops)`
+      : 'n/a (no decision/ops parks)'}`,
+  );
 }
 
 /**
