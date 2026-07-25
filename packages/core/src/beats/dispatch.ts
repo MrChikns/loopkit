@@ -37,7 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { loadAllEventsWithQuarantine, appendEvents } from '../ledger.js';
 import { alreadyShippedCommit } from '../reality-check.js';
 import { fold, FoldResult, ItemRecord , isClaimActive, isItemTerminal } from '../fold.js';
-import { makeEvent, resolveAttachmentPaths, ItemQueuedData, LedgerEvent, MERGE_EVIDENCE_FILES_CAP } from '../schema.js';
+import { makeEvent, resolveAttachmentPaths, ItemQueuedData, ItemCapturedData, LedgerEvent, MERGE_EVIDENCE_FILES_CAP } from '../schema.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
@@ -1189,6 +1189,15 @@ export interface WorkerManifest {
   /** Certify-don't-brief payload (see {@link WorkerCertification}). Optional — absent when the
    *  worker's manifest didn't supply all three fields. */
   certification?: WorkerCertification;
+  /**
+   * WI-177 — STRUCTURED deferral: the remainder of a mis-scoped item that this build deliberately
+   * did NOT ship. A worker that finds its item too big ships the smallest safe slice and states the
+   * outstanding work here. Deliberately its own typed field and NOT parsed out of free-text
+   * `notes`: only a field the worker chose to fill can be trusted to mean "work is outstanding".
+   * At merge, dispatch auto-CAPTURES a child item carrying this text (see
+   * {@link captureDeferralChildren}) — captured, never queued.
+   */
+  deferred?: string;
 }
 
 /**
@@ -1215,10 +1224,28 @@ export function parseManifest(text: string): WorkerManifest | null {
     const rawSubject = typeof raw.subject === 'string' ? raw.subject.split('\n')[0].trim() : '';
     const subject = rawSubject || undefined;
     const certification = parseWorkerCertification(raw.certification);
-    return { wi, filesTouched, testsAdded, confidence, notes, ...(subject ? { subject } : {}), ...(certification ? { certification } : {}) };
+    // WI-177: structured deferral. Present only as a non-empty string; whitespace-only, a
+    // non-string, or the literal placeholder/none forms read as "nothing outstanding" so a worker
+    // echoing the template never mints a phantom child item.
+    const rawDeferred = typeof raw.deferred === 'string' ? raw.deferred.trim() : '';
+    const deferred = rawDeferred && !isEmptyDeferral(rawDeferred) ? rawDeferred : undefined;
+    return { wi, filesTouched, testsAdded, confidence, notes, ...(subject ? { subject } : {}), ...(certification ? { certification } : {}), ...(deferred ? { deferred } : {}) };
   } catch {
     return null;
   }
+}
+
+/**
+ * WI-177 — the "nothing was deferred" vocabulary. `deferred` is a field a worker fills only when
+ * work is genuinely outstanding, but the prompt shows it a template, so the honest negative answers
+ * ("none", "n/a", the placeholder itself) must read as absent rather than mint a child item that
+ * says nothing. Anything else is taken at face value — this is not a content filter.
+ */
+function isEmptyDeferral(text: string): boolean {
+  const t = text.toLowerCase().replace(/[.\s]+$/, '').trim();
+  if (t === 'none' || t === 'n/a' || t === 'na' || t === 'nothing' || t === 'nothing deferred' || t === '-') return true;
+  // The prompt's own placeholder, echoed back unfilled.
+  return t.startsWith('<') && t.endsWith('>');
 }
 
 /** All-or-nothing extraction of the manifest's optional certification block — a shape with
@@ -1234,6 +1261,80 @@ function parseWorkerCertification(raw: unknown): WorkerCertification | undefined
   // as a non-empty string, drop it otherwise (never a partially-filled block).
   const portability = typeof r['portability'] === 'string' && r['portability'].trim() ? r['portability'] : undefined;
   return { couldBreak, detection, rollback, ...(portability ? { portability } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// WI-177 — successful-but-partial delivery reaches the board
+// ---------------------------------------------------------------------------
+
+/** One merged item's declared remainder, ready to become a captured child. */
+export interface DeferralToCapture {
+  /** The item that merged the partial slice. */
+  parentId: string;
+  /** The worker's structured `deferred` text (already trimmed + emptiness-filtered). */
+  deferred: string;
+  /** The parent's target name, inherited so the remainder builds where the parent did. */
+  target?: string;
+  /** The parent's opaque target id, inherited alongside the name (survives a rename). */
+  targetId?: string;
+}
+
+/** The once-per-parent idempotency stamp carried on a deferral child's `source`. */
+export function deferralSourceStamp(parentId: string): string {
+  return `deferral:${parentId}`;
+}
+
+/**
+ * WI-177 — a build that shipped a smaller slice than its item asked for must leave a trace on the
+ * BOARD, not only in its run directory. Before this, a worker's deferral lived in the manifest's
+ * free-text `notes`; only `filesTouched` and `certification` ever reached an event, so the item
+ * closed `merged` with nothing saying work was outstanding and the remainder survived only if the
+ * operator happened to read the manifest. Failure paths are well covered; successful-but-partial
+ * is not a failure, so it triggered none of them.
+ *
+ * Each parent gets ONE child, `item.captured` and nothing else. **Captured, never queued** — the
+ * child lands in exactly the intake the operator's own intents land in, and a human (or the
+ * reactor's routing) decides whether it is real work. That is what keeps this from becoming an
+ * unsupervised worker re-scope channel: a worker can put a *proposal* on the board, it can never
+ * put a *build* on the queue.
+ *
+ * Race-safe and idempotent by the same rule the reactor's portability promotion uses: allocate WI
+ * ids from a fresh fold under the ledger lock, and skip a parent that already has a child stamped
+ * `deferral:<parentId>`.
+ *
+ * @returns the ids of the children captured this call (empty when there was nothing to capture).
+ */
+export async function captureDeferralChildren(
+  ledgerDir: string,
+  deferrals: DeferralToCapture[],
+): Promise<string[]> {
+  if (deferrals.length === 0) return [];
+  return withLock(ledgerDir, async (tx) => {
+    const freshResult = fold(await tx.loadAll());
+    const alreadyCaptured = new Set<string>();
+    for (const rec of freshResult.items.values()) {
+      if (rec.source && rec.source.startsWith('deferral:')) alreadyCaptured.add(rec.source);
+    }
+    let nextNum = freshResult.maxWiNum;
+    const events: LedgerEvent[] = [];
+    const childIds: string[] = [];
+    for (const d of deferrals) {
+      const stamp = deferralSourceStamp(d.parentId);
+      if (alreadyCaptured.has(stamp)) continue;
+      alreadyCaptured.add(stamp);
+      nextNum += 1;
+      const childId = `WI-${String(nextNum).padStart(3, '0')}`;
+      events.push(makeEvent('dispatch', childId, 'item.captured', {
+        source: stamp,
+        text: `Remainder deferred by ${d.parentId} (shipped a partial slice): ${d.deferred}`,
+        ...(d.target ? { target: d.target } : {}),
+        ...(d.targetId ? { targetId: d.targetId } : {}),
+      } as ItemCapturedData));
+      childIds.push(childId);
+    }
+    if (events.length > 0) await tx.append(events);
+    return childIds;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1787,7 +1888,8 @@ export function parseBrief(text: string): string {
  * Exported for testing. */
 export const MANIFEST_INSTRUCTION = `
 MANIFEST: Before finishing, write MANIFEST-<wi-id>.json at the WORKTREE ROOT (not committed) with:
-{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "subject": "<optional one-line commit subject — dispatch commits your work and uses this verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" } }
+{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "subject": "<optional one-line commit subject — dispatch commits your work and uses this verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" }, "deferred": "<optional: the outstanding work you deliberately did NOT ship, or omit/\"none\" when the item is fully delivered>" }
+DEFERRAL: if the item turns out to be mis-scoped, ship the smallest safe slice and state the remainder in "deferred" — dispatch captures it as a NEW item on the board (intake, not queued) so it is never lost. Leave it out when you delivered the whole item; free-text "notes" is NOT read for this.
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" honestly even when nothing looks risky (say so plainly, e.g. couldBreak: "nothing outside the touched files").
 PORTABILITY: name any OTHER registered targets this change's pattern applies to (or "none") — REQUIRED when the work is ADR-bearing or an incident-fix. The reactor files a sibling item on each named target.
 Do NOT commit this file. It is read by the dispatch gate for attribution and observability.`;
@@ -1898,7 +2000,7 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
     .join('\n\n');
   const batchManifestInstruction = `
 MANIFESTS: Before finishing, for EACH item write MANIFEST-<wi-id>.json at the WORKTREE ROOT (e.g. MANIFEST-${items[0].id}.json). Do NOT commit these files. Dispatch attributes each item's share of the merged diff from its manifest's "filesTouched" — an item with an incomplete or missing "filesTouched" list may not get credited even though its work shipped, so list every file that item actually changed.
-Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "subject": "<optional one-line commit subject for the WHOLE batch — dispatch uses the carrier item's subject verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" } }
+Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "subject": "<optional one-line commit subject for the WHOLE batch — dispatch uses the carrier item's subject verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" }, "deferred": "<optional: outstanding work this item deliberately did NOT ship, or omit when fully delivered — dispatch captures it as a new board item>" }
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.
 PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
@@ -2375,6 +2477,14 @@ async function finalizeTargetBuild(
   }
   const gate = { passed: true, reason: guardOutcome.gateReason };
 
+  // WI-177: read the worker's manifest BEFORE the worktree is removed below — the target lane has
+  // no manifestByItem map (it is the batch lane's), and after `removeWorktree` the file is gone.
+  // Fail-open: an absent/malformed manifest simply defers nothing.
+  let targetDeferred: string | undefined;
+  try {
+    targetDeferred = parseManifest(readFileSync(join(wtPath, `MANIFEST-${rec.id}.json`), 'utf8'))?.deferred;
+  } catch { /* no manifest / unreadable — nothing outstanding to report */ }
+
   // ── Judge verdict (advisory) — persisted here, mirroring the batch lane's pre-merge append ──
   const judgeEvents = judgeVerdictEvents(rec.id, 'dispatch', guardOutcome.judgeVerdict);
   if (judgeEvents.length > 0) await appendEvents(opts.ledgerDir, judgeEvents);
@@ -2422,6 +2532,15 @@ async function finalizeTargetBuild(
     // flag, with the `deployBehindHours` SLO probe as the backstop for a script that never reports.
     makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
   ]);
+  // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
+  // (never queued) against the SAME target the partial slice shipped to.
+  if (targetDeferred) {
+    await captureDeferralChildren(opts.ledgerDir, [{
+      parentId: rec.id, deferred: targetDeferred,
+      ...(rec.target ? { target: rec.target } : {}),
+      ...(rec.targetId ? { targetId: rec.targetId } : {}),
+    }]);
+  }
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
     eventsWritten: 3, detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
@@ -4582,6 +4701,22 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
 
       await appendEvents(opts.ledgerDir, gateEvents);
+
+      // WI-177: a slice that shipped LESS than its item asked for now says so on the board.
+      // Only items that actually reached item.merged in this append qualify — a batch member that
+      // parked (batch-attribution) has no merge to defer a remainder from. Captured, never queued.
+      const mergedHere = new Set(gateEvents.filter(e => e.type === 'item.merged').map(e => e.item));
+      const deferrals: DeferralToCapture[] = [];
+      for (const r of recs) {
+        const m = manifestByItem.get(r.id);
+        if (!mergedHere.has(r.id) || !m?.deferred) continue;
+        deferrals.push({
+          parentId: r.id, deferred: m.deferred,
+          ...(r.target ? { target: r.target } : {}),
+          ...(r.targetId ? { targetId: r.targetId } : {}),
+        });
+      }
+      await captureDeferralChildren(opts.ledgerDir, deferrals);
 
       // Cleanup
       removeWorktree(opts.repoRoot, w.wtPath);

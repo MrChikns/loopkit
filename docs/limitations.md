@@ -69,7 +69,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4226`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4345`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
@@ -88,7 +88,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3025`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3144`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. The conductor claims under the same lock
   (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). What remains is ADR-007's
@@ -110,7 +110,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4412`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4531`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -181,23 +181,30 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **Decomposition happens before a builder runs, and never after.** Routing classifies an oversized
   intent and queues a planning-lane child that splits it; that is the only automatic path into
-  decomposition. A **build** worker has no channel to re-queue work — its toolset grants no capture
-  verb, and while its manifest carries free-text `notes`/`confidence`, only `filesTouched` and the
-  certification ever reach an event. So a worker that discovers mid-build that its item is
-  mis-scoped does the instructed thing: it ships the smallest safe slice and records the deferral in
-  its manifest, where the deferral is **evidence in the run directory, not a queued work item**.
-  *Bounded:* the item still gates and merges normally, and nothing is silently dropped from the
-  ledger — the partial slice is real, proven work. *Matters when:* the deferred remainder is the
-  part you actually cared about. The item closes as `merged` with no trace on the board that
-  anything is outstanding, so the remainder is only recovered if the **operator notices and
-  re-captures it**. Failure paths are covered (bounded auto-requeue of the same spec, then pathology
-  buckets, then a `decision` park), but *successful-but-partial* is not a failure and so triggers
-  none of them. The honest framing: mid-flight re-planning is a capability an in-context
-  orchestrator has and this one trades away for durability — see
+  decomposition. A **build** worker still has no channel to re-*queue* work: its toolset grants no
+  capture verb, and it cannot put anything into the build queue. So a worker that discovers mid-build
+  that its item is mis-scoped does the instructed thing: it ships the smallest safe slice and states
+  the remainder in its manifest. *Bounded:* the item still gates and merges normally, and the partial
+  slice is real, proven work. *Matters when:* the deferred remainder is the part you actually cared
+  about — re-planning it is still an intake round-trip (capture → route → queue), not a mid-flight
+  re-scope, so the remainder lands one beat later and re-earns its priority from scratch rather than
+  continuing in the worker's context. The honest framing: mid-flight re-planning is a capability an
+  in-context orchestrator has and this one trades away for durability — see
   [method](method.md#orchestrator-workers--with-the-orchestrator-as-a-fold-not-a-context-window).
-  Note that the obvious fix — auto-capturing a child item from a declared deferral — would itself be a
-  constrained worker re-scope channel, so the trade is about *how much* re-scope to allow, not whether
-  any is allowed.
+
+- **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
+  a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
+  per merged parent at merge time
+  (`packages/core/src/beats/dispatch.ts:1307`<!--cite:deferralCapture-->), stamped
+  `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
+  and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
+  the reactor's routing decides whether it is real before anything builds. This is deliberately the
+  weakest channel that closes the gap: a worker can put a *proposal* on the board, never a *build* on
+  the queue, which is what keeps the durability trade above intact. *Bounded:* only the structured
+  field is read — free-text `notes` is never parsed, so a worker musing about scope in prose captures
+  nothing. *Matters when:* a worker declines to fill `deferred` at all (nothing is captured, and the
+  old silent-loss shape returns for that build), or when the intake backlog is where items go to be
+  forgotten — capture makes the remainder *visible*, it does not make it *prioritized*.
 
 - **A steered item can display one thing and build another.** An operator reply that re-scopes work
   appends `item.respec`, which amends the item's `spec`

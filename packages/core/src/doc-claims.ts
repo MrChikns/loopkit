@@ -396,6 +396,7 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'runPlanningLane', file: 'dispatch', mustContain: 'export async function runPlanningLane(' },
   { id: 'runTargetLane', file: 'dispatch', mustContain: 'export async function runTargetLane(' },
   { id: 'salvageOnCrash', file: 'dispatch', mustContain: "salvageFn(w.wtPath, rec.id, w.attempt, artifactDir, 'crash'" },
+  { id: 'deferralCapture', file: 'dispatch', mustContain: 'export async function captureDeferralChildren(' },
 
   // reactor
   { id: 'repairItemCapture', file: 'reactor', mustContain: "source: 'reactor:pathology'" },
