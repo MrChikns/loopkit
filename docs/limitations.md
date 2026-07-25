@@ -14,22 +14,30 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 ## Ledger durability & concurrency
 
-- **Append is serialized, not atomic, and a torn line does not stop the fold**
-  (`packages/core/src/ledger.ts:129`<!--cite:ledgerAppendWrite-->). Events are written under a process
-  lock and single-line atomicity leans on `PIPE_BUF` — but that is a *pipe* write guarantee, not a
-  regular-file one. There is **no `fsync`**: the handle is opened, written and closed, so a crash
-  between the write and the filesystem's own flush can leave a partial line. The amplification is on
-  the read side: the loader **skips a corrupt line and continues**
-  (`packages/core/src/ledger.ts:216`<!--cite:ledgerCorruptSkip-->), so a torn write does not halt the
-  fold — it silently folds an incomplete history while every later event still applies. *Bounded:*
-  the lock serializes writers, id-dedupe on load makes re-append idempotent, and the regression guard
-  halts on a shrunk ledger. *Matters when:* a hard crash or full disk lands exactly mid-append. The
-  failure is quiet by design (one skipped line beats a dead plane), which is precisely why it needs
+- **Each line is durable; the transition is not, and a torn line does not stop the fold**
+  (`packages/core/src/ledger.ts:145`<!--cite:ledgerAppendWrite-->). Every append writes and then
+  `fsync`s before closing the handle, so a line that lands is whole and survives a process crash or
+  an OS panic. Two things that barrier does *not* buy. **Not transition atomicity:** a multi-event
+  batch is N separate write-and-sync cycles under one lock, so a crash, kill or `ENOSPC` part-way
+  through leaves the first k events durably on disk and the rest missing — a *durably incomplete*
+  transition, which the reader then folds as though it were the whole truth. No amount of `fsync`
+  makes N writes one; callers must shape a batch so a partial prefix is harmless or re-derivable
+  (commit-the-transition events last, re-appends idempotent). **Not power-loss durability on macOS:**
+  `fsync(2)` there does not flush the drive's own write cache — that needs `F_FULLFSYNC`, which Node
+  does not expose. The amplification is still on the read side: the loader **skips a corrupt line and
+  continues** (`packages/core/src/ledger.ts:252`<!--cite:ledgerCorruptSkip-->), so a torn write does
+  not halt the fold — it silently folds an incomplete history while every later event still applies.
+  *Bounded:* the lock serializes writers and id-dedupe on load makes re-append idempotent. **The
+  shrunk-ledger regression guard is not a mitigation for this** — it compares a segment's max valid id
+  against a stored watermark, so it fires on the loss of *previously observed* history; a line torn
+  during its own append was never observed in an earlier beat, so its loss reads as "no new events
+  yet". *Matters when:* a hard crash or full disk lands exactly mid-batch. The quiet failure is
+  deliberate (one skipped line beats a dead plane), which is precisely why it needs
   saying out loud — recovery is from the local checkpoint refs, and the stderr warning is the only
   signal you get.
 
 - **The ledger lock carries no owner/PID token**
-  (`packages/core/src/ledger.ts:43`<!--cite:ledgerLockAcquire-->). A transaction that holds the lock
+  (`packages/core/src/ledger.ts:45`<!--cite:ledgerLockAcquire-->). A transaction that holds the lock
   longer than the **30**<!--pin:lockTimeoutSeconds--> second staleness window can have it reaped by
   another beat that assumes the holder is dead. *Bounded:* real appends are sub-second; the window is
   generous relative to them. *Matters when:* a pathologically slow append (e.g. under heavy I/O
