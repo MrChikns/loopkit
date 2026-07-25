@@ -37,7 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { loadAllEventsWithQuarantine, appendEvents } from '../ledger.js';
 import { alreadyShippedCommit } from '../reality-check.js';
 import { fold, FoldResult, ItemRecord , isClaimActive, isItemTerminal } from '../fold.js';
-import { makeEvent, resolveAttachmentPaths, ItemQueuedData, LedgerEvent, MERGE_EVIDENCE_FILES_CAP } from '../schema.js';
+import { makeEvent, resolveAttachmentPaths, ItemQueuedData, ItemCapturedData, LedgerEvent, MERGE_EVIDENCE_FILES_CAP } from '../schema.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
@@ -47,7 +47,7 @@ import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
 import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
-import { runClaimAuditGate } from '../acceptance.js';
+import { runClaimAuditGate, preMergeRiskHoldReason, AcceptanceTierClassifyConfig } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
 import { projectTrajectory } from '../trajectory.js';
@@ -418,6 +418,61 @@ export function decideClaimArbitration(
     }
     return { item: id, keep: true };
   });
+}
+
+/**
+ * The claim-before-pick TERMINAL (ADR-007 gap 1 + 2) — the one place the reservation is
+ * actually written. Re-reads and re-folds the ledger *under the ledger lock* (so the read is
+ * newer than the picker's own fold), asks {@link decideClaimArbitration} which candidates
+ * dispatch keeps, and appends `item.claimed` for every survivor in that SAME locked append —
+ * plus `session.started`/`session.heartbeat` for dispatch's per-run pseudo-session, without
+ * which `isClaimActive` would read dispatch's own claims as inactive (gap 2).
+ *
+ * WI-186: shared by BOTH picking lanes. The engineering lane had this terminal from ADR-007;
+ * the target lane read the queue and spawned without reserving anything, so two concurrent
+ * pickers could both select the same targeted item in the read-to-spawn window. Both lanes now
+ * call this factory's closure, so the reservation path can never drift between them.
+ *
+ * The returned function is stateful in exactly one respect: `session.started` is emitted only on
+ * the FIRST claiming append of a beat (subsequent lanes still heartbeat). A beat is one session.
+ *
+ * @internal exported for tests
+ */
+export function makeClaimBeforePick(
+  ledgerDir: string,
+  dispatchSessionId: string,
+  claimTtlMinutes: number,
+): (candidateIds: string[]) => Promise<ClaimArbitrationDecision[]> {
+  let sessionAnnounced = false;
+  return async (candidateIds: string[]) => {
+    if (candidateIds.length === 0) return [];
+    return withLock(ledgerDir, async (tx) => {
+      const freshEvents = await tx.loadAll();
+      const freshResult = fold(freshEvents);
+      const nowMs = Date.now();
+      // Same window a claim stays active (buildTimeout + 5 min): a build.dispatched newer than
+      // this is a live foreign build to yield to; older is a reapable orphan the doctor owns.
+      const decided = decideClaimArbitration(candidateIds, freshResult, dispatchSessionId, nowMs, claimTtlMinutes * 60_000);
+      const kept = decided.filter(d => d.keep);
+      if (kept.length > 0) {
+        const lockEvents: LedgerEvent[] = [
+          ...(sessionAnnounced ? [] : [makeEvent('dispatch', dispatchSessionId, 'session.started', { sessionId: dispatchSessionId, source: 'dispatch' })]),
+          makeEvent('dispatch', dispatchSessionId, 'session.heartbeat', { sessionId: dispatchSessionId }),
+          ...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId: dispatchSessionId, ttlMinutes: claimTtlMinutes })),
+        ];
+        sessionAnnounced = true;
+        await tx.append(lockEvents);
+      }
+      return decided;
+    });
+  };
+}
+
+/** The operator-facing detail for an item this beat yielded rather than built (ADR-007). */
+export function claimYieldDetail(d: ClaimArbitrationDecision): string {
+  return d.foreignBuild
+    ? 'yielded to foreign in-flight build (recent build.dispatched)'
+    : `yielded to attended claim (session ${d.foreignSessionId})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,6 +1189,15 @@ export interface WorkerManifest {
   /** Certify-don't-brief payload (see {@link WorkerCertification}). Optional — absent when the
    *  worker's manifest didn't supply all three fields. */
   certification?: WorkerCertification;
+  /**
+   * WI-177 — STRUCTURED deferral: the remainder of a mis-scoped item that this build deliberately
+   * did NOT ship. A worker that finds its item too big ships the smallest safe slice and states the
+   * outstanding work here. Deliberately its own typed field and NOT parsed out of free-text
+   * `notes`: only a field the worker chose to fill can be trusted to mean "work is outstanding".
+   * At merge, dispatch auto-CAPTURES a child item carrying this text (see
+   * {@link captureDeferralChildren}) — captured, never queued.
+   */
+  deferred?: string;
 }
 
 /**
@@ -1160,10 +1224,28 @@ export function parseManifest(text: string): WorkerManifest | null {
     const rawSubject = typeof raw.subject === 'string' ? raw.subject.split('\n')[0].trim() : '';
     const subject = rawSubject || undefined;
     const certification = parseWorkerCertification(raw.certification);
-    return { wi, filesTouched, testsAdded, confidence, notes, ...(subject ? { subject } : {}), ...(certification ? { certification } : {}) };
+    // WI-177: structured deferral. Present only as a non-empty string; whitespace-only, a
+    // non-string, or the literal placeholder/none forms read as "nothing outstanding" so a worker
+    // echoing the template never mints a phantom child item.
+    const rawDeferred = typeof raw.deferred === 'string' ? raw.deferred.trim() : '';
+    const deferred = rawDeferred && !isEmptyDeferral(rawDeferred) ? rawDeferred : undefined;
+    return { wi, filesTouched, testsAdded, confidence, notes, ...(subject ? { subject } : {}), ...(certification ? { certification } : {}), ...(deferred ? { deferred } : {}) };
   } catch {
     return null;
   }
+}
+
+/**
+ * WI-177 — the "nothing was deferred" vocabulary. `deferred` is a field a worker fills only when
+ * work is genuinely outstanding, but the prompt shows it a template, so the honest negative answers
+ * ("none", "n/a", the placeholder itself) must read as absent rather than mint a child item that
+ * says nothing. Anything else is taken at face value — this is not a content filter.
+ */
+function isEmptyDeferral(text: string): boolean {
+  const t = text.toLowerCase().replace(/[.\s]+$/, '').trim();
+  if (t === 'none' || t === 'n/a' || t === 'na' || t === 'nothing' || t === 'nothing deferred' || t === '-') return true;
+  // The prompt's own placeholder, echoed back unfilled.
+  return t.startsWith('<') && t.endsWith('>');
 }
 
 /** All-or-nothing extraction of the manifest's optional certification block — a shape with
@@ -1179,6 +1261,80 @@ function parseWorkerCertification(raw: unknown): WorkerCertification | undefined
   // as a non-empty string, drop it otherwise (never a partially-filled block).
   const portability = typeof r['portability'] === 'string' && r['portability'].trim() ? r['portability'] : undefined;
   return { couldBreak, detection, rollback, ...(portability ? { portability } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// WI-177 — successful-but-partial delivery reaches the board
+// ---------------------------------------------------------------------------
+
+/** One merged item's declared remainder, ready to become a captured child. */
+export interface DeferralToCapture {
+  /** The item that merged the partial slice. */
+  parentId: string;
+  /** The worker's structured `deferred` text (already trimmed + emptiness-filtered). */
+  deferred: string;
+  /** The parent's target name, inherited so the remainder builds where the parent did. */
+  target?: string;
+  /** The parent's opaque target id, inherited alongside the name (survives a rename). */
+  targetId?: string;
+}
+
+/** The once-per-parent idempotency stamp carried on a deferral child's `source`. */
+export function deferralSourceStamp(parentId: string): string {
+  return `deferral:${parentId}`;
+}
+
+/**
+ * WI-177 — a build that shipped a smaller slice than its item asked for must leave a trace on the
+ * BOARD, not only in its run directory. Before this, a worker's deferral lived in the manifest's
+ * free-text `notes`; only `filesTouched` and `certification` ever reached an event, so the item
+ * closed `merged` with nothing saying work was outstanding and the remainder survived only if the
+ * operator happened to read the manifest. Failure paths are well covered; successful-but-partial
+ * is not a failure, so it triggered none of them.
+ *
+ * Each parent gets ONE child, `item.captured` and nothing else. **Captured, never queued** — the
+ * child lands in exactly the intake the operator's own intents land in, and a human (or the
+ * reactor's routing) decides whether it is real work. That is what keeps this from becoming an
+ * unsupervised worker re-scope channel: a worker can put a *proposal* on the board, it can never
+ * put a *build* on the queue.
+ *
+ * Race-safe and idempotent by the same rule the reactor's portability promotion uses: allocate WI
+ * ids from a fresh fold under the ledger lock, and skip a parent that already has a child stamped
+ * `deferral:<parentId>`.
+ *
+ * @returns the ids of the children captured this call (empty when there was nothing to capture).
+ */
+export async function captureDeferralChildren(
+  ledgerDir: string,
+  deferrals: DeferralToCapture[],
+): Promise<string[]> {
+  if (deferrals.length === 0) return [];
+  return withLock(ledgerDir, async (tx) => {
+    const freshResult = fold(await tx.loadAll());
+    const alreadyCaptured = new Set<string>();
+    for (const rec of freshResult.items.values()) {
+      if (rec.source && rec.source.startsWith('deferral:')) alreadyCaptured.add(rec.source);
+    }
+    let nextNum = freshResult.maxWiNum;
+    const events: LedgerEvent[] = [];
+    const childIds: string[] = [];
+    for (const d of deferrals) {
+      const stamp = deferralSourceStamp(d.parentId);
+      if (alreadyCaptured.has(stamp)) continue;
+      alreadyCaptured.add(stamp);
+      nextNum += 1;
+      const childId = `WI-${String(nextNum).padStart(3, '0')}`;
+      events.push(makeEvent('dispatch', childId, 'item.captured', {
+        source: stamp,
+        text: `Remainder deferred by ${d.parentId} (shipped a partial slice): ${d.deferred}`,
+        ...(d.target ? { target: d.target } : {}),
+        ...(d.targetId ? { targetId: d.targetId } : {}),
+      } as ItemCapturedData));
+      childIds.push(childId);
+    }
+    if (events.length > 0) await tx.append(events);
+    return childIds;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,6 +1611,13 @@ export interface PostBuildGuardConfig {
   spineCheck: boolean;
   judge: boolean;
   gateWrapper: 'runLaneGate' | 'runGate';
+  /**
+   * WI-180 pre-merge risk hold — the boundaries to classify this lane's pre-merge diff against.
+   * **ABSENT = the check does not run at all** (the default everywhere, since the config flag is
+   * default-off), which is what makes "off ⇒ byte-identical" true by construction rather than by
+   * a branch inside the classifier.
+   */
+  preMergeRisk?: AcceptanceTierClassifyConfig;
 }
 
 /** The judge stage's result, returned to the caller so IT can append `review.verdict` +
@@ -1478,6 +1641,9 @@ export type PostBuildGuardOutcome =
   | { kind: 'dirty-worktree'; reason: string }
   | { kind: 'touches-overstep'; reason: string; files: string[] }
   | { kind: 'spine'; reason: string; files: string[] }
+  /** WI-180: the pre-merge diff hit a `must`-tier risk class. Parks, never fails — see
+   *  {@link PostBuildGuardConfig}.preMergeRisk. Only reachable when that config is present. */
+  | { kind: 'risk-tier'; reason: string; files: string[] }
   | { kind: 'gate-red'; reason: string; output: string }
   | {
       kind: 'passed'; headSha: string; changedFiles: string[]; gateReason: string;
@@ -1611,6 +1777,21 @@ export async function runPostBuildGuards(
     }
   }
 
+  // ── WI-180 pre-merge risk hold (config-gated, absent by default) ──────────
+  // Placed with the other BOUNDARY guards (before the gate), not with the gate outcome: this is
+  // "should this be allowed to land", the same question spine and Touches-overstep ask, and it
+  // parks the same way — branch and worktree kept, unpark merges normally.
+  if (config.preMergeRisk) {
+    const holdReason = preMergeRiskHoldReason(changedFiles, config.preMergeRisk);
+    if (holdReason) {
+      return {
+        kind: 'risk-tier',
+        reason: holdReason,
+        files: changedFiles.filter(f => config.preMergeRisk!.riskPatterns.some(p => f.includes(p))),
+      };
+    }
+  }
+
   // ── Gate ──────────────────────────────────────────────────────────────────
   if (config.gateWrapper === 'runLaneGate' && !ctx.cfg) {
     throw new Error('runPostBuildGuards: gateWrapper "runLaneGate" requires ctx.cfg + ctx.gateId');
@@ -1732,7 +1913,8 @@ export function parseBrief(text: string): string {
  * Exported for testing. */
 export const MANIFEST_INSTRUCTION = `
 MANIFEST: Before finishing, write MANIFEST-<wi-id>.json at the WORKTREE ROOT (not committed) with:
-{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "subject": "<optional one-line commit subject — dispatch commits your work and uses this verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" } }
+{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "subject": "<optional one-line commit subject — dispatch commits your work and uses this verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" }, "deferred": "<optional: the outstanding work you deliberately did NOT ship, or omit/\"none\" when the item is fully delivered>" }
+DEFERRAL: if the item turns out to be mis-scoped, ship the smallest safe slice and state the remainder in "deferred" — dispatch captures it as a NEW item on the board (intake, not queued) so it is never lost. Leave it out when you delivered the whole item; free-text "notes" is NOT read for this.
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" honestly even when nothing looks risky (say so plainly, e.g. couldBreak: "nothing outside the touched files").
 PORTABILITY: name any OTHER registered targets this change's pattern applies to (or "none") — REQUIRED when the work is ADR-bearing or an incident-fix. The reactor files a sibling item on each named target.
 Do NOT commit this file. It is read by the dispatch gate for attribution and observability.`;
@@ -1843,7 +2025,7 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
     .join('\n\n');
   const batchManifestInstruction = `
 MANIFESTS: Before finishing, for EACH item write MANIFEST-<wi-id>.json at the WORKTREE ROOT (e.g. MANIFEST-${items[0].id}.json). Do NOT commit these files. Dispatch attributes each item's share of the merged diff from its manifest's "filesTouched" — an item with an incomplete or missing "filesTouched" list may not get credited even though its work shipped, so list every file that item actually changed.
-Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "subject": "<optional one-line commit subject for the WHOLE batch — dispatch uses the carrier item's subject verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" } }
+Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "subject": "<optional one-line commit subject for the WHOLE batch — dispatch uses the carrier item's subject verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" }, "deferred": "<optional: outstanding work this item deliberately did NOT ship, or omit when fully delivered — dispatch captures it as a new board item>" }
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.
 PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
@@ -2290,6 +2472,18 @@ async function finalizeTargetBuild(
     spineCheck: false,
     judge: opts.config?.judge?.enabled ?? true,
     gateWrapper: 'runGate',
+    // WI-180: classify against the TARGET's own declared boundaries (its manifest), never the
+    // plane's — same rule the reactor's post-merge tiering uses for a targeted item. Absent
+    // (⇒ check skipped entirely) unless the flag is explicitly on.
+    ...(opts.config?.preMergeRiskHold?.enabled
+      ? {
+        preMergeRisk: {
+          surfacePrefixes: manifest.boundaries.surfacePrefixes,
+          planePrefixes: manifest.boundaries.planePrefixes,
+          riskPatterns: manifest.boundaries.escalationPatterns,
+        },
+      }
+      : {}),
   });
 
   if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
@@ -2301,7 +2495,7 @@ async function finalizeTargetBuild(
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
   }
-  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine') {
+  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine' || guardOutcome.kind === 'risk-tier') {
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.parked', { reason: guardOutcome.kind }),
@@ -2319,6 +2513,14 @@ async function finalizeTargetBuild(
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: guardOutcome.reason };
   }
   const gate = { passed: true, reason: guardOutcome.gateReason };
+
+  // WI-177: read the worker's manifest BEFORE the worktree is removed below — the target lane has
+  // no manifestByItem map (it is the batch lane's), and after `removeWorktree` the file is gone.
+  // Fail-open: an absent/malformed manifest simply defers nothing.
+  let targetDeferred: string | undefined;
+  try {
+    targetDeferred = parseManifest(readFileSync(join(wtPath, `MANIFEST-${rec.id}.json`), 'utf8'))?.deferred;
+  } catch { /* no manifest / unreadable — nothing outstanding to report */ }
 
   // ── Judge verdict (advisory) — persisted here, mirroring the batch lane's pre-merge append ──
   const judgeEvents = judgeVerdictEvents(rec.id, 'dispatch', guardOutcome.judgeVerdict);
@@ -2367,6 +2569,15 @@ async function finalizeTargetBuild(
     // flag, with the `deployBehindHours` SLO probe as the backstop for a script that never reports.
     makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
   ]);
+  // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
+  // (never queued) against the SAME target the partial slice shipped to.
+  if (targetDeferred) {
+    await captureDeferralChildren(opts.ledgerDir, [{
+      parentId: rec.id, deferred: targetDeferred,
+      ...(rec.target ? { target: rec.target } : {}),
+      ...(rec.targetId ? { targetId: rec.targetId } : {}),
+    }]);
+  }
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
     eventsWritten: 3, detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
@@ -3032,7 +3243,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // (runTargetLane) against their target repo — never the plane's batch/worktree machinery.
     // Split them out BEFORE grouping so the legacy engineering path and its existing test
     // suite are byte-for-byte unchanged: with no targets registered, targetedQueued is always empty.
-    const targetedQueued = queued.filter(r => r.lane !== 'planning' && r.target);
+    let targetedQueued = queued.filter(r => r.lane !== 'planning' && r.target);
     const engineeringQueued = queued.filter(r => r.lane !== 'planning' && !r.target);
 
     // Collect in-flight touches (building items). A planning build never writes a file, so
@@ -3172,6 +3383,14 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     const mergedWiIds: string[] = [];
     const allNewEvents: ReturnType<typeof makeEvent>[] = [];
 
+    // ── ADR-007 claim-before-pick: ONE per-beat pseudo-session, ONE reservation terminal ──
+    // Minted here (above BOTH picking lanes) rather than inside the engineering block: the
+    // target lane spawns first, so it must reserve under the same identity — a per-run, not
+    // permanent-shared, identity so a crashed beat's claims expire cleanly by the dead-man rule.
+    const dispatchSessionId = opts.dispatchSessionId ?? mintSessionId();
+    const claimTtlMinutes = cfg.buildTimeoutMinutes + 5;
+    const claimBeforePick = makeClaimBeforePick(opts.ledgerDir, dispatchSessionId, claimTtlMinutes);
+
     // Dispatch the planning lane first — it touches no git state, so it runs
     // ahead of (and independent of) the engineering worktree/merge machinery below.
     if (planningQueued.length > 0) {
@@ -3198,6 +3417,24 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // computed WAY above (right after the collection re-fold) precisely so the spawn gates between
     // there and here fall through for it instead of returning (WI-178) — moving it back down here
     // would restore the stranding bug.
+    //
+    // WI-186: the target lane picks under the SAME claim-before-pick terminal the engineering
+    // lane uses (ADR-007 gap 1). Before it reserves nothing and spawned straight off the picker's
+    // fold, so an attended drain and a beat (or two beats) could both select the same targeted
+    // item in the read-to-spawn window. Yielded items drop out of the lane's item list; the lane
+    // still RUNS when a detached build needs collecting, because collection finalizes work that
+    // is already this lane's (build.dispatched consumed its claim) — never a fresh pick.
+    if (!opts.dryRun && targetedQueued.length > 0) {
+      const decisions = await claimBeforePick(targetedQueued.map(r => r.id));
+      const yieldedIds = new Set(decisions.filter(d => !d.keep).map(d => d.item));
+      if (yieldedIds.size > 0) {
+        for (const d of decisions) {
+          if (d.keep) continue;
+          results.push({ item: d.item, dispatched: false, eventsWritten: 0, detail: claimYieldDetail(d) });
+        }
+        targetedQueued = targetedQueued.filter(r => !yieldedIds.has(r.id));
+      }
+    }
     if (targetedQueued.length > 0 || hasDetachedTargetBuild) {
       results.push(...await runTargetLane(opts, cfg, provider, foldResult, targetedQueued, runDir, registry));
     }
@@ -3241,39 +3478,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // item a foreign session claimed in the meantime, and claim every surviving item in the
     // same locked append before spawning anything. Dry-run never writes claims (opts.dryRun).
     if (!opts.dryRun && groups.length > 0) {
-      const candidateIds = groups.flatMap(g => g.map(r => r.id));
-      const dispatchSessionId = opts.dispatchSessionId ?? mintSessionId();
-      const claimTtlMinutes = cfg.buildTimeoutMinutes + 5;
-      const decisions = await withLock(opts.ledgerDir, async (tx) => {
-        const freshEvents = await tx.loadAll();
-        const freshResult = fold(freshEvents);
-        const nowMs = Date.now();
-        // Same window a claim stays active (buildTimeout + 5 min): a build.dispatched newer than
-        // this is a live foreign build to yield to; older is a reapable orphan the doctor owns.
-        const decided = decideClaimArbitration(candidateIds, freshResult, dispatchSessionId, nowMs, claimTtlMinutes * 60_000);
-        const kept = decided.filter(d => d.keep);
-        if (kept.length > 0) {
-          const lockEvents: LedgerEvent[] = [
-            makeEvent('dispatch', dispatchSessionId, 'session.started', { sessionId: dispatchSessionId, source: 'dispatch' }),
-            makeEvent('dispatch', dispatchSessionId, 'session.heartbeat', { sessionId: dispatchSessionId }),
-            ...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId: dispatchSessionId, ttlMinutes: claimTtlMinutes })),
-          ];
-          await tx.append(lockEvents);
-        }
-        return decided;
-      });
+      const decisions = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));
       const yieldedIds = new Set(decisions.filter(d => !d.keep).map(d => d.item));
       if (yieldedIds.size > 0) {
         for (const d of decisions) {
           if (d.keep) continue;
-          results.push({
-            item: d.item,
-            dispatched: false,
-            eventsWritten: 0,
-            detail: d.foreignBuild
-              ? 'yielded to foreign in-flight build (recent build.dispatched)'
-              : `yielded to attended claim (session ${d.foreignSessionId})`,
-          });
+          results.push({ item: d.item, dispatched: false, eventsWritten: 0, detail: claimYieldDetail(d) });
         }
         // Drop yielded items from their groups; drop any group left empty.
         for (let i = groups.length - 1; i >= 0; i--) {
@@ -4103,6 +4313,31 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         continue;
       }
 
+      // WI-180 pre-merge risk hold (config-gated, default OFF — with the flag off nothing below
+      // runs and this lane is byte-identical to before). Sits with the other boundary guards, one
+      // step after spine: same question ("should this be allowed to land"), same park shape —
+      // branch kept for review, worktree dropped, unpark merges normally on the next attempt.
+      if (cfg.preMergeRiskHold?.enabled) {
+        const holdReason = preMergeRiskHoldReason(changedFiles, {
+          surfacePrefixes: cfg.acceptance?.tiers?.surfacePrefixes ?? [],
+          planePrefixes: cfg.autoApprove.planePrefixes,
+          riskPatterns: cfg.autoApprove.escalationPatterns,
+        });
+        if (holdReason) {
+          gateEvents = forItems(id => [
+            makeEvent('dispatch', id, 'gate.parked', { reason: 'risk-tier' }),
+            makeEvent('dispatch', id, 'item.parked', { reason: holdReason, parkKind: 'decision' }),
+          ]);
+          await appendEvents(opts.ledgerDir, gateEvents);
+          removeWorktree(opts.repoRoot, w.wtPath);   // branch kept for review, as with spine
+          results.push({
+            item: rec.id, dispatched: true, branch: w.branch,
+            gateOutcome: 'parked-spine', eventsWritten: gateEvents.length, detail: holdReason,
+          });
+          continue;
+        }
+      }
+
       // Run gate (use injected result if provided) — the item's delivery lane picks the
       // definition-of-done: engineering keeps `npm test`, other lanes divert.
       const gateId = resolveGateId(cfg, rec.lane);
@@ -4528,6 +4763,22 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
 
       await appendEvents(opts.ledgerDir, gateEvents);
+
+      // WI-177: a slice that shipped LESS than its item asked for now says so on the board.
+      // Only items that actually reached item.merged in this append qualify — a batch member that
+      // parked (batch-attribution) has no merge to defer a remainder from. Captured, never queued.
+      const mergedHere = new Set(gateEvents.filter(e => e.type === 'item.merged').map(e => e.item));
+      const deferrals: DeferralToCapture[] = [];
+      for (const r of recs) {
+        const m = manifestByItem.get(r.id);
+        if (!mergedHere.has(r.id) || !m?.deferred) continue;
+        deferrals.push({
+          parentId: r.id, deferred: m.deferred,
+          ...(r.target ? { target: r.target } : {}),
+          ...(r.targetId ? { targetId: r.targetId } : {}),
+        });
+      }
+      await captureDeferralChildren(opts.ledgerDir, deferrals);
 
       // Cleanup
       removeWorktree(opts.repoRoot, w.wtPath);

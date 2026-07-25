@@ -421,6 +421,28 @@ export interface LoopkitConfig {
   };
 
   /**
+   * WI-180 — pre-merge risk hold. **Default OFF, and default-off is load-bearing: with
+   * `enabled: false` (or the block absent) behaviour is byte-identical to not having this
+   * feature at all** — no classifier call, no extra event, no changed park.
+   *
+   * When on, each build lane re-runs the SAME acceptance tier classifier
+   * (`preMergeRiskHoldReason`) against its PRE-merge diff and, if it returns `must` (a
+   * `autoApprove.escalationPatterns` hit — money/auth/migrations), **parks** the item for the
+   * operator instead of merging. It never fails the build: the branch and worktree survive
+   * exactly as a spine park's do, and unparking merges normally on the next attempt.
+   *
+   * This is explicitly **not** an authorization model. There is no identity, no approval event
+   * and no RBAC here — a red-team rejected framing unattended merges as "unauthorized" on a
+   * single-operator plane, where operator intent plus configured autonomy IS the authorization.
+   * All this adds is: the risk classes acceptance already treats as `must` get *evaluated before*
+   * landing rather than only reported after.
+   */
+  preMergeRiskHold?: {
+    /** Default: false. */
+    enabled?: boolean;
+  };
+
+  /**
    * Provisional acceptance.
    * The reactor auto-accepts plane-only slices after a quiet-window when the
    * evidence ladder passes (judge pass + SLO green + no operator msg.in after merge).
@@ -809,6 +831,9 @@ const DEFAULTS: LoopkitConfig = {
   deployCommand: '',  // off by default; a deployment sets its own deploy-on-merge script
   dispatchKickLabel: '',  // off by default; a deployment sets the dispatch launchd label in loopkit.config.json
   mergeGateTimeoutMs: 10 * 60 * 1000,  // 10 min; raise if beat-load contention causes timeouts
+  // WI-180: staged OFF — the rollback is the default. Flipping this on is a deliberate,
+  // separate decision; while it is off the lanes never call the classifier.
+  preMergeRiskHold: { enabled: false },
   acceptance: {
     provisional: {
       enabled: true,
@@ -964,6 +989,12 @@ export function loadConfig(repoRoot: string): LoopkitConfig {
     mergeGateTimeoutMs: raw.mergeGateTimeoutMs ?? DEFAULTS.mergeGateTimeoutMs,
     slo: { ...DEFAULTS.slo, ...((raw as Partial<LoopkitConfig>).slo ?? {}) },
     budget: (raw as Partial<LoopkitConfig>).budget,
+    // WI-180: plain spread merge (same shape as `pathology`) — one boolean, fail-safe: a
+    // malformed override degrades to the OFF default rather than hard-failing config load.
+    preMergeRiskHold: {
+      ...(DEFAULTS.preMergeRiskHold as Required<NonNullable<LoopkitConfig['preMergeRiskHold']>>),
+      ...((raw as Partial<LoopkitConfig>).preMergeRiskHold ?? {}),
+    },
     acceptance: mergeAcceptance((raw as Partial<LoopkitConfig>).acceptance, DEFAULTS.acceptance as NonNullable<LoopkitConfig['acceptance']>),
     scout: mergeScout(raw.scout, DEFAULTS.scout as Required<NonNullable<LoopkitConfig['scout']>>),
     judge: mergeJudge(raw.judge, DEFAULTS.judge as Required<NonNullable<LoopkitConfig['judge']>>),

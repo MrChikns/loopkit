@@ -69,7 +69,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4172`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4407`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
@@ -78,7 +78,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:824`<!--cite:openBuildWorktreeHead-->; the conductor's call at
+  (`packages/core/src/beats/dispatch.ts:879`<!--cite:openBuildWorktreeHead-->; the conductor's call at
   `packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
@@ -86,15 +86,18 @@ cited three lines that had drifted, and one gap that had since been fixed.
   guard that defers when the checkout is not on `master` — and now passes it explicitly rather than
   by omission.
 
-- **Claim-before-pick is narrower than it looks in the target lane.** The engineering lane closes the
-  read-to-spawn race properly: re-fold under the ledger lock, drop what a foreign session took, claim
-  every survivor in the same locked append. The shared pick list only *defers* to an already-active
-  claim (`packages/core/src/beats/dispatch.ts:2970`<!--cite:queuedClaimDeference-->), which is a read, not
-  a reservation — and the target lane never appends a claim of its own. The conductor does claim, under
-  the same lock (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). *Bounded:* single
-  host, one dispatch beat, so the racing writer has to be an attended session starting in a
-  sub-second window. *Matters when:* you drain from the CLI at the moment a beat is picking a targeted
-  item — both can proceed.
+- **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
+  *reserves* what it takes: the shared pick list defers to an already-active claim
+  (`packages/core/src/beats/dispatch.ts:3181`<!--cite:queuedClaimDeference-->), which is a read, and both
+  dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
+  their own `item.claimed` for every survivor before spawning. The conductor claims under the same lock
+  (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). What remains is ADR-007's
+  *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
+  is fresh, so a genuinely-live operator whose heartbeat lagged past the bound reads inactive and a beat
+  may take the item. *Bounded:* the reap age is derived from the build-timeout envelope and the common
+  case is never a contest. *Matters when:* an attended session is suspended or starved long enough to
+  miss its heartbeats — detection is a `build.dispatched` sitting next to a recent operator
+  `item.claimed` in the same item's trail.
 
 - **`lane-matrix.md` does not track either of the invariants that actually differ between lanes.** The
   generated guard matrix pins `Touches`-overstep, spine, judge, scout, push, commit side and the gate
@@ -107,7 +110,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4358`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4593`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -165,36 +168,54 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 ## Acceptance tiering tells you, it does not authorize
 
-- **Tier is computed after the merge, from the real diff.** Nothing about tiering gates what is allowed
-  to land — it decides what reaches your desk and how long the plane waits before closing the item
-  itself. *Bounded:* for a single-operator plane this is coherent, because your intent plus the
-  autonomy you configured *is* the authorization; the diff-based classification and the judge floor
-  then make sure the riskiest merges are the ones you are actually shown. *Matters when:* you arrive
-  from a change-managed environment and read "review tier" as an approval gate. It is a notification
-  policy. If you need approval-before-merge, the honest answer today is to park the item rather than
+- **Tier is computed after the merge, from the real diff.** Tiering decides what reaches your desk and
+  how long the plane waits before closing the item itself; it is a **notification policy, not an
+  authorization model**. *Bounded:* for a single-operator plane this is coherent, because your intent
+  plus the autonomy you configured *is* the authorization; the diff-based classification and the judge
+  floor then make sure the riskiest merges are the ones you are actually shown. *Matters when:* you
+  arrive from a change-managed environment and read "review tier" as an approval gate.
+
+- **One narrow pre-merge read exists, and it is off by default (WI-180).** `preMergeRiskHold.enabled`
+  re-runs the same tier classifier over the **pre-merge** diff and **parks** (never fails) an item
+  whose paths hit a `must`-tier risk class — `autoApprove.escalationPatterns`, i.e. money/auth/
+  migrations. It is deliberately the whole feature: there is still **no identity, no approval event
+  and no RBAC**, and framing an unattended merge as "unauthorized" on a single-operator plane was
+  explicitly rejected. *Bounded:* default OFF, so behaviour is unchanged unless you turn it on; it
+  reads paths only (the judge is advisory and runs later, so a judge fail is not a landing-risk
+  class); and the conductor applies it to plane clusters only, since a targeted cluster's boundaries
+  live in a manifest that attended path does not read. *Matters when:* you expect it to be an
+  approval gate — it is a *pattern* hold. A risk change whose paths match nothing you listed still
+  lands, and the honest answer for real approval-before-merge is still to park the item rather than
   queue it.
 
 ## Re-planning is intake-only (a running build worker cannot re-scope its item)
 
 - **Decomposition happens before a builder runs, and never after.** Routing classifies an oversized
   intent and queues a planning-lane child that splits it; that is the only automatic path into
-  decomposition. A **build** worker has no channel to re-queue work — its toolset grants no capture
-  verb, and while its manifest carries free-text `notes`/`confidence`, only `filesTouched` and the
-  certification ever reach an event. So a worker that discovers mid-build that its item is
-  mis-scoped does the instructed thing: it ships the smallest safe slice and records the deferral in
-  its manifest, where the deferral is **evidence in the run directory, not a queued work item**.
-  *Bounded:* the item still gates and merges normally, and nothing is silently dropped from the
-  ledger — the partial slice is real, proven work. *Matters when:* the deferred remainder is the
-  part you actually cared about. The item closes as `merged` with no trace on the board that
-  anything is outstanding, so the remainder is only recovered if the **operator notices and
-  re-captures it**. Failure paths are covered (bounded auto-requeue of the same spec, then pathology
-  buckets, then a `decision` park), but *successful-but-partial* is not a failure and so triggers
-  none of them. The honest framing: mid-flight re-planning is a capability an in-context
-  orchestrator has and this one trades away for durability — see
+  decomposition. A **build** worker still has no channel to re-*queue* work: its toolset grants no
+  capture verb, and it cannot put anything into the build queue. So a worker that discovers mid-build
+  that its item is mis-scoped does the instructed thing: it ships the smallest safe slice and states
+  the remainder in its manifest. *Bounded:* the item still gates and merges normally, and the partial
+  slice is real, proven work. *Matters when:* the deferred remainder is the part you actually cared
+  about — re-planning it is still an intake round-trip (capture → route → queue), not a mid-flight
+  re-scope, so the remainder lands one beat later and re-earns its priority from scratch rather than
+  continuing in the worker's context. The honest framing: mid-flight re-planning is a capability an
+  in-context orchestrator has and this one trades away for durability — see
   [method](method.md#orchestrator-workers--with-the-orchestrator-as-a-fold-not-a-context-window).
-  Note that the obvious fix — auto-capturing a child item from a declared deferral — would itself be a
-  constrained worker re-scope channel, so the trade is about *how much* re-scope to allow, not whether
-  any is allowed.
+
+- **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
+  a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
+  per merged parent at merge time
+  (`packages/core/src/beats/dispatch.ts:1307`<!--cite:deferralCapture-->), stamped
+  `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
+  and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
+  the reactor's routing decides whether it is real before anything builds. This is deliberately the
+  weakest channel that closes the gap: a worker can put a *proposal* on the board, never a *build* on
+  the queue, which is what keeps the durability trade above intact. *Bounded:* only the structured
+  field is read — free-text `notes` is never parsed, so a worker musing about scope in prose captures
+  nothing. *Matters when:* a worker declines to fill `deferred` at all (nothing is captured, and the
+  old silent-loss shape returns for that build), or when the intake backlog is where items go to be
+  forgotten — capture makes the remainder *visible*, it does not make it *prioritized*.
 
 - **A steered item can display one thing and build another.** An operator reply that re-scopes work
   appends `item.respec`, which amends the item's `spec`
