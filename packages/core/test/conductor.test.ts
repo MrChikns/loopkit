@@ -183,7 +183,18 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
     const provider: LlmProvider = {
       name: 'fake',
       async run(req: ProviderRequest): Promise<ProviderResult> {
-        const cwd = req.cwd!;
+        if (!req.cwd) {
+          // Judge call (runJudge always sends { tools: [], no cwd } — see judge.ts). This test
+          // doesn't assert on review.verdict, but WI-171: an earlier version of this fake
+          // dereferenced req.cwd! unconditionally here too, throwing TypeError
+          // [ERR_INVALID_ARG_TYPE] on the judge call, silently swallowed by
+          // runPostBuildGuards' fail-open try/catch. Handle it explicitly instead.
+          return {
+            ok: true,
+            text: 'VERDICT: pass\nCONFIDENCE: 0.9\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- fake judge stub: default pass',
+          };
+        }
+        const cwd = req.cwd;
         assert.ok(existsSync(join(cwd, 'src', 'notes.js')), 'worker cwd must be a worktree of the target repo');
         assert.ok(req.tools?.includes('Edit') && req.tools?.includes('Write'),
           'conduct build request must carry the builder tool allowlist');
