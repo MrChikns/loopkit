@@ -567,7 +567,7 @@ export function renderStatusStrip(result: FoldResult, events: LedgerEvent[], now
   // (planeMode), so it flips the instant a session starts/ends or its heartbeat goes stale.
   const mode = planeMode(result.sessions, now.getTime());
   const modeBadge = mode === 'attended'
-    ? `<span class="statusstrip__mode statusstrip__mode--attended" title="An operator session is live — CLI intents are picked up and built immediately by the attended session, not the background beats.>● Attended · session</span>`
+    ? `<span class="statusstrip__mode statusstrip__mode--attended" title="An operator session is live — CLI intents are picked up and built immediately by the attended session, not the background beats.">● Attended · session</span>`
     : `<span class="statusstrip__mode statusstrip__mode--away" title="No live operator session — the background reactor/dispatch beats handle the queue autonomously.">○ Away · beats</span>`;
   return `${modeBadge}${items}${lastEvent}`;
 }

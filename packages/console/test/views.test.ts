@@ -13,6 +13,7 @@ import type { LedgerEvent } from '@loopkit/core';
 
 import {
   renderMissions,
+  renderStatusStrip,
   renderItemTimeline,
   renderAcceptance,
   renderSystem,
@@ -1204,5 +1205,47 @@ test('renderSystem: provenance footer carries this page\'s event count and CLI e
   assert.match(html, new RegExp(`${events.length} ledger event\\(s\\)`));
   assert.match(html, /5 work item\(s\)/);
   assert.match(html, /loopctl doctor/);
+});
+
+
+/**
+ * The execution-mode pill is a hand-built HTML string with a long `title=` attribute, and the
+ * WI-194 conductor→router rename dropped its closing quote — the browser then parsed
+ * `>● Attended · session</span>` INTO the attribute value and the pill rendered empty. Nothing
+ * caught it: no test touched `statusstrip__mode`, and an unterminated attribute is still valid
+ * JavaScript, so `tsc` was green. Caught by a human reading the diff at the public-push gate.
+ *
+ * These assert the property that was violated (every attribute is closed, and the label survives
+ * as TEXT rather than being swallowed) rather than the exact prose, so a future copy edit does not
+ * fail them while a future unterminated quote does.
+ */
+test('status strip: the execution-mode pill closes its title attribute (both modes)', () => {
+  const now = new Date('2026-07-25T12:00:00Z');
+  // BOTH branches must be exercised. An earlier draft of this test used only the shared fixtures,
+  // which both fold to planeMode 'away' — so it PASSED with the attended branch's bug reintroduced.
+  // A live session (started, never ended, fresh heartbeat) is what flips planeMode to 'attended'.
+  const attendedEvents: LedgerEvent[] = [
+    ...sampleLedger(),
+    makeEvent('cli', 'system', 'session.started', { sessionId: 'ses-mode-test' }, '2026-07-25T11:58:00Z'),
+    makeEvent('cli', 'system', 'session.heartbeat', { sessionId: 'ses-mode-test' }, '2026-07-25T11:59:30Z'),
+  ];
+  const cases: Array<[string, LedgerEvent[]]> = [['away', sampleLedger()], ['attended', attendedEvents]];
+  const seen = new Set<string>();
+  for (const [label, evs] of cases) {
+    const result = fold(evs);
+    const html = renderStatusStrip(result, evs, now);
+    const modeSpan = /<span class="statusstrip__mode[^>]*>/.exec(html);
+    assert.ok(modeSpan, `${label}: expected a mode pill in the status strip`);
+    // Every double quote in the opening tag must pair up; an unterminated title= leaves an odd count.
+    const quotes = (modeSpan[0].match(/"/g) ?? []).length;
+    assert.equal(quotes % 2, 0, `${label}: unterminated attribute in mode pill: ${modeSpan[0].slice(0, 160)}`);
+    // And the visible label must survive as TEXT, not be swallowed into an attribute value.
+    const shown = /statusstrip__mode[^>]*>([●○]\s*(?:Attended|Away)[^<]*)</.exec(html);
+    assert.ok(shown, `${label}: mode pill label was swallowed into an attribute`);
+    seen.add(label === 'attended' ? 'Attended' : 'Away');
+  }
+  // Guard the guard: if a future fixture change stops producing both modes, this test silently
+  // stops covering the branch that actually regressed. Fail loudly instead.
+  assert.deepEqual([...seen].sort(), ['Attended', 'Away'], 'both plane modes must be exercised');
 });
 
