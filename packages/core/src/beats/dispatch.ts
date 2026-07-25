@@ -42,7 +42,7 @@ import { loadConfig, LoopkitConfig } from '../config.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
 import { parseOutput, extractUsage } from '../providers/claudeCli.js';
-import { readExitFile } from '../exitfile.js';
+import { readExitFile, ExitRecord } from '../exitfile.js';
 import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
@@ -790,6 +790,67 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
     try { rmSync(wtPath, { recursive: true, force: true }); } catch { /* best-effort */ }
     spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, stdio: 'pipe' });
   }
+}
+
+/**
+ * WI-172: the git sequence shared by all three worktree-creation call sites (dispatch's target
+ * lane, dispatch's batch lane, conductor's cluster lane) — drop any stale worktree/branch of the
+ * SAME name, `worktree add -b`, then provision deps. ONLY the git sequence: each caller keeps its
+ * own park-on-failure event shape (they differ deliberately — a batch-lane park writes N events
+ * for a co-located group, a conductor park returns an `outcome:'error'` cluster result, a
+ * target-lane park never cleans up the worktree it just made on a deps failure while the batch
+ * lane does) — none of that belongs in a shared helper, so it stays at the call site.
+ */
+export function openBuildWorktree(
+  repoRoot: string,
+  wtPath: string,
+  branch: string,
+  depsWorkdirs: string[],
+): { ok: true } | { ok: false; stage: 'worktree-add'; reason: string } | { ok: false; stage: 'deps'; reason: string } {
+  removeWorktree(repoRoot, wtPath);
+  spawnSync('git', ['branch', '-D', branch], { cwd: repoRoot, stdio: 'pipe' });
+  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: repoRoot, stdio: 'pipe' });
+  if (wtAdd.status !== 0) {
+    return { ok: false, stage: 'worktree-add', reason: wtAdd.stderr?.toString().trim() ?? '' };
+  }
+  if (depsWorkdirs.length > 0) {
+    const depsSetup = setupWorktreeDeps(repoRoot, wtPath, depsWorkdirs);
+    if (depsSetup.buildFailures.length > 0) {
+      return { ok: false, stage: 'deps', reason: depsSetup.buildFailures.join('; ') };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * WI-172: git mechanics shared by the target lane's and conductor's merge-and-close tails only
+ * (never the batch lane — ADR-012). Checkout `mergeDestination` (passed IN by the caller, NEVER
+ * derived here — deriving it is the false-green class ADR-012 calls out), `merge --no-ff`,
+ * abort+report on conflict, else resolve the merge commit. Mutex/loop-name/deploy stay at call
+ * sites (real per-caller differences, not lane accidents). The `stage` discriminant preserves
+ * an unverified asymmetry as-is: the target lane emits 1 event on checkout failure vs 2 on merge
+ * conflict; conductor's mutex-wrapped path always emits 2. Not resolved here — reproduced verbatim.
+ */
+export function closeMergedCluster(
+  gitRoot: string,
+  wtPath: string,
+  branch: string,
+  mergeDestination: string,
+  commitMessage: string,
+): { ok: true; commit: string }
+  | { ok: false; stage: 'checkout'; reason: string }
+  | { ok: false; stage: 'merge'; reason: string } {
+  const co = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
+  if (co.status !== 0) {
+    return { ok: false, stage: 'checkout', reason: co.stderr?.toString().trim() ?? '' };
+  }
+  const merge = spawnSync('git', ['merge', '--no-ff', '-m', commitMessage, branch], { cwd: gitRoot, stdio: 'pipe' });
+  if (merge.status !== 0) {
+    spawnSync('git', ['merge', '--abort'], { cwd: gitRoot, stdio: 'pipe' });
+    return { ok: false, stage: 'merge', reason: '' };
+  }
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' }).stdout?.toString().trim() ?? '';
+  return { ok: true, commit };
 }
 
 // ---------------------------------------------------------------------------
@@ -2158,7 +2219,7 @@ async function finalizeTargetBuild(
   },
   outcome:
     | { ok: true; text: string; usage?: { in: number; out: number; usd?: number } }
-    | { ok: false; error: string },
+    | { ok: false; error: string; code?: string },
 ): Promise<DispatchStepResult> {
   const { gitRoot, manifest, wtPath, branch, baseSha, targetRunDir, attempt } = ctx;
 
@@ -2172,7 +2233,13 @@ async function finalizeTargetBuild(
   }
 
   if (!outcome.ok) {
-    const reason = `target build failed: ${outcome.error}`;
+    // WI-172: an auth failure (session expired mid-build) reads distinctly from a generic crash
+    // so operators can tell the two apart — same event type and non-parking requeue-via-crashed
+    // behaviour as the generic path below (this lane has no flag-file/registry apparatus, unlike
+    // the legacy/batch lane's dedicated auth branch; that machinery is out of scope here).
+    const reason = outcome.code === 'auth'
+      ? `target build failed: infra: builder not logged in — run /login (${outcome.error})`
+      : `target build failed: ${outcome.error}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'build.crashed', { reason })]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
@@ -2246,25 +2313,26 @@ async function finalizeTargetBuild(
   if (judgeEvents.length > 0) await appendEvents(opts.ledgerDir, judgeEvents);
 
   // ── Merge into the target's default branch (in the target repo) ───────────
-  const mergeResult = spawnSync('git', ['checkout', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
-  if (mergeResult.status !== 0) {
-    const reason = `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${mergeResult.stderr?.toString().trim()}`;
+  // WI-172: shared git mechanics (closeMergedCluster) — mergeDestination passed IN
+  // (manifest.defaultBranch), never derived. Event-count asymmetry between checkout-failure
+  // (1 event) and merge-conflict (2 events) is this call site's own pre-existing shape,
+  // reproduced unchanged via the `stage` discriminant.
+  const closeResult = closeMergedCluster(gitRoot, wtPath, branch, manifest.defaultBranch, `feat(dispatch): ${rec.id} (target ${manifest.name})`);
+  if (!closeResult.ok) {
     removeWorktree(gitRoot, wtPath);
-    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
-    return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
-  }
-  const merge = spawnSync('git', ['merge', '--no-ff', '-m', `feat(dispatch): ${rec.id} (target ${manifest.name})`, branch], { cwd: gitRoot, stdio: 'pipe' });
-  if (merge.status !== 0) {
-    spawnSync('git', ['merge', '--abort'], { cwd: gitRoot, stdio: 'pipe' });
+    if (closeResult.stage === 'checkout') {
+      const reason = `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${closeResult.reason}`;
+      await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
+    }
     const reason = `target merge conflict on '${manifest.defaultBranch}'`;
-    removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
       makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 2, detail: reason };
   }
-  const mergeCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' }).stdout?.toString().trim() ?? '';
+  const mergeCommit = closeResult.commit;
 
   // Cleanup: drop the build worktree + branch (merge is in the target's default branch now).
   removeWorktree(gitRoot, wtPath);
@@ -2284,6 +2352,40 @@ async function finalizeTargetBuild(
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
     eventsWritten: 3, detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
+  };
+}
+
+/**
+ * WI-172: decode an `ExitRecord` (a detached build's on-disk exit sentinel) into the resolved
+ * outcome shape both cross-beat collectors need — via the SAME parseOutput/extractUsage
+ * claudeCli.ts exports (one-parser invariant). Previously duplicated between the target lane's
+ * own collection scan (`runTargetLane`) and the legacy/batch lane's `collectDetachedBuilds`; the
+ * two copies had drifted — only the batch copy set `code: 'auth'` on an auth failure, so a
+ * collected targeted build's auth failure decoded as a generic error. Extracting closes that gap:
+ * both callers now get `code: 'auth'` whenever `exit.authFailure` is set.
+ */
+export function decodeExitOutcome(
+  exit: ExitRecord,
+): { ok: true; text: string; usage?: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } }
+  | { ok: false; error: string; code?: 'auth' } {
+  let text = '';
+  let usage: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } | undefined;
+  if (exit.usageJsonPath) {
+    try {
+      const { obj } = parseOutput(readFileSync(exit.usageJsonPath, 'utf8'));
+      if (obj) {
+        if (typeof obj.result === 'string') text = obj.result;
+        usage = extractUsage(obj) ?? usage;
+      }
+    } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
+  }
+  if (exit.exitCode === 0 && !exit.authFailure) return { ok: true, text, usage };
+  return {
+    ok: false,
+    error: exit.authFailure
+      ? 'detached worker: auth failure (session expired mid-build)'
+      : `detached worker exited ${exit.exitCode ?? '(signalled)'}`,
+    code: exit.authFailure ? 'auth' as const : undefined,
   };
 }
 
@@ -2352,27 +2454,10 @@ export async function runTargetLane(
       // having advanced since dispatch.
       const baseSha = spawnSync('git', ['merge-base', cbBranch, manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' })
         .stdout?.toString().trim() ?? '';
-      // Decode the exit file into the same resolved shape the sync path gets from provider.run(),
-      // via the SAME parseOutput/extractUsage the plane collector uses (one-parser invariant).
-      let text = '';
-      let usage: { in: number; out: number; usd?: number } | undefined;
-      if (exit.usageJsonPath) {
-        try {
-          const { obj } = parseOutput(readFileSync(exit.usageJsonPath, 'utf8'));
-          if (obj) {
-            if (typeof obj.result === 'string') text = obj.result;
-            usage = extractUsage(obj) ?? usage;
-          }
-        } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
-      }
-      const outcome = exit.exitCode === 0 && !exit.authFailure
-        ? { ok: true as const, text, usage }
-        : {
-          ok: false as const,
-          error: exit.authFailure
-            ? 'detached worker: auth failure (session expired mid-build)'
-            : `detached worker exited ${exit.exitCode ?? '(signalled)'}`,
-        };
+      // Decode the exit file into the same resolved shape the sync path gets from provider.run()
+      // (WI-172: shared with collectDetachedBuilds's identical decode — one-parser invariant,
+      // and the fix for the auth-code gap the two copies used to disagree on).
+      const outcome = decodeExitOutcome(exit);
       results.push(await finalizeTargetBuild(opts, rec, {
         gitRoot, manifest, wtPath: cbWorktree, branch: cbBranch, baseSha, targetRunDir,
         attempt: cbAttempt, providerName: provider?.name, provider,
@@ -2436,34 +2521,22 @@ export async function runTargetLane(
     }
 
     // ── Worktree of the TARGET repo ──────────────────────────────────────────
-    removeWorktree(gitRoot, wtPath);
-    spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
-    const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: gitRoot, stdio: 'pipe' });
-    if (wtAdd.status !== 0) {
-      const reason = `infra: target worktree add failed: ${wtAdd.stderr?.toString().trim()}`;
+    // (WI-172) Deps provisioning source is the target's own repoPath (manifest.depsWorkdirs),
+    // never the plane's embedded repo — a target knows its own dependency roots. A deps failure
+    // here deliberately does NOT clean up the worktree (unchanged from before the extraction) —
+    // the batch lane's copy of this sequence does clean up on the same failure; that is a real,
+    // pre-existing difference between the two call sites, left at the call site on purpose.
+    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs);
+    if (!opened.ok) {
+      const reason = opened.stage === 'worktree-add'
+        ? `infra: target worktree add failed: ${opened.reason}`
+        : `infra: target file:-dep build failed: ${opened.reason}`;
       await appendEvents(opts.ledgerDir, [
-        makeEvent('dispatch', rec.id, 'build.crashed', { reason }),
+        ...(opened.stage === 'worktree-add' ? [makeEvent('dispatch', rec.id, 'build.crashed', { reason })] : [makeEvent('dispatch', rec.id, 'gate.failed', { reason })]),
         makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
       ]);
       results.push({ item: rec.id, dispatched: false, eventsWritten: 2, detail: reason });
       continue;
-    }
-
-    // Provision node_modules from the TARGET repo's own checkout (manifest.depsWorkdirs) —
-    // the target lane historically skipped this and every gate needing a local toolchain
-    // (tsc et al.) failed 127. The deps source is the target's repoPath, never the plane's
-    // embedded repo: a target knows its own dependency roots.
-    if (manifest.depsWorkdirs.length > 0) {
-      const depsSetup = setupWorktreeDeps(gitRoot, wtPath, manifest.depsWorkdirs);
-      if (depsSetup.buildFailures.length > 0) {
-        const reason = `infra: target file:-dep build failed: ${depsSetup.buildFailures.join('; ')}`;
-        await appendEvents(opts.ledgerDir, [
-          makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
-          makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
-        ]);
-        results.push({ item: rec.id, dispatched: false, eventsWritten: 2, detail: reason });
-        continue;
-      }
     }
 
     // ADR-008 §2 detach eligibility (fail-closed) — the SAME rule the legacy lane uses: the flag is
@@ -2628,37 +2701,18 @@ export function collectDetachedBuilds(
 
     const { attempt, branch, worktree } = carrier.currentBuild!;
 
-    // Decode the exit record into a resolved ProviderResult via the SAME parser the Phase-2
-    // loop's own exit-file preference uses (one-parser invariant) — never a second parser.
-    let text = '';
-    let usage: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } | undefined;
-    if (exitRecord.usageJsonPath) {
-      try {
-        const { obj } = parseOutput(readFileSync(exitRecord.usageJsonPath, 'utf8'));
-        if (obj) {
-          if (typeof obj.result === 'string') text = obj.result;
-          usage = extractUsage(obj) ?? usage;
-        }
-      } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
-    }
-    const ok = exitRecord.exitCode === 0 && !exitRecord.authFailure;
+    // Decode the exit record into a resolved ProviderResult (WI-172: shared decodeExitOutcome —
+    // one-parser invariant, same auth-code handling the target lane's collection scan now gets).
     // authFailure (exitfile.ts) is the ONLY signal a cross-beat collector has that a detached
-    // worker's terminal outcome was specifically "logged out mid-build" — decode it into the
-    // same `code: 'auth'` the in-process sync path gets from ClaudeCliProvider.run(), so the
-    // Phase-2 terminal loop's existing auth-failure branch (mark provider unhealthy, requeue via
-    // build.crashed, never park/count toward the breaker) handles both paths identically.
+    // worker's terminal outcome was specifically "logged out mid-build" — decodeExitOutcome turns
+    // it into the same `code: 'auth'` the in-process sync path gets from ClaudeCliProvider.run(),
+    // so the Phase-2 terminal loop's existing auth-failure branch (mark provider unhealthy,
+    // requeue via build.crashed, never park/count toward the breaker) handles both paths identically.
+    const decoded = decodeExitOutcome(exitRecord);
     const providerPromise = Promise.resolve(
-      ok
-        ? { text, ok: true as const, usage }
-        : {
-          text: '',
-          ok: false as const,
-          error: exitRecord.authFailure
-            ? 'detached worker: auth failure (session expired mid-build)'
-            : `detached worker exited ${exitRecord.exitCode ?? '(signalled)'}`,
-          code: exitRecord.authFailure ? 'auth' as const : undefined,
-          usage,
-        },
+      decoded.ok
+        ? { text: decoded.text, ok: true as const, usage: decoded.usage }
+        : { text: '', ok: false as const, error: decoded.error, code: decoded.code, usage: undefined },
     );
 
     // Carrier first (recs[0] drives branch/gate/merge), companions after — mirrors the
@@ -3286,47 +3340,29 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         continue;
       }
 
-      // Remove stale worktree and branch
-      removeWorktree(opts.repoRoot, wtPath);
-      spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
-
-      // Create worktree
-      const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], {
-        cwd: opts.repoRoot, stdio: 'pipe',
-      });
-      if (wtAdd.status !== 0) {
-        const reason = `infra: worktree add failed: ${wtAdd.stderr?.toString().trim()}`;
+      // Create worktree + provision deps (WI-172: shared git sequence — node_modules setup
+      // covers every deps workdir, since the gate may run suites in more than one package; a
+      // file:-dep build that exits non-zero means the gate would run against stale dist and
+      // silently green, so park immediately rather than lie).
+      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
+      if (!opened.ok) {
+        const reason = opened.stage === 'worktree-add'
+          ? `infra: worktree add failed: ${opened.reason}`
+          : `infra: file:-dep build failed: ${opened.reason}`;
         for (const r of group) {
-          allNewEvents.push(makeEvent('dispatch', r.id, 'build.crashed', { reason }));
+          allNewEvents.push(makeEvent('dispatch', r.id, opened.stage === 'worktree-add' ? 'build.crashed' : 'gate.failed', { reason }));
           allNewEvents.push(makeEvent('dispatch', r.id, 'item.parked', { reason, parkKind: 'ops' }));
         }
         results.push({
           item: rec.id, dispatched: false, eventsWritten: 2 * group.length, detail: reason,
         });
-        workers.push({ recs: group, branch, wtPath, attempt: attemptNum, providerPromise: null, spawned: false, errFile, provider: groupProvider });
-        continue;
-      }
-
-      // Set up node_modules for every deps workdir — the gate may run suites in more than
-      // one package (the gate script rebuilds the framework's own package when the diff touches
-      // it); a missing link there causes a `tsc: command not found` approve-gate failure. For a
-      // workdir with local `file:` deps this overlays the main tree's node_modules but points
-      // the file: package at the WORKTREE's copy so a branch changing both the package and the
-      // app compiles against the branch source, not the stale main tree.
-      const depsSetup = setupWorktreeDeps(opts.repoRoot, wtPath, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
-      if (depsSetup.buildFailures.length > 0) {
-        // A file:-dep build that exits non-zero means the gate would run against stale dist
-        // and silently green. Park immediately rather than lie.
-        const reason = `infra: file:-dep build failed: ${depsSetup.buildFailures.join('; ')}`;
-        for (const r of group) {
-          allNewEvents.push(makeEvent('dispatch', r.id, 'gate.failed', { reason }));
-          allNewEvents.push(makeEvent('dispatch', r.id, 'item.parked', { reason, parkKind: 'ops' }));
+        // Unlike the worktree-add failure (nothing was created), a deps failure DOES leave a
+        // worktree/branch behind — clean it up here (the target lane's copy of this sequence
+        // deliberately does NOT, a real difference between the two call sites, left in place).
+        if (opened.stage === 'deps') {
+          removeWorktree(opts.repoRoot, wtPath);
+          spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
         }
-        results.push({
-          item: rec.id, dispatched: false, eventsWritten: 2 * group.length, detail: reason,
-        });
-        removeWorktree(opts.repoRoot, wtPath);
-        spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
         workers.push({ recs: group, branch, wtPath, attempt: attemptNum, providerPromise: null, spawned: false, errFile, provider: groupProvider });
         continue;
       }
