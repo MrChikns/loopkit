@@ -14,11 +14,11 @@ ADR-010 through ADR-012 all treated `conductor.ts` as a lane with a future: some
 unify, then merge into the single build path. Every one of those documents was written from the
 *shape* of the code. None of them looked at whether the code had ever run.
 
-**It has not. Not once.** `runConduct` has never produced a single ledger event: zero
-`actor:"conduct"` across 2,833 live events and roughly 21,500 archived ones. Its only entry point is
-a human typing `loopctl conduct` at a terminal, and no human ever has. (The 160 `actor:"conductor"`
-`msg.out` events in the 2026-07-08..10 archive are not this code — they belong to a different,
-pre-loopkit system that happened to share the word.)
+**It has not. Not once.** `runConduct` has never produced a single ledger event: an audit of the
+plane's own ledger found zero events with `actor:"conduct"`, across every segment it retains. Its
+only entry point is a human typing `loopctl conduct` at a terminal, and no human ever has. (Older
+segments contain `actor:"conductor"` `msg.out` events; those predate this code and are unrelated to
+it despite sharing the word.)
 
 That is not a lane that regressed. It is a lane that was never exercised, defended three times on
 the strength of what it would do once repaired.

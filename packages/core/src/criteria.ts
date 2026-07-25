@@ -221,7 +221,7 @@ CRITERIA:
 
 Write them from the REQUEST TEXT ALONE, before anything is built. Rules:
 - Each line must be checkable against a diff or a running surface by someone who did not do
-  the work — "the export button downloads a CSV with one row per booking", not "export works well".
+  the work — "the export button downloads a CSV with one row per record", not "export works well".
 - State the OUTCOME, never the implementation route ("...appears on the detail view", not
   "...add a renderCriteria() helper").
 - Falsifiable means a reviewer can point at the diff and say "no, that one is not met".
