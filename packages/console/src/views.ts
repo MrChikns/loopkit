@@ -100,7 +100,9 @@ function tierToOperational(tier: AcceptanceTier): OperationalState {
 }
 
 function shortText(rec: Pick<ItemRecord, 'sourceText' | 'spec' | 'title'>): string {
-  const raw = rec.title || rec.sourceText || rec.spec || '';
+  // Prefer the router-stamped title, then the amended spec (item.respec target) over the
+  // immutable original capture text — a respec'd item must never show its superseded description.
+  const raw = rec.title || rec.spec || rec.sourceText || '';
   const oneLine = raw.replace(/\s+/g, ' ').trim();
   return oneLine.length > 100 ? oneLine.slice(0, 100) + '…' : oneLine;
 }
