@@ -261,6 +261,91 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
   }
 });
 
+test('ADR-010 stage-2 fix: a conductor cluster records review.verdict + cost.usage for every built item (was stderr-only)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'conduct-judge-'));
+  try {
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const runDir = join(base, 'runs');
+    const gateLog = join(base, 'gate-runs.log');
+    makeTargetRepo(targetRoot, gateLog);
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }),
+      makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'one', target: 'notes' }),
+      makeEvent('cli', 'WI-001', 'item.queued', { spec: 'add src/one.js', touches: 'src/' }),
+      makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'two', target: 'notes' }),
+      makeEvent('cli', 'WI-002', 'item.queued', { spec: 'add src/two.js', touches: 'src/' }),
+      makeEvent('cli', SES, 'session.started', { sessionId: SES }),
+      makeEvent('cli', 'WI-001', 'item.claimed', { sessionId: SES, ttlMinutes: 60 }),
+      makeEvent('cli', 'WI-002', 'item.claimed', { sessionId: SES, ttlMinutes: 60 }),
+    ]);
+
+    // One provider serves BOTH roles the conductor calls it for: a build call (req.cwd set,
+    // builder tools granted — commits the named file, mirroring the E2E conduct fake above) and
+    // the judge call (runJudge always sends tools: [], no cwd) — distinguished by tools.length,
+    // never by cwd (a judge call legitimately carries no cwd; asserting on it is the bug the
+    // shared E2E fake above quietly has to tolerate). The judge reply is real judge-output
+    // grammar so this test can assert a PARSED verdict travels all the way into the ledger.
+    const provider: LlmProvider = {
+      name: 'fake',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        if (req.tools && req.tools.length === 0) {
+          // Judge call.
+          return {
+            ok: true,
+            text: 'VERDICT: pass\nCONFIDENCE: 0.85\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- looks right',
+            usage: { in: 40, out: 20, usd: 0.0004 },
+          };
+        }
+        const cwd = req.cwd!;
+        const file = req.prompt.includes('one.js') ? 'one.js' : 'two.js';
+        writeFileSync(join(cwd, 'src', file), `export const marker = '${file}';\n`, 'utf8');
+        spawnSync('git', ['add', `src/${file}`], { cwd, stdio: 'pipe' });
+        spawnSync('git', ['commit', '-m', `feat: add ${file}`], { cwd, stdio: 'pipe' });
+        return { ok: true, text: 'done', usage: { in: 10, out: 5 } };
+      },
+    };
+
+    const result = await runConduct({
+      ledgerDir, runDir, repoRoot: base, sessionId: SES, provider, config: testConfig(),
+    });
+
+    assert.equal(result.clusters.length, 1, JSON.stringify(result.clusters));
+    assert.equal(result.clusters[0].outcome, 'merged', result.clusters[0].detail ?? 'cluster must merge');
+
+    const events = await loadAllEvents(ledgerDir);
+
+    // DECISIVE: before the fix, runCluster's post-build guard pipeline ran the judge but never
+    // appended review.verdict/cost.usage — this is the defect this fix closes for the conductor.
+    for (const wi of ['WI-001', 'WI-002']) {
+      const verdicts = events.filter(e => e.type === 'review.verdict' && e.item === wi);
+      assert.equal(verdicts.length, 1, `${wi} must get exactly one review.verdict (cluster verdict applied to every built member)`);
+      const vData = verdicts[0]!.data as { verdict: string; confidence: number; judge: string };
+      assert.equal(vData.verdict, 'pass');
+      assert.equal(vData.confidence, 0.85);
+      assert.equal(vData.judge, 'merge-review');
+      assert.equal(verdicts[0]!.actor, 'conduct', 'the conductor lane records verdicts under the conduct actor');
+
+      const judgeCost = events.filter(e =>
+        e.type === 'cost.usage' && e.item === wi && (e.data as { loop: string }).loop === 'judge');
+      assert.equal(judgeCost.length, 1, `${wi} must get one cost.usage{loop:judge}`);
+      assert.equal((judgeCost[0]!.data as { tokens: number }).tokens, 60);
+    }
+
+    // Both items still merged (judge stays advisory — it never blocks the conductor's merge).
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-001')!.state, 'merged');
+    assert.equal(folded.items.get('WI-002')!.state, 'merged');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('sensitivity(conductor): a PRIVATE claimed cluster fails closed — never routed to the claude provider', async () => {
   // TRUST-HARDENING (FIX 2): the conductor resolves each cluster's provider against the strictest
   // member's sensitivity. With no injected provider, it builds a registry from cfg; a private tier

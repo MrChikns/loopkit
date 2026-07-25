@@ -46,7 +46,7 @@ import { readExitFile } from '../exitfile.js';
 import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
-import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData } from '../judge.js';
+import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
 import { runClaimAuditGate } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
@@ -1384,6 +1384,19 @@ export interface PostBuildGuardConfig {
   gateWrapper: 'runLaneGate' | 'runGate';
 }
 
+/** The judge stage's result, returned to the caller so IT can append `review.verdict` +
+ * `cost.usage` — the two event shapes differ by loop name (`dispatch` vs `conduct`), so this
+ * pipeline (which has no ledger dependency of its own) hands back the raw ingredients rather
+ * than picking an actor. `null` means the judge stage did not run (disabled, or no provider). */
+export interface JudgeStageResult {
+  run: JudgeRunResult;
+  model: string;
+  /** The judge call's own provider name (mirrors the batch lane's `judgeProvider.name` in its
+   * `cost.usage{loop:'judge'}` append) — never the build provider, since the judge may run
+   * under a different (more restrictive) sensitivity-resolved provider than the build did. */
+  providerName: string;
+}
+
 /** One item's outcome from {@link runPostBuildGuards} — the caller decides what to DO with it
  * (merge into which repo, push or not) since that varies legitimately by lane; this pipeline
  * only decides whether the build's diff is fit to merge at all. */
@@ -1393,7 +1406,13 @@ export type PostBuildGuardOutcome =
   | { kind: 'touches-overstep'; reason: string; files: string[] }
   | { kind: 'spine'; reason: string; files: string[] }
   | { kind: 'gate-red'; reason: string; output: string }
-  | { kind: 'passed'; headSha: string; changedFiles: string[]; gateReason: string };
+  | {
+      kind: 'passed'; headSha: string; changedFiles: string[]; gateReason: string;
+      /** Set when the judge stage ran (config.judge && a provider was available); absent
+       * otherwise. The caller appends `review.verdict`/`cost.usage` from it — never this
+       * function, which stays ledger-free (see {@link runPostBuildGuards}'s doc comment). */
+      judgeVerdict?: JudgeStageResult;
+    };
 
 export interface PostBuildGuardCtx {
   wtPath: string;
@@ -1444,10 +1463,11 @@ export interface PostBuildGuardCtx {
  * (or skipping) the stage's own code — see {@link PostBuildGuardConfig}.
  *
  * Judge is advisory-only and fail-open by construction: this function still returns `'passed'`
- * even when the judge stage errors or is skipped — the caller is responsible for recording
- * `review.verdict` events, since those differ in ledger shape by loop name (`dispatch` vs
- * `conduct`) and this pipeline has no ledger dependency of its own (pure over its git/gate
- * inputs so it is trivially testable without a ledger fixture).
+ * even when the judge stage errors or is skipped. The `'passed'` outcome carries an optional
+ * `judgeVerdict` ({@link JudgeStageResult}) — the caller is responsible for turning it into
+ * `review.verdict`/`cost.usage` events, since those differ in ledger shape by loop name
+ * (`dispatch` vs `conduct`) and this pipeline has no ledger dependency of its own (pure over its
+ * git/gate inputs so it is trivially testable without a ledger fixture).
  */
 export async function runPostBuildGuards(
   ctx: PostBuildGuardCtx,
@@ -1530,11 +1550,16 @@ export async function runPostBuildGuards(
   }
 
   // ── Judge (advisory-only, fail-open, never blocks) ─────────────────────────
+  // Returned to the caller as `judgeVerdict` (never appended here — see this function's doc
+  // comment) so every lane that runs this pipeline persists the same evidence the batch lane
+  // always has, instead of only logging it to stderr and losing it (the ADR-010 stage-2 defect).
+  let judgeVerdict: JudgeStageResult | undefined;
   if (config.judge && ctx.judge?.provider) {
     const diff = captureWorktreeDiff(ctx.wtPath, ctx.baseSha, 20_000);
     const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches);
     try {
       const judgeRunResult = await runJudge(ctx.judge.provider, ctx.judge.model, prompt, ctx.judge.timeoutMs);
+      judgeVerdict = { run: judgeRunResult, model: ctx.judge.model, providerName: ctx.judge.provider.name };
       if (judgeRunResult.parsed) {
         process.stderr.write(
           `[dispatch] judge: ${ctx.judge.itemId} verdict=${judgeRunResult.parsed.verdict} confidence=${judgeRunResult.parsed.confidence.toFixed(2)}\n`,
@@ -1543,11 +1568,46 @@ export async function runPostBuildGuards(
         process.stderr.write(`[dispatch] judge: ${ctx.judge.itemId} provider error (${judgeRunResult.providerError ?? 'unknown'}) — merge proceeds\n`);
       }
     } catch (e) {
+      judgeVerdict = { run: { parsed: null, providerError: String(e) }, model: ctx.judge.model, providerName: ctx.judge.provider.name };
       process.stderr.write(`[dispatch] judge: ${ctx.judge.itemId} threw (${e}) — merge proceeds (advisory, fail-open)\n`);
     }
   }
 
-  return { kind: 'passed', headSha, changedFiles, gateReason: gateOutcome.reason };
+  return { kind: 'passed', headSha, changedFiles, gateReason: gateOutcome.reason, judgeVerdict };
+}
+
+/**
+ * Turn a {@link JudgeStageResult} (returned by {@link runPostBuildGuards}'s `'passed'` outcome)
+ * into the `review.verdict` + optional `cost.usage{loop:'judge'}` ledger events for ONE item —
+ * shaped identically to the batch lane's inline judge append (this file, `runDispatch`'s judge
+ * stage) via the shared {@link mergeVerdictData}, so every lane that runs the shared post-build
+ * guard pipeline records the SAME verdict shape rather than inventing a second one (ADR-010
+ * stage-2 fix: the pipeline used to only log the verdict to stderr and never persist it).
+ *
+ * @param loop the ledger actor for these events ('dispatch' for the target lane, 'conduct' for
+ *   the attended conductor) — the only axis the shape legitimately varies on.
+ */
+export function judgeVerdictEvents(
+  itemId: string,
+  loop: 'dispatch' | 'conduct',
+  judgeVerdict: JudgeStageResult | undefined,
+): LedgerEvent[] {
+  if (!judgeVerdict) return [];
+  const { run, model, providerName } = judgeVerdict;
+  const events: LedgerEvent[] = [
+    makeEvent(loop, itemId, 'review.verdict', mergeVerdictData(run, model)),
+  ];
+  if (run.usage) {
+    events.push(makeEvent(loop, itemId, 'cost.usage', {
+      provider: providerName, loop: 'judge',
+      tokens: (run.usage.in ?? 0) + (run.usage.out ?? 0),
+      usd: run.usage.usd,
+      wi: itemId,
+      ...(run.usage.turns !== undefined ? { turns: run.usage.turns } : {}),
+      ...(run.usage.durationMs !== undefined ? { durationMs: run.usage.durationMs } : {}),
+    }));
+  }
+  return events;
 }
 
 // ---------------------------------------------------------------------------
@@ -2180,6 +2240,10 @@ async function finalizeTargetBuild(
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: guardOutcome.reason };
   }
   const gate = { passed: true, reason: guardOutcome.gateReason };
+
+  // ── Judge verdict (advisory) — persisted here, mirroring the batch lane's pre-merge append ──
+  const judgeEvents = judgeVerdictEvents(rec.id, 'dispatch', guardOutcome.judgeVerdict);
+  if (judgeEvents.length > 0) await appendEvents(opts.ledgerDir, judgeEvents);
 
   // ── Merge into the target's default branch (in the target repo) ───────────
   const mergeResult = spawnSync('git', ['checkout', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
