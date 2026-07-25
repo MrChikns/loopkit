@@ -187,7 +187,9 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
     // when req.cwd is unset (fakeWorker.ts) — the judge call carries no cwd (runJudge passes
     // {prompt, model, tools: [], timeoutMs}), so this same fake doubles as a harmless judge
     // "provider" whose reply ('done') is not judge-output grammar and parses as 'unparseable'.
-    // That is sufficient to prove the EVENT gets recorded; parsing correctness is judge-review.test.ts's job.
+    // Asserted below: a real 'unparseable' verdict (not 'unavailable') proves the judge stage
+    // parsed the fake's reply rather than swallowing a thrown exception. Parsing-grammar
+    // correctness in general (pass/fail/confidence/etc.) stays judge-review.test.ts's job.
     const provider = makeNonCommittingWorker({
       files: [
         { path: 'src/extra.js', contents: 'export const marker = 42;\n' },
@@ -223,10 +225,20 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
     // review.verdict, no cost.usage — for the target lane. This is the defect this fix closes.
     const verdictEvents = events.filter(e => e.type === 'review.verdict' && e.item === 'WI-001');
     assert.equal(verdictEvents.length, 1, 'target-lane build must record exactly one review.verdict');
-    const vData = verdictEvents[0]!.data as { verdict: string; judge: string };
+    const vData = verdictEvents[0]!.data as { verdict: string; confidence: number; judge: string; reason?: string };
     assert.equal(vData.judge, 'merge-review');
     // Actor recorded as 'dispatch' — the target lane's ledger actor, mirroring the batch lane.
     assert.equal(verdictEvents[0]!.actor, 'dispatch');
+    // DECISIVE: assert a real judge run, not a swallowed provider exception. The fake's reply
+    // ('done') is not judge-output grammar, so a genuine parseJudgeOutput() run lands on
+    // verdict:'unparseable'. verdict:'unavailable' (mergeVerdictData's shape for
+    // run.parsed === null) would instead mean the judge call threw and runJudge's fail-open
+    // catch produced this event from an error, not from actually reading the fake's reply —
+    // the exact failure mode this test must catch (a fake that throws on its cwd-less judge
+    // reuse would otherwise still leave this test green).
+    assert.equal(vData.verdict, 'unparseable', 'expected a parsed-but-unparseable verdict, proving the judge stage actually ran the fake\'s reply through parseJudgeOutput rather than swallowing a provider exception');
+    assert.equal(vData.confidence, 0);
+    assert.equal(vData.reason, undefined, 'reason is only set on verdict:\'unavailable\' (provider error) — its absence confirms this was not a swallowed exception');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -259,7 +271,11 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
     const provider: LlmProvider = {
       name: 'fake',
       async run(req: ProviderRequest): Promise<ProviderResult> {
-        const cwd = req.cwd!;
+        // This same provider is reused for dispatch's post-merge judge call, which carries
+        // no req.cwd — treat that as a clean no-op instead of asserting build-only invariants
+        // against it (see fakeWorker.ts's makeNonCommittingWorker for the shared pattern).
+        const cwd = req.cwd;
+        if (!cwd) return { ok: true, text: 'done' };
         assert.ok(!req.tools?.includes('Bash(git commit:*)'),
           'worker must not be able to self-commit in this scenario');
         writeFileSync(join(cwd, 'src', 'extra.js'), 'export const marker = 43;\n', 'utf8');
