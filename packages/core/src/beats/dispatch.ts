@@ -420,6 +420,61 @@ export function decideClaimArbitration(
   });
 }
 
+/**
+ * The claim-before-pick TERMINAL (ADR-007 gap 1 + 2) — the one place the reservation is
+ * actually written. Re-reads and re-folds the ledger *under the ledger lock* (so the read is
+ * newer than the picker's own fold), asks {@link decideClaimArbitration} which candidates
+ * dispatch keeps, and appends `item.claimed` for every survivor in that SAME locked append —
+ * plus `session.started`/`session.heartbeat` for dispatch's per-run pseudo-session, without
+ * which `isClaimActive` would read dispatch's own claims as inactive (gap 2).
+ *
+ * WI-186: shared by BOTH picking lanes. The engineering lane had this terminal from ADR-007;
+ * the target lane read the queue and spawned without reserving anything, so two concurrent
+ * pickers could both select the same targeted item in the read-to-spawn window. Both lanes now
+ * call this factory's closure, so the reservation path can never drift between them.
+ *
+ * The returned function is stateful in exactly one respect: `session.started` is emitted only on
+ * the FIRST claiming append of a beat (subsequent lanes still heartbeat). A beat is one session.
+ *
+ * @internal exported for tests
+ */
+export function makeClaimBeforePick(
+  ledgerDir: string,
+  dispatchSessionId: string,
+  claimTtlMinutes: number,
+): (candidateIds: string[]) => Promise<ClaimArbitrationDecision[]> {
+  let sessionAnnounced = false;
+  return async (candidateIds: string[]) => {
+    if (candidateIds.length === 0) return [];
+    return withLock(ledgerDir, async (tx) => {
+      const freshEvents = await tx.loadAll();
+      const freshResult = fold(freshEvents);
+      const nowMs = Date.now();
+      // Same window a claim stays active (buildTimeout + 5 min): a build.dispatched newer than
+      // this is a live foreign build to yield to; older is a reapable orphan the doctor owns.
+      const decided = decideClaimArbitration(candidateIds, freshResult, dispatchSessionId, nowMs, claimTtlMinutes * 60_000);
+      const kept = decided.filter(d => d.keep);
+      if (kept.length > 0) {
+        const lockEvents: LedgerEvent[] = [
+          ...(sessionAnnounced ? [] : [makeEvent('dispatch', dispatchSessionId, 'session.started', { sessionId: dispatchSessionId, source: 'dispatch' })]),
+          makeEvent('dispatch', dispatchSessionId, 'session.heartbeat', { sessionId: dispatchSessionId }),
+          ...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId: dispatchSessionId, ttlMinutes: claimTtlMinutes })),
+        ];
+        sessionAnnounced = true;
+        await tx.append(lockEvents);
+      }
+      return decided;
+    });
+  };
+}
+
+/** The operator-facing detail for an item this beat yielded rather than built (ADR-007). */
+export function claimYieldDetail(d: ClaimArbitrationDecision): string {
+  return d.foreignBuild
+    ? 'yielded to foreign in-flight build (recent build.dispatched)'
+    : `yielded to attended claim (session ${d.foreignSessionId})`;
+}
+
 // ---------------------------------------------------------------------------
 // Lock
 // ---------------------------------------------------------------------------
@@ -3032,7 +3087,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // (runTargetLane) against their target repo — never the plane's batch/worktree machinery.
     // Split them out BEFORE grouping so the legacy engineering path and its existing test
     // suite are byte-for-byte unchanged: with no targets registered, targetedQueued is always empty.
-    const targetedQueued = queued.filter(r => r.lane !== 'planning' && r.target);
+    let targetedQueued = queued.filter(r => r.lane !== 'planning' && r.target);
     const engineeringQueued = queued.filter(r => r.lane !== 'planning' && !r.target);
 
     // Collect in-flight touches (building items). A planning build never writes a file, so
@@ -3172,6 +3227,14 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     const mergedWiIds: string[] = [];
     const allNewEvents: ReturnType<typeof makeEvent>[] = [];
 
+    // ── ADR-007 claim-before-pick: ONE per-beat pseudo-session, ONE reservation terminal ──
+    // Minted here (above BOTH picking lanes) rather than inside the engineering block: the
+    // target lane spawns first, so it must reserve under the same identity — a per-run, not
+    // permanent-shared, identity so a crashed beat's claims expire cleanly by the dead-man rule.
+    const dispatchSessionId = opts.dispatchSessionId ?? mintSessionId();
+    const claimTtlMinutes = cfg.buildTimeoutMinutes + 5;
+    const claimBeforePick = makeClaimBeforePick(opts.ledgerDir, dispatchSessionId, claimTtlMinutes);
+
     // Dispatch the planning lane first — it touches no git state, so it runs
     // ahead of (and independent of) the engineering worktree/merge machinery below.
     if (planningQueued.length > 0) {
@@ -3198,6 +3261,24 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // computed WAY above (right after the collection re-fold) precisely so the spawn gates between
     // there and here fall through for it instead of returning (WI-178) — moving it back down here
     // would restore the stranding bug.
+    //
+    // WI-186: the target lane picks under the SAME claim-before-pick terminal the engineering
+    // lane uses (ADR-007 gap 1). Before it reserves nothing and spawned straight off the picker's
+    // fold, so an attended drain and a beat (or two beats) could both select the same targeted
+    // item in the read-to-spawn window. Yielded items drop out of the lane's item list; the lane
+    // still RUNS when a detached build needs collecting, because collection finalizes work that
+    // is already this lane's (build.dispatched consumed its claim) — never a fresh pick.
+    if (!opts.dryRun && targetedQueued.length > 0) {
+      const decisions = await claimBeforePick(targetedQueued.map(r => r.id));
+      const yieldedIds = new Set(decisions.filter(d => !d.keep).map(d => d.item));
+      if (yieldedIds.size > 0) {
+        for (const d of decisions) {
+          if (d.keep) continue;
+          results.push({ item: d.item, dispatched: false, eventsWritten: 0, detail: claimYieldDetail(d) });
+        }
+        targetedQueued = targetedQueued.filter(r => !yieldedIds.has(r.id));
+      }
+    }
     if (targetedQueued.length > 0 || hasDetachedTargetBuild) {
       results.push(...await runTargetLane(opts, cfg, provider, foldResult, targetedQueued, runDir, registry));
     }
@@ -3241,39 +3322,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // item a foreign session claimed in the meantime, and claim every surviving item in the
     // same locked append before spawning anything. Dry-run never writes claims (opts.dryRun).
     if (!opts.dryRun && groups.length > 0) {
-      const candidateIds = groups.flatMap(g => g.map(r => r.id));
-      const dispatchSessionId = opts.dispatchSessionId ?? mintSessionId();
-      const claimTtlMinutes = cfg.buildTimeoutMinutes + 5;
-      const decisions = await withLock(opts.ledgerDir, async (tx) => {
-        const freshEvents = await tx.loadAll();
-        const freshResult = fold(freshEvents);
-        const nowMs = Date.now();
-        // Same window a claim stays active (buildTimeout + 5 min): a build.dispatched newer than
-        // this is a live foreign build to yield to; older is a reapable orphan the doctor owns.
-        const decided = decideClaimArbitration(candidateIds, freshResult, dispatchSessionId, nowMs, claimTtlMinutes * 60_000);
-        const kept = decided.filter(d => d.keep);
-        if (kept.length > 0) {
-          const lockEvents: LedgerEvent[] = [
-            makeEvent('dispatch', dispatchSessionId, 'session.started', { sessionId: dispatchSessionId, source: 'dispatch' }),
-            makeEvent('dispatch', dispatchSessionId, 'session.heartbeat', { sessionId: dispatchSessionId }),
-            ...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId: dispatchSessionId, ttlMinutes: claimTtlMinutes })),
-          ];
-          await tx.append(lockEvents);
-        }
-        return decided;
-      });
+      const decisions = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));
       const yieldedIds = new Set(decisions.filter(d => !d.keep).map(d => d.item));
       if (yieldedIds.size > 0) {
         for (const d of decisions) {
           if (d.keep) continue;
-          results.push({
-            item: d.item,
-            dispatched: false,
-            eventsWritten: 0,
-            detail: d.foreignBuild
-              ? 'yielded to foreign in-flight build (recent build.dispatched)'
-              : `yielded to attended claim (session ${d.foreignSessionId})`,
-          });
+          results.push({ item: d.item, dispatched: false, eventsWritten: 0, detail: claimYieldDetail(d) });
         }
         // Drop yielded items from their groups; drop any group left empty.
         for (let i = groups.length - 1; i >= 0; i--) {

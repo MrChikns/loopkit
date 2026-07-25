@@ -69,7 +69,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4172`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4226`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
@@ -78,7 +78,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:824`<!--cite:openBuildWorktreeHead-->; the conductor's call at
+  (`packages/core/src/beats/dispatch.ts:879`<!--cite:openBuildWorktreeHead-->; the conductor's call at
   `packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
@@ -86,15 +86,18 @@ cited three lines that had drifted, and one gap that had since been fixed.
   guard that defers when the checkout is not on `master` — and now passes it explicitly rather than
   by omission.
 
-- **Claim-before-pick is narrower than it looks in the target lane.** The engineering lane closes the
-  read-to-spawn race properly: re-fold under the ledger lock, drop what a foreign session took, claim
-  every survivor in the same locked append. The shared pick list only *defers* to an already-active
-  claim (`packages/core/src/beats/dispatch.ts:2970`<!--cite:queuedClaimDeference-->), which is a read, not
-  a reservation — and the target lane never appends a claim of its own. The conductor does claim, under
-  the same lock (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). *Bounded:* single
-  host, one dispatch beat, so the racing writer has to be an attended session starting in a
-  sub-second window. *Matters when:* you drain from the CLI at the moment a beat is picking a targeted
-  item — both can proceed.
+- **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
+  *reserves* what it takes: the shared pick list defers to an already-active claim
+  (`packages/core/src/beats/dispatch.ts:3025`<!--cite:queuedClaimDeference-->), which is a read, and both
+  dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
+  their own `item.claimed` for every survivor before spawning. The conductor claims under the same lock
+  (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). What remains is ADR-007's
+  *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
+  is fresh, so a genuinely-live operator whose heartbeat lagged past the bound reads inactive and a beat
+  may take the item. *Bounded:* the reap age is derived from the build-timeout envelope and the common
+  case is never a contest. *Matters when:* an attended session is suspended or starved long enough to
+  miss its heartbeats — detection is a `build.dispatched` sitting next to a recent operator
+  `item.claimed` in the same item's trail.
 
 - **`lane-matrix.md` does not track either of the invariants that actually differ between lanes.** The
   generated guard matrix pins `Touches`-overstep, spine, judge, scout, push, commit side and the gate
@@ -107,7 +110,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4358`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4412`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if

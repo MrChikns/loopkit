@@ -6,11 +6,19 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
-import { makeEvent } from '../src/schema.js';
+import { makeEvent, LedgerEvent } from '../src/schema.js';
 import { fold, isClaimActive, SessionRecord } from '../src/fold.js';
-import { decideClaimArbitration } from '../src/beats/dispatch.js';
+import { decideClaimArbitration, runDispatch } from '../src/beats/dispatch.js';
 import { reapStaleClaims } from '../src/doctor.js';
+import { appendEvents, loadAllEvents } from '../src/ledger.js';
+import { CONFIG_DEFAULTS, LoopkitConfig } from '../src/config.js';
+import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
+import { manifestHash, readTargetManifest } from '../src/target.js';
 
 const T0 = Date.parse('2026-01-01T00:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -273,6 +281,198 @@ test('fold + isClaimActive: item.claimed sets an active claim; build.dispatched 
   rec = result.items.get('WI-020')!;
   assert.equal(rec.claim, undefined, 'build.dispatched (queued-consuming) clears the claim');
   assert.equal(isClaimActive(rec, sessions, T0 + 4000), false);
+});
+
+// ---------------------------------------------------------------------------
+// WI-186: the TARGET lane reserves what it picks (ADR-007 gap 1, ported)
+//
+// Before this slice the target lane read the shared queue (which only defers to claims that
+// were already written when the picker folded) and spawned WITHOUT reserving anything — so two
+// concurrent pickers could both select the same targeted item in the read-to-spawn window.
+// ---------------------------------------------------------------------------
+
+let tmpCount = 0;
+function makeTempDir(): string {
+  const dir = join(tmpdir(), `loopkit-wi186-${process.pid}-${++tmpCount}-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function cleanDir(dir: string): void {
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+function testConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
+  return {
+    ...CONFIG_DEFAULTS,
+    gateCommand: 'exit 0',
+    gateWorkdir: '.',
+    breakerN: 3,
+    promptsDir: '.ai/loops/prompts',
+    notifyHook: '.ai/notify-phone.sh',
+    ...overrides,
+  };
+}
+
+/** A minimal registered target repo on `main` with a trivial (always-green) manifest gate. */
+function makeTargetRepo(root: string): { hash: string } {
+  const g = (args: string[]) => spawnSync('git', args, { cwd: root, stdio: 'pipe' });
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'loopkit.target.json'), JSON.stringify({
+    name: 'acme', defaultBranch: 'main', gateCommand: 'exit 0', gateWorkdir: '.',
+    deployCommand: '', worktreePrefix: 'loop-', touches: { conflictMode: 'prefix' },
+    boundaries: { planePrefixes: [], surfacePrefixes: ['src/'], escalationPatterns: [] },
+    buildTimeoutMinutes: 15,
+  }), 'utf8');
+  writeFileSync(join(root, 'src', 'seed.js'), '// seed\n', 'utf8');
+  g(['init', '-b', 'main']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  g(['add', '-A']);
+  g(['commit', '-m', 'init acme target']);
+  return { hash: manifestHash(readTargetManifest(root)) };
+}
+
+/** Plane repo + ledger + runs dir, seeded with `events`. */
+async function makePlaneEnv(events: LedgerEvent[]): Promise<{
+  base: string; repoRoot: string; ledgerDir: string; runsDir: string;
+}> {
+  const base = makeTempDir();
+  const repoRoot = join(base, 'repo');
+  const ledgerDir = join(base, 'ledger');
+  const runsDir = join(base, 'runs');
+  mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
+  mkdirSync(ledgerDir, { recursive: true });
+  mkdirSync(runsDir, { recursive: true });
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'planner.md'), 'stub planner prompt', 'utf8');
+  const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+  g(['init', '-b', 'master']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  writeFileSync(join(repoRoot, 'base.txt'), 'base', 'utf8');
+  g(['add', 'base.txt']);
+  g(['commit', '-m', 'init']);
+  await appendEvents(ledgerDir, events);
+  return { base, repoRoot, ledgerDir, runsDir };
+}
+
+const DISPATCH_PSEUDO_SESSION = 'ses-dispat9';
+
+test('WI-186: the target lane RESERVES the item it picks — item.claimed precedes its build.dispatched', async () => {
+  const targetRoot = join(makeTempDir(), 'acme');
+  const { hash } = makeTargetRepo(targetRoot);
+  const env = await makePlaneEnv([
+    makeEvent('cli', 'acme', 'target.registered', { name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main' }),
+    makeEvent('cli', 'WI-701', 'item.captured', { source: 'cli', text: 'add acme widget', target: 'acme' }),
+    makeEvent('conductor', 'WI-701', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
+  ]);
+
+  try {
+    const provider: LlmProvider = {
+      name: 'fake-builder',
+      async run(): Promise<ProviderResult> { return { ok: false, error: 'worker did nothing' }; },
+    };
+
+    await runDispatch({
+      repoRoot: env.repoRoot,
+      ledgerDir: env.ledgerDir,
+      artifactRunsDir: env.runsDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+      dispatchSessionId: DISPATCH_PSEUDO_SESSION,
+    });
+
+    const events = await loadAllEvents(env.ledgerDir);
+    const claimIdx = events.findIndex(e => e.type === 'item.claimed' && e.item === 'WI-701');
+    const dispatchIdx = events.findIndex(e => e.type === 'build.dispatched' && e.item === 'WI-701');
+    assert.ok(claimIdx >= 0, 'the target lane must reserve the item it picks (item.claimed) — WI-186');
+    assert.ok(dispatchIdx >= 0, 'precondition: the targeted build was actually dispatched');
+    assert.ok(claimIdx < dispatchIdx, 'the reservation must be written BEFORE the spawn, not after');
+    const claimData = events[claimIdx]!.data as { sessionId?: string };
+    assert.equal(claimData.sessionId, DISPATCH_PSEUDO_SESSION, 'the claim is held by dispatch\'s per-run pseudo-session (ADR-007 gap 2)');
+    // Gap 2: a claim from a non-live identity reserves nothing, so the session must be announced.
+    const started = events.find(e => e.type === 'session.started' && (e.data as { sessionId?: string }).sessionId === DISPATCH_PSEUDO_SESSION);
+    const beat = events.find(e => e.type === 'session.heartbeat' && (e.data as { sessionId?: string }).sessionId === DISPATCH_PSEUDO_SESSION);
+    assert.ok(started && beat, 'dispatch must claim under a LIVE pseudo-session (session.started + session.heartbeat)');
+  } finally {
+    cleanDir(env.base);
+    cleanDir(targetRoot);
+  }
+});
+
+test('WI-186: a foreign claim landing in the read-to-spawn window makes the target lane YIELD (never spawns)', async () => {
+  // The race, reproduced exactly: the picker folds the ledger, and only AFTER that does an
+  // attended operator session claim the targeted item. The planning lane (which runs before the
+  // target lane in the same beat) is the injection point — its provider call is the window.
+  const targetRoot = join(makeTempDir(), 'acme');
+  const { hash } = makeTargetRepo(targetRoot);
+  const env = await makePlaneEnv([
+    makeEvent('cli', 'acme', 'target.registered', { name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main' }),
+    makeEvent('cli', 'WI-710', 'item.captured', { source: 'cli', text: 'decompose an epic' }),
+    makeEvent('reactor', 'WI-710', 'item.queued', { spec: 'decompose an epic', lane: 'planning' }),
+    makeEvent('cli', 'WI-711', 'item.captured', { source: 'cli', text: 'add acme widget', target: 'acme' }),
+    makeEvent('conductor', 'WI-711', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
+  ]);
+
+  try {
+    const seenPrompts: string[] = [];
+    const provider: LlmProvider = {
+      name: 'fake-builder',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        seenPrompts.push(req.prompt);
+        if (req.prompt.includes('stub planner prompt')) {
+          // THE WINDOW: the picker's fold is already taken; an attended session claims WI-711 now.
+          await appendEvents(env.ledgerDir, [
+            makeEvent('cli', OP_SESSION, 'session.started', { sessionId: OP_SESSION, source: 'cli' }),
+            makeEvent('cli', OP_SESSION, 'session.heartbeat', { sessionId: OP_SESSION }),
+            makeEvent('cli', 'WI-711', 'item.claimed', { sessionId: OP_SESSION, ttlMinutes: 60 }),
+          ]);
+          return { ok: false, error: 'planner did nothing (injector only)' };
+        }
+        assert.fail(`the targeted build must never spawn once a foreign claim owns it (prompt: ${req.prompt.slice(0, 80)})`);
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot: env.repoRoot,
+      ledgerDir: env.ledgerDir,
+      artifactRunsDir: env.runsDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+      dispatchSessionId: DISPATCH_PSEUDO_SESSION,
+    });
+
+    assert.equal(seenPrompts.length, 1, 'exactly one provider call (the planning injector) — the targeted build never ran');
+    const step = result.dispatched.find(d => d.item === 'WI-711');
+    assert.ok(step, 'the yielded targeted item must be reported, not silently dropped');
+    assert.equal(step!.dispatched, false);
+    assert.match(step!.detail ?? '', new RegExp(`yielded to attended claim \\(session ${OP_SESSION}\\)`));
+
+    const events = await loadAllEvents(env.ledgerDir);
+    assert.equal(
+      events.filter(e => e.type === 'build.dispatched' && e.item === 'WI-711').length, 0,
+      'no build.dispatched for an item a foreign session owns — this is the double-build the lane used to allow',
+    );
+    assert.equal(
+      events.filter(e => e.type === 'item.claimed' && e.item === 'WI-711' && (e.data as { sessionId?: string }).sessionId === DISPATCH_PSEUDO_SESSION).length, 0,
+      'dispatch must not overwrite the operator\'s reservation with its own',
+    );
+    assert.equal(fold(events).items.get('WI-711')?.state, 'queued', 'the yielded item stays queued for its owner');
+  } finally {
+    cleanDir(env.base);
+    cleanDir(targetRoot);
+  }
 });
 
 test('fold + isClaimActive: item.merged and item.parked both clear a live claim', () => {
