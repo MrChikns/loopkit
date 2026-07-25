@@ -34,6 +34,20 @@ import {
  * `packages/core/src/beats/dispatch.ts` / `conductor.ts` at the time this test was written
  * (ADR-010's own table, cross-checked cell by cell). If a lane's guard set changes on purpose,
  * update THIS object to match — never loosen the assertion below into a no-op.
+ *
+ * ADR-010 stage 2 (guard unification): target and conductor now run their post-build checks
+ * through the shared `runPostBuildGuards` pipeline (beats/dispatch.ts), configured per lane —
+ * see that function's own doc comment. Touches-overstep and judge are NEWLY TRUE for both
+ * lanes (previously false — neither lane had any boundary/quality guard at all); spine stays
+ * false for target (a target repo has no plane-spine concept — see finalizeTargetBuild's own
+ * comment) and is now CONDITIONALLY true for conductor (`!plan.target` — on for the plane's own
+ * repo, off for a target cluster) — the generator reports a config key present with any
+ * non-`false` value (including a conditional expression) as `true`, matching "the guard fires
+ * under at least some real condition". gateWrapper now reads `'<name> (declared)'` for both
+ * migrated lanes: the call to runGate/runLaneGate lives inside the shared pipeline function, not
+ * the lane's own span, so the generator reads the lane's DECLARED `gateWrapper` config literal
+ * instead of a direct-call marker (see detectGateWrapper's doc comment) — this is not a
+ * regression, it is the intended shape once a lane delegates its gate-running to one place.
  */
 const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
   planning: {
@@ -42,9 +56,9 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     gateWrapper: 'none', commitSide: 'n/a (no code diff)',
   },
   target: {
-    touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
+    touchesOverstep: true, spineCheck: false, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
-    gateWrapper: 'runGate', commitSide: 'dispatch (declared)',
+    gateWrapper: 'runGate (declared)', commitSide: 'dispatch (declared)',
   },
   batch: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: true, push: true,
@@ -52,9 +66,9 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     gateWrapper: 'runLaneGate', commitSide: 'dispatch (declared)',
   },
   conductor: {
-    touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
+    touchesOverstep: true, spineCheck: true, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
-    gateWrapper: 'runGate', commitSide: 'worker (declared)',
+    gateWrapper: 'runGate (declared)', commitSide: 'worker (declared)',
   },
 };
 
