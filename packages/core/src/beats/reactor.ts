@@ -2029,7 +2029,13 @@ const PATHOLOGY_EXCLUDED_PARK_KINDS = new Set<string | undefined>(['decision', '
 /**
  * On every FAILURE park (gate-red / crash / infra — NEVER parkKind:'decision'), spawn ONE
  * bounded read-only LLM diagnosis pass, get a structured verdict, then act by classification:
- *   - transient-infra   → bounded auto-requeue (rides the EXISTING breaker cap).
+ *   - transient-infra   → bounded auto-requeue, gated by its OWN counter/threshold
+ *                         (ItemRecord.transientRequeueCount / cfg.pathology.maxTransientRequeues
+ *                         — WI-170; deliberately NOT cfg.breakerN, the build-attempt breaker
+ *                         stepApplyVerbs/doctor gate park/requeue on: a genuine breaker-
+ *                         exhaustion park only ever arrives with attempts >= breakerN already
+ *                         true, so sharing one counter/threshold made this arm unreachable for
+ *                         exactly the parks it exists to help with).
  *   - plane-infra-bug   → auto-capture a repair WI (engineering lane) + block the victim on it;
  *                         when the blocker merges, auto-requeue the victim.
  *   - items-own-code    → requeue ONCE with the diagnosis injected (repairContext); a SECOND
@@ -2271,7 +2277,15 @@ async function stepPathology(
       diagnosed++;
 
       if (parsed.classification === 'transient-infra') {
-        if (rec.attempts >= cfg.breakerN) {
+        // WI-170: gated on the pathologist's OWN diagnosis-driven-requeue counter
+        // (transientRequeueCount / maxTransientRequeues) — NOT rec.attempts/cfg.breakerN (the
+        // build-attempt breaker stepApplyVerbs/doctor gate park/requeue on). Sharing one counter
+        // for both decisions made this arm unreachable for a genuine breaker-exhaustion park,
+        // since stepApplyVerbs/doctor only park via that path once attempts >= breakerN is
+        // ALREADY true — see fold.ts ItemRecord.transientRequeueCount doc for the full defect.
+        const maxTransientRequeues = cfg.pathology.maxTransientRequeues ?? 1;
+        const transientRequeueCount = rec.transientRequeueCount ?? 0;
+        if (transientRequeueCount >= maxTransientRequeues) {
           events.push(makeEvent('reactor', rec.id, 'diagnosis.recorded', {
             parkFingerprint: rec.parkFingerprint!,
             classification: 'transient-infra',
@@ -2281,15 +2295,15 @@ async function stepPathology(
             model,
           }));
           events.push(makeEvent('reactor', rec.id, 'msg.out', {
-            text: `pathology: transient but breaker exhausted (${rec.attempts}/${cfg.breakerN}) — parking for review. ${parsed.proposedAction}`,
+            text: `pathology: transient but requeue budget exhausted (${transientRequeueCount}/${maxTransientRequeues}) — parking for review. ${parsed.proposedAction}`,
           }));
           events.push(makeEvent('reactor', rec.id, 'item.parked', {
-            reason: rec.parkReason ?? 'transient-infra, breaker exhausted',
+            reason: rec.parkReason ?? 'transient-infra, requeue budget exhausted',
             parkKind: 'decision',
             escalation: {
               intent: 'Requeue once the underlying transient condition clears.',
               evidence: parsed.evidence.join('; ') || '(none cited)',
-              risk: 'The breaker is exhausted; another auto-requeue would exceed the cap.',
+              risk: 'The pathologist\'s own requeue budget is exhausted; another auto-requeue would exceed the cap.',
               recommendation: parsed.proposedAction || 'Re-run manually or unpark once the infra issue is confirmed resolved.',
             },
           }));
@@ -2312,7 +2326,7 @@ async function stepPathology(
             model,
           }));
           events.push(makeEvent('reactor', rec.id, 'msg.out', {
-            text: `pathology: transient-infra — auto-requeued (attempt ${rec.attempts + 1}/${cfg.breakerN}). ${parsed.proposedAction}`,
+            text: `pathology: transient-infra — auto-requeued (attempt ${transientRequeueCount + 1}/${maxTransientRequeues}). ${parsed.proposedAction}`,
           }));
         }
       } else if (parsed.classification === 'plane-infra-bug') {

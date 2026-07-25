@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 import { makeEvent, LedgerEvent } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
@@ -204,14 +205,15 @@ PROPOSED_ACTION: retry as-is`;
       },
     };
 
-    // The pathologist's own transient-infra requeue path is ALSO breaker-gated
-    // (rec.attempts >= cfg.breakerN escalates to parked-review instead of requeuing) — the
-    // genesis park above deliberately reached attempts=breakerN(3) so stage 1 itself parks
-    // (rather than requeues) via the reactor's own gate-red path. Widen the breaker for this
-    // SECOND beat only, so stage 2 exercises the requeue arm of stepPathology rather than its
-    // parked-review arm — the two stages test different breaker edges by construction, not by
-    // accident.
-    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider, config: makeTestConfig({ breakerN: 5 }) });
+    // WI-170: the pathologist's transient-infra requeue is gated by its OWN counter/threshold
+    // (ItemRecord.transientRequeueCount / cfg.pathology.maxTransientRequeues), NOT by
+    // rec.attempts/cfg.breakerN (the build-attempt breaker stepApplyVerbs gates the genesis park
+    // above with). The genesis park deliberately reached attempts=breakerN(3) so stage 1 itself
+    // parks via the reactor's own gate-red path — but that no longer forecloses stage 2's
+    // requeue arm, because the two beats now read different counters: this is the whole point of
+    // the fix (previously this test HAD to widen breakerN here to reach the requeue arm at all,
+    // since attempts=3 already equalled breakerN=3; see git history for the pre-fix version).
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider, config: makeTestConfig() });
 
     const events = await loadAllEvents(ledgerDir);
     const diag = events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-920');
@@ -227,6 +229,139 @@ PROPOSED_ACTION: retry as-is`;
     const note = events.find(e => e.type === 'msg.out' && e.item === 'WI-920'
       && (e.data as { text?: string }).text?.startsWith('pathology:'));
     assert.ok(note, 'a pathology: trail note must explain the requeue');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+// ===========================================================================
+// Flow 4 (WI-170): the full park -> diagnose -> requeue -> second failure -> terminal park
+// lifecycle, proving the pathologist's OWN requeue budget (not the build-attempt breaker)
+// is what stops it from looping.
+// ===========================================================================
+
+test('a repeat transient-infra park requeues exactly once then terminally parks for review, never looping', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+  try {
+    // A REAL git repo is required: stepApplyVerbs's gate-red path only runs after it verifies
+    // the approved branch actually exists (`git rev-parse --verify`) — a missing branch takes a
+    // DIFFERENT park path ("approved branch ... missing") that never reaches gateRunner at all
+    // (this is the one subtlety that makes this flow easy to accidentally test past — see the
+    // git-history version of this file for the earlier, wrong assumption).
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(repoRoot, 'x.txt'), 'x', 'utf8');
+    g(['add', 'x.txt']);
+    g(['commit', '-m', 'init']);
+    g(['checkout', '-b', 'wi-930-a']);
+    writeFileSync(join(repoRoot, 'y1.txt'), 'y1', 'utf8');
+    g(['add', 'y1.txt']);
+    g(['commit', '-m', 'feat: WI-930 attempt 1']);
+    g(['checkout', 'master']);
+
+    const TRANSIENT_TEXT = `CLASSIFICATION: transient-infra
+EVIDENCE:
+- ENOBUFS on the diff spawn, unrelated to the change itself
+PROPOSED_ACTION: retry as-is`;
+    const pathologyProvider: LlmProvider = {
+      name: 'fake-pathology',
+      async run(): Promise<ProviderResult> {
+        return { ok: true, text: TRANSIENT_TEXT, usage: { in: 10, out: 20, usd: 0.001 } };
+      },
+    };
+
+    // ---- Beat 1: genesis park. A REAL reactor beat parks the item via the actual gate-red-
+    // after-approved-merge path, AT the build-attempt breaker (attempt 3 === default breakerN)
+    // — this is the realistic case (breaker exhaustion is the common route INTO a park the
+    // pathologist then diagnoses) and lets stage 3 below re-exercise the SAME breaker-exhaustion
+    // park path deterministically rather than depending on incidental attempt-count drift.
+    await seedLedger(ledgerDir, [
+      makeEvent('cli', 'WI-930', 'item.captured', { source: 'cli', text: 'z' }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-930', 'item.queued', { spec: 'fix tests' }, '2026-01-01T00:01:00Z'),
+      makeEvent('dispatch', 'WI-930', 'build.dispatched', { attempt: 3, branch: 'wi-930-a', pid: 1 }, '2026-01-01T00:02:00Z'),
+      makeEvent('dispatch', 'WI-930', 'build.finished', { commit: 'abc' }, '2026-01-01T00:03:00Z'),
+      makeEvent('operator', 'WI-930', 'item.approved', { by: 'operator' }, '2026-01-01T00:04:00Z'),
+    ]);
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig(),
+      gateRunner: () => ({ passed: false, timedOut: false, reason: 'transient: ENOBUFS spawning the diff' }),
+    });
+
+    let folded = fold(await loadAllEvents(ledgerDir));
+    assert.equal(folded.items.get('WI-930')?.state, 'parked', 'stage 1: the real gate-red path produces a genuine park');
+    assert.equal(folded.items.get('WI-930')?.parkKind, 'ops', 'stage 1: breaker-exhausted merge failure parks as ops, not decision');
+
+    // ---- Beat 2: the pathologist diagnoses the genesis park as transient-infra and requeues
+    // it — its FIRST requeue, spending the default maxTransientRequeues:1 budget. This is the
+    // WI-170 fix in action: stage 1's OWN breaker is already exhausted here (attempts===
+    // breakerN===3), yet the pathologist can still requeue, because its decision now reads a
+    // SEPARATE counter (transientRequeueCount) — before the fix this requeue was unreachable.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: pathologyProvider, config: makeTestConfig() });
+
+    folded = fold(await loadAllEvents(ledgerDir));
+    assert.equal(folded.items.get('WI-930')?.state, 'queued', 'stage 2: the first transient-infra diagnosis requeues the item');
+    assert.equal(folded.items.get('WI-930')?.transientRequeueCount, 1, 'stage 2: the pathologist\'s own requeue budget is now spent');
+
+    // ---- Beat 3: a SECOND real build+approve+gate-red cycle — the same underlying transient
+    // condition recurs (a distinct park reason, hence a distinct parkFingerprint, so the
+    // pathologist's dedup does not just skip it) after the requeue above. A fresh branch stands
+    // in for the fresh build the requeue triggered.
+    //
+    // NOTE: these events deliberately carry NO explicit ts (real wall-clock "now"), unlike the
+    // hardcoded 2026-01-01 genesis seed above. The ledger sorts events by ts (ledger.ts), and
+    // beat 2's pathology-emitted events (item.queued/diagnosis.recorded/msg.out) already carry
+    // real "now" timestamps — a hardcoded past ts here would sort BEFORE them and silently
+    // resurrect the stale pre-pathology state when re-folded.
+    g(['checkout', '-b', 'wi-930-b']);
+    writeFileSync(join(repoRoot, 'y2.txt'), 'y2', 'utf8');
+    g(['add', 'y2.txt']);
+    g(['commit', '-m', 'feat: WI-930 attempt 2']);
+    g(['checkout', 'master']);
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-930', 'build.dispatched', { attempt: 4, branch: 'wi-930-b', pid: 2 }),
+      makeEvent('dispatch', 'WI-930', 'build.finished', { commit: 'def' }),
+      makeEvent('operator', 'WI-930', 'item.approved', { by: 'operator' }),
+    ]);
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig(),
+      gateRunner: () => ({ passed: false, timedOut: false, reason: 'transient: ENOBUFS spawning the diff, again' }),
+    });
+
+    folded = fold(await loadAllEvents(ledgerDir));
+    assert.equal(folded.items.get('WI-930')?.state, 'parked', 'stage 3: the second gate-red failure parks again (breaker re-exhausted at attempt 4)');
+    assert.equal(folded.items.get('WI-930')?.parkKind, 'ops', 'stage 3: still a fresh ops-park, not yet escalated');
+
+    // ---- Beat 4: the pathologist diagnoses this SECOND park as transient-infra too, but its
+    // own requeue budget (maxTransientRequeues:1) is already spent — it must escalate to a
+    // parkKind:'decision' review park instead of requeuing again. THIS is the terminal state:
+    // the item stops here, on the operator's desk, and cannot loop back into another build.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: pathologyProvider, config: makeTestConfig() });
+
+    const events = await loadAllEvents(ledgerDir);
+    folded = fold(events);
+    const finalRec = folded.items.get('WI-930')!;
+    assert.equal(finalRec.state, 'parked', 'terminal: the item ends parked, not requeued a second time');
+    assert.equal(finalRec.parkKind, 'decision', 'terminal: escalated to the operator desk, off the plane\'s self-heal path');
+
+    const allRequeues = events.filter(e => e.type === 'item.queued' && e.item === 'WI-930' && e.actor === 'reactor');
+    assert.equal(allRequeues.length, 1, 'the pathologist must have requeued this item EXACTLY once across its whole lifecycle');
+
+    const diagnoses = events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-930');
+    assert.equal(diagnoses.length, 2, 'two distinct parks were each diagnosed exactly once');
+    assert.equal((diagnoses[0]!.data as { actedAs?: string }).actedAs, 'requeued-transient', 'first diagnosis: requeued');
+    assert.equal((diagnoses[1]!.data as { actedAs?: string }).actedAs, 'parked-review', 'second diagnosis: terminal escalation, not a requeue');
+
+    // Never loops: running the reactor again must NOT produce a third requeue — the item is on
+    // a decision park, which the pathologist never re-diagnoses (PATHOLOGY_EXCLUDED_PARK_KINDS).
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: pathologyProvider, config: makeTestConfig() });
+    const eventsAfterExtraBeat = await loadAllEvents(ledgerDir);
+    const requeuesAfterExtraBeat = eventsAfterExtraBeat.filter(e => e.type === 'item.queued' && e.item === 'WI-930' && e.actor === 'reactor');
+    assert.equal(requeuesAfterExtraBeat.length, 1, 'an extra beat against the terminal decision park must not requeue it again');
+    assert.equal(fold(eventsAfterExtraBeat).items.get('WI-930')?.state, 'parked', 'the item stays parked — the loop is closed');
   } finally {
     cleanDir(ledgerDir); cleanDir(repoRoot);
   }

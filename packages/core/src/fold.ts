@@ -303,6 +303,18 @@ export interface ItemRecord {
    * second parks for review".
    */
   ownCodeFailures?: number;
+  /**
+   * WI-170: count of diagnosis.recorded events classified 'transient-infra' that the pathologist
+   * ACTUALLY requeued for this item (actedAs==='requeued-transient'). Never reset (monotone) —
+   * this is the pathologist's OWN diagnosis-driven-requeue counter, deliberately independent of
+   * `attempts` (the build-attempt breaker `stepApplyVerbs`/doctor gate on): before WI-170 both
+   * beats shared `attempts`/`breakerN`, which meant the two decisions (stage-1 "give up building
+   * and park" vs stage-2 "the pathologist gives up requeuing and escalates to review") could
+   * never both have room, since a genuine breaker-exhaustion park only ever arrives with
+   * `attempts >= breakerN` already true. Gated by `cfg.pathology.maxTransientRequeues`, mirroring
+   * how `ownCodeFailures` is gated by its own (hardcoded 1) threshold, NOT by breakerN.
+   */
+  transientRequeueCount?: number;
   mergeCommit?: string;
   deployed?: boolean;
   /**
@@ -1410,6 +1422,12 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         if (fp) rec.lastDiagnosedFingerprint = fp;
         if (d['classification'] === 'items-own-code') {
           rec.ownCodeFailures = (rec.ownCodeFailures ?? 0) + 1;
+        }
+        // WI-170: count only the requeues the pathologist ACTUALLY took (actedAs), not every
+        // transient-infra classification — a classification that instead escalated straight to
+        // parked-review (maxTransientRequeues already exhausted) must not double-count.
+        if (d['classification'] === 'transient-infra' && d['actedAs'] === 'requeued-transient') {
+          rec.transientRequeueCount = (rec.transientRequeueCount ?? 0) + 1;
         }
         break;
       }
