@@ -947,6 +947,15 @@ async function cmdVerdicts(rest: string[]): Promise<void> {
     console.log(`  Agree (pass+accepted):     ${summary.agreePass}`);
     console.log(`  False alarm (fail+accept): ${summary.falseAlarm}`);
   }
+
+  // Arm-ability readout (WI-193 win 4). Blocking on the judge is deferred until calibration;
+  // this is the deferral's VISIBLE trigger, so "not yet" stops being a memory and becomes a
+  // number. It gates nothing — the judge stays advisory and fail-open.
+  const cal = summary.calibration;
+  const rate = cal.agreementRate !== null ? `${(cal.agreementRate * 100).toFixed(0)}%` : 'n/a';
+  console.log('');
+  console.log(`  Calibration:  ${cal.withOutcome}/${cal.sampleTarget} outcomes · agreement ${rate} (bar ${(cal.agreementTarget * 100).toFixed(0)}%) · discriminating=${cal.discriminating}`);
+  console.log(`  Judge arm-able: ${cal.armable ? 'YES' : 'no'} — ${cal.blocker}`);
   if (summary.rows.length === 0) {
     console.log('\n  No judge verdicts in the ledger yet.');
     return;

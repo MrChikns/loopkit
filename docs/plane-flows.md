@@ -334,12 +334,17 @@ own. Push happens only where a target declares a remote.
   version of this check: a `spec` written alongside the work drifts toward describing what was built,
   so the judge ended up asking whether the diff resembled its own description. An item with no
   criteria (captured before they were required) gets the previous prompt unchanged.
-- 🟠 **The judge is unarmed on purpose, and nothing states when it would be armed.** Blocking mode is
-  described in code as a future step "gated on calibration"
-  (`packages/core/src/judge.ts:4`<!--cite:judgeAdvisoryOnly-->), but no criterion for reaching that
-  gate is written anywhere — not in code, not here. And since the judge only began recording verdicts
-  at all recently, there is almost nothing yet to calibrate against. Read "advisory" as *measured and
-  deliberately not yet trusted*, not as *absent*.
+- 🔵 **The judge is unarmed on purpose, and the condition for arming it is now written down.**
+  Blocking mode is still a future step "gated on calibration"
+  (`packages/core/src/judge.ts:4`<!--cite:judgeAdvisoryOnly-->) — what changed is that the gate is no
+  longer someone's memory. `loopctl verdicts` and the brief both report arm-ability
+  (`packages/core/src/verdicts.ts:70`<!--cite:calibrationProgress-->), which needs **three**
+  conditions, all of them: **30**<!--pin:JUDGE_CALIBRATION_SAMPLE--> judged items carrying a recorded
+  *human* outcome, an agreement rate at or above 90%, and at least one judged-`fail` item with an
+  outcome. The third is the one worth stating: a judge that has never disagreed with you has an empty
+  false-alarm cell, so its agreement rate is 100% by construction and measures nothing — that is an
+  untested judge, not a calibrated one. Provisional self-accepts are excluded from the sample for the
+  same reason. Read "advisory" as *measured, and the measurement is now visible*.
 - The judge's one lever today is the acceptance floor — Plate 09.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
