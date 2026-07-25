@@ -17,7 +17,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { makeEvent, LedgerEvent } from '../src/schema.js';
+import { makeEvent, LedgerEvent, ParkKind } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { runDispatch } from '../src/beats/dispatch.js';
 import { projectTrajectory, classifyReason } from '../src/trajectory.js';
@@ -261,6 +261,17 @@ function makeAttemptChain(opts: {
   terminalReason?: string;
   /** Set the terminal event's `parkKind` (only some item.parked-adjacent shapes carry this in production). */
   terminalParkKind?: string;
+  /**
+   * WI-165: append a COMPANION item.parked event immediately after the terminal, matching the
+   * real production shape (every emitter in beats/dispatch.ts/doctor.ts/conductor.ts appends
+   * the terminal + item.parked together, companion second). Set this to exercise the
+   * correlation join; omit it to keep a bare terminal with no companion (e.g. a crash the
+   * breaker hasn't tripped on yet).
+   */
+  companionParkKind?: ParkKind;
+  companionParkReason?: string;
+  /** Defaults to terminalAt (same tick) — set to prove the join is index-based, not ts-based. */
+  companionParkAt?: string;
 }): LedgerEvent[] {
   const evs: LedgerEvent[] = [];
 
@@ -302,6 +313,13 @@ function makeAttemptChain(opts: {
     ...(opts.terminalType === 'gate.parked' ? { reason: opts.terminalReason ?? 'spine' } : {}),
     ...(opts.terminalParkKind !== undefined ? { parkKind: opts.terminalParkKind } : {}),
   } as Record<string, unknown>, opts.terminalAt));
+
+  if (opts.companionParkKind !== undefined || opts.companionParkReason !== undefined) {
+    evs.push(makeEvent('dispatch', opts.wi, 'item.parked', {
+      reason: opts.companionParkReason ?? opts.terminalReason ?? 'parked',
+      ...(opts.companionParkKind !== undefined ? { parkKind: opts.companionParkKind } : {}),
+    }, opts.companionParkAt ?? opts.terminalAt));
+  }
 
   return evs;
 }
@@ -599,6 +617,214 @@ test('trajectory: parkRateByClass aggregates across mixed reasonClasses, excludi
 test('trajectory: empty stream → parkRateByClass is an empty object', () => {
   const result = projectTrajectory([], { now: '2026-07-11T00:00:00Z' });
   assert.deepEqual(result.aggregates.parkRateByClass, {});
+});
+
+// ---------------------------------------------------------------------------
+// WI-165: parkKind correlation via companion item.parked + attentionCostShare
+// ---------------------------------------------------------------------------
+
+test('trajectory: a decision park correlates parkKind from the companion item.parked (real dispatch.ts touches-overstep shape)', () => {
+  // Mirrors dispatch.ts:3469 exactly: gate.parked{reason:'touches-overstep'} (no parkKind)
+  // immediately followed by item.parked{reason:'needs-decision: ...', parkKind:'decision'}.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165a',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T10:00:00Z',
+      terminalType: 'gate.parked',
+      terminalAt: '2026-07-10T10:05:00Z',
+      terminalReason: 'touches-overstep',
+      companionParkReason: 'needs-decision: files outside declared Touches (src/): src/x.ts',
+      companionParkKind: 'decision',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  assert.equal(result.attempts.length, 1);
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'gate-parked');
+  assert.equal(a.reason, 'touches-overstep', 'reason still comes from the terminal, unaffected by the join');
+  assert.equal(a.parkKind, 'decision', 'parkKind must be recovered from the companion item.parked');
+  assert.equal(a.reasonClass, 'touches-overstep');
+});
+
+test('trajectory: an ops park correlates parkKind from the companion item.parked (real dispatch.ts no-commit shape)', () => {
+  // Mirrors dispatch.ts:1717 exactly: gate.failed{reason} immediately followed by
+  // item.parked{reason, parkKind:'ops'} in the same appendEvents call.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165b',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T11:00:00Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T11:05:00Z',
+      terminalReason: 'no-commit: agent produced no commit (log: .ai/runs/loopkit/WI-165b-agent.err)',
+      companionParkKind: 'ops',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'gate-failed');
+  assert.equal(a.parkKind, 'ops');
+  assert.equal(a.reasonClass, 'no-commit');
+});
+
+test('trajectory: multi-attempt item (real WI-164 shape) — each attempt gets its own correlated parkKind, not the first/last found', () => {
+  // Reproduces the real ledger shape for WI-164: two attempts, both parked 'ops', each with
+  // its own gate.failed + item.parked pair. The join must not let attempt 1's item.parked
+  // leak into attempt 2 (or vice versa) just because they share a wi.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165c',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T07:55:05Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T08:15:13Z',
+      terminalReason: 'target build produced no commit',
+      companionParkKind: 'ops',
+      companionParkReason: 'target build produced no commit',
+    }),
+    // Between attempts: reactor's pathology requeue (item.queued + diagnosis.recorded + msg.out)
+    // — none of these are item.parked, so they must not disturb the bracket.
+    makeEvent('reactor', 'WI-165c', 'item.queued', { spec: 'retry', touches: 'src/' }, '2026-07-10T08:15:33Z'),
+    ...makeAttemptChain({
+      wi: 'WI-165c',
+      attempt: 2,
+      dispatchedAt: '2026-07-10T08:15:45Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T08:31:44Z',
+      terminalReason: 'target build produced no commit',
+      companionParkKind: 'ops',
+      companionParkReason: 'target build produced no commit',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  assert.equal(result.attempts.length, 2);
+  const attempt1 = result.attempts.find(a => a.attempt === 1)!;
+  const attempt2 = result.attempts.find(a => a.attempt === 2)!;
+  assert.ok(attempt1 && attempt2, 'both attempts must be present');
+  assert.equal(attempt1.parkKind, 'ops', 'attempt 1 gets its OWN companion park');
+  assert.equal(attempt2.parkKind, 'ops', 'attempt 2 gets its OWN companion park (not attempt 1\'s)');
+});
+
+test('trajectory: a hold park correlates parkKind but is excluded from attentionCostShare', () => {
+  // Mirrors conductor.ts:524 exactly: gate.failed{reason:'cluster produced no commit'} paired
+  // with item.parked{parkKind:'hold'} (the attended-lane degradation path).
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165d',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T12:00:00Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T12:05:00Z',
+      terminalReason: 'cluster produced no commit',
+      companionParkKind: 'hold',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.parkKind, 'hold', 'parkKind itself is still correlated and carried through');
+  assert.equal(result.aggregates.decisionParks, 0);
+  assert.equal(result.aggregates.opsParks, 0, 'hold must not be counted as an ops park either');
+  assert.equal(result.aggregates.attentionCostShare, 0, 'no decision/ops parks in window → 0, not NaN');
+});
+
+test('trajectory: a terminal with no companion park leaves parkKind undefined (no false correlation)', () => {
+  // A bare crash the breaker hasn't tripped on yet (see doctor.ts reapAction: below breakerN,
+  // it requeues instead of parking) — no item.parked exists at all for this attempt.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165e',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T13:00:00Z',
+      terminalType: 'build.crashed',
+      terminalAt: '2026-07-10T13:05:00Z',
+      terminalReason: 'timeout',
+      // no companionParkKind/companionParkReason — no item.parked emitted at all
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'crashed');
+  assert.equal(a.parkKind, undefined, 'no item.parked in the stream → parkKind stays undefined, never guessed');
+  assert.equal(result.aggregates.attentionCostShare, 0);
+});
+
+test('trajectory: attentionCostShare over mixed decision/ops/hold parks, hold excluded from both sides of the ratio', () => {
+  const now = '2026-07-11T00:00:00Z';
+  const events: LedgerEvent[] = [
+    // 2 decision parks
+    ...makeAttemptChain({
+      wi: 'WI-165f', attempt: 1, dispatchedAt: '2026-07-10T08:00:00Z',
+      terminalType: 'gate.parked', terminalAt: '2026-07-10T08:05:00Z', terminalReason: 'spine',
+      companionParkKind: 'decision',
+    }),
+    ...makeAttemptChain({
+      wi: 'WI-165g', attempt: 1, dispatchedAt: '2026-07-10T08:10:00Z',
+      terminalType: 'gate.parked', terminalAt: '2026-07-10T08:15:00Z', terminalReason: 'touches-overstep',
+      companionParkKind: 'decision',
+    }),
+    // 1 ops park
+    ...makeAttemptChain({
+      wi: 'WI-165h', attempt: 1, dispatchedAt: '2026-07-10T08:20:00Z',
+      terminalType: 'gate.failed', terminalAt: '2026-07-10T08:25:00Z',
+      terminalReason: 'no-commit: agent produced no commit',
+      companionParkKind: 'ops',
+    }),
+    // 1 hold park (must be excluded from the denominator, not just the numerator)
+    ...makeAttemptChain({
+      wi: 'WI-165i', attempt: 1, dispatchedAt: '2026-07-10T08:30:00Z',
+      terminalType: 'gate.failed', terminalAt: '2026-07-10T08:35:00Z',
+      terminalReason: 'cluster produced no commit',
+      companionParkKind: 'hold',
+    }),
+    // 1 merged attempt — no park at all, must not affect the aggregate
+    ...makeAttemptChain({
+      wi: 'WI-165j', attempt: 1, dispatchedAt: '2026-07-10T08:40:00Z',
+      terminalType: 'gate.passed', terminalAt: '2026-07-10T08:45:00Z',
+    }),
+    makeEvent('dispatch', 'WI-165j', 'item.merged', { commit: 'zzz', deployed: false }, '2026-07-10T08:45:30Z'),
+  ];
+
+  const result = projectTrajectory(events, { now, days: 14 });
+  assert.equal(result.aggregates.attempts, 5);
+  assert.equal(result.aggregates.decisionParks, 2);
+  assert.equal(result.aggregates.opsParks, 1);
+  // attentionCostShare = decision / (decision + ops) = 2 / 3, hold and merged excluded entirely
+  assert.ok(Math.abs(result.aggregates.attentionCostShare - 2 / 3) < 1e-9, 'attentionCostShare must be 2/3');
+});
+
+test('trajectory: empty stream → attentionCostShare/decisionParks/opsParks are zeroed, not NaN', () => {
+  const result = projectTrajectory([], { now: '2026-07-11T00:00:00Z' });
+  assert.equal(result.aggregates.attentionCostShare, 0);
+  assert.equal(result.aggregates.decisionParks, 0);
+  assert.equal(result.aggregates.opsParks, 0);
+});
+
+test('trajectory: parkKind already present on the terminal event itself is preserved, not overwritten by an absent companion', () => {
+  // Defensive: if a future emitter ever puts parkKind directly on the terminal (as the
+  // WI-159 test above exercises for gate.failed), the correlation must not clobber it with
+  // undefined just because no companion item.parked happens to exist in this stream.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-165k',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T14:00:00Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T14:05:00Z',
+      terminalReason: 'no-commit: agent produced no commit',
+      terminalParkKind: 'ops',
+      // no companion item.parked in this synthetic stream
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.parkKind, 'ops', 'terminal-carried parkKind must win when present, correlation is a fallback only');
 });
 
 test('trajectory: briefed vs unbriefed attempts → scoutCoverage', () => {

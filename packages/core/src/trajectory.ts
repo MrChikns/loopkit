@@ -24,6 +24,17 @@
  *   AND before the next build.dispatched for the same item. This is O(n²) over attempts but
  *   the ledger is bounded (a few thousand events over the window). Simple is intentional —
  *   a more expensive join would require indexing not warranted here.
+ *
+ * PARKKIND JOIN (WI-165, follow-up to WI-159):
+ *   `parkKind` is carried by the COMPANION `item.parked` event, not by the terminal event the
+ *   walk keys off (gate.failed/gate.parked/build.crashed never carry it in production). Every
+ *   emitter (beats/dispatch.ts, doctor.ts, conductor.ts) appends the terminal and its companion
+ *   item.parked TOGETHER in one appendEvents([...]) call, companion immediately after terminal —
+ *   so the join is an INDEX bracket (first item.parked for this wi at-or-after the terminal's
+ *   stream index, before the next build.dispatched), not a timestamp comparison (concurrent
+ *   makeEvent() calls can share a millisecond). This is what makes a re-queued-then-re-parked
+ *   item (e.g. two attempts, each separately parked) attribute the right parkKind to the right
+ *   attempt instead of the first/last one found anywhere in the stream.
  */
 
 import { LedgerEvent } from './schema.js';
@@ -51,13 +62,20 @@ export interface AttemptRecord {
   briefed: boolean;                    // item had item.briefed before this dispatch
   judgeVerdict?: 'pass' | 'fail' | 'unparseable';  // latest review.verdict before terminal
   /**
-   * Raw failure/park classification carried by the terminal event, when present.
-   * Populated from terminalEv.data.reason (gate.failed / gate.parked / build.crashed all
-   * carry a `reason` string) and terminalEv.data.parkKind (only some item.parked-adjacent
-   * events carry this; gate.parked itself does not, so parkKind is frequently absent even
-   * when reason is present). Not populated for 'merged' or 'in-flight' outcomes.
+   * Raw failure/park classification. `reason` comes straight from the terminal event
+   * (gate.failed / gate.parked / build.crashed all carry a `reason` string). Not populated
+   * for 'merged' or 'in-flight' outcomes.
    */
   reason?: string;
+  /**
+   * WI-165: the terminal event itself almost never carries parkKind in production (gate.parked
+   * data doesn't include it) — this is populated by correlating the attempt's COMPANION
+   * item.parked event instead (same wi, first item.parked at-or-after the terminal's stream
+   * index and before the next build.dispatched; see the pass-3b/pass-4 comments in
+   * projectTrajectory for the full correlation rule). One of 'decision' | 'ops' | 'hold' |
+   * 'decomposition' in practice (schema.ts ParkKind), but read generically as a string so an
+   * unexpected value is carried through rather than dropped.
+   */
   parkKind?: string;
   /**
    * Deterministic, normalized failure class derived from `reason` by classifyReason().
@@ -151,6 +169,17 @@ export interface TrajectoryAggregates {
    * which model has the best first-pass rate (routing.ts:167).
    */
   parkRateByClass: Partial<Record<ReasonClass, number>>;
+  /**
+   * Share of failures that reached the operator's desk (parkKind:'decision') among failures
+   * that either did that OR were handled mechanically (parkKind:'ops'). 'hold' (an operator-
+   * initiated or policy pause, not a failure) is excluded from both sides of the ratio. Answers
+   * "did this change reduce founder interruptions", which parkRateByClass (defect mix) cannot.
+   * 0 when there are no decision/ops parks in the window (never NaN).
+   */
+  attentionCostShare: number;
+  /** Raw counts backing attentionCostShare — lets a consumer show "N of M parks" alongside the rate. */
+  decisionParks: number;
+  opsParks: number;
 }
 
 export interface TrajectoryProjection {
@@ -184,6 +213,9 @@ const ZERO_AGGREGATES: TrajectoryAggregates = {
   scoutCoverage: 0,
   judgeFailShare: 0,
   parkRateByClass: {},
+  attentionCostShare: 0,
+  decisionParks: 0,
+  opsParks: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -273,6 +305,39 @@ export function projectTrajectory(
     }
   });
 
+  // -- Pass 3b: collect item.parked events indexed by item, in stream order --
+  // WI-165: item.parked is the ONLY event carrying the real parkKind — 'decision' | 'ops' |
+  // 'hold' | 'decomposition' — because every emitter (dispatch.ts, doctor.ts, conductor.ts)
+  // appends a park's terminal event (gate.failed/gate.parked/build.crashed) and its companion
+  // item.parked TOGETHER, in the same appendEvents([...]) call, with the companion always
+  // immediately following the terminal for that item (verified across every park call site in
+  // beats/dispatch.ts, doctor.ts and conductor.ts, and against the real ledger: WI-164's two
+  // attempts each show gate.failed then item.parked as consecutive events for that item).
+  // item.parked is deliberately NOT added to TERMINAL_TYPES — the walk below still finds the
+  // real terminal (gate.parked/gate.failed/build.crashed), then separately looks up the
+  // nearest item.parked for the same item at-or-after that terminal's index and before the
+  // next build.dispatched (or end of stream). This bracket is the same one already used for
+  // review.verdict and cost.usage, so a re-queued-then-re-parked item (e.g. WI-164) attributes
+  // each item.parked to the correct attempt rather than the first or last one found.
+  interface ParkEntry {
+    idx: number;
+    ts: string;
+    parkKind?: string;
+  }
+  const parksByItem = new Map<string, ParkEntry[]>();
+  events.forEach((ev, idx) => {
+    if (ev.type === 'item.parked') {
+      const d = ev.data as Record<string, unknown>;
+      const list = parksByItem.get(ev.item) ?? [];
+      list.push({
+        idx,
+        ts: ev.ts,
+        parkKind: typeof d['parkKind'] === 'string' ? d['parkKind'] : undefined,
+      });
+      parksByItem.set(ev.item, list);
+    }
+  });
+
   // -- Pass 4: walk build.dispatched events to build attempt records --
   const TERMINAL_TYPES = new Set([
     'gate.passed', 'gate.failed', 'gate.parked', 'build.crashed', 'item.merged',
@@ -299,12 +364,14 @@ export function projectTrajectory(
     // Search forward in stream for this wi's next terminal event.
     // Stop at the next build.dispatched for the same wi (new attempt begins).
     let terminalEv: LedgerEvent | undefined;
+    let terminalIdx: number | undefined;
     for (let i = dispatchIdx + 1; i < events.length; i++) {
       const cand = events[i]!;
       if (cand.item !== wi) continue;
       if (cand.type === 'build.dispatched') break; // next attempt starts — stop
       if (TERMINAL_TYPES.has(cand.type)) {
         terminalEv = cand;
+        terminalIdx = i;
         break;
       }
     }
@@ -336,6 +403,38 @@ export function projectTrajectory(
     }
     const reasonClass: ReasonClass | undefined = reason !== undefined ? classifyReason(reason) : undefined;
 
+    // -- Upper bound for this attempt's window: the next build.dispatched for the same wi. --
+    // Shared by the parkKind correlation below and the cost/verdict joins further down.
+    let nextDispatchIdx = events.length; // default: no upper bound
+    for (let i = dispatchIdx + 1; i < events.length; i++) {
+      if (events[i]!.item === wi && events[i]!.type === 'build.dispatched') {
+        nextDispatchIdx = i;
+        break;
+      }
+    }
+
+    // -- parkKind correlation (WI-165): the terminal event itself almost never carries
+    // parkKind (gate.parked/gate.failed/build.crashed data shapes don't include it in
+    // production — see the file-level correlation note above pass 3b). Find this attempt's
+    // companion item.parked instead: every emitter appends it in the SAME appendEvents call
+    // immediately after the terminal, so "the first item.parked for this wi at-or-after the
+    // terminal's index, before the next build.dispatched" is an unambiguous, order-based join
+    // — no timestamp comparison needed (concurrent makeEvent() calls can share a millisecond,
+    // which is why this is an index bracket, not a nearest-ts comparison like the cost join).
+    // Only attempted when the terminal itself didn't already carry parkKind. Attempts with no
+    // terminal (in-flight) have no terminalIdx to bracket from and are skipped entirely.
+    if (parkKind === undefined && terminalIdx !== undefined) {
+      const parks = parksByItem.get(wi);
+      if (parks) {
+        for (const p of parks) {
+          if (p.idx < terminalIdx) continue; // strictly the companion of THIS attempt's terminal
+          if (p.idx >= nextDispatchIdx) break; // belongs to a later (re-queued) attempt — stop
+          if (p.parkKind !== undefined) parkKind = p.parkKind;
+          break; // nearest candidate at/after the terminal wins
+        }
+      }
+    }
+
     const endedAt = terminalEv?.ts;
     let durationMinutes: number | undefined;
     if (endedAt) {
@@ -344,14 +443,6 @@ export function projectTrajectory(
     }
 
     // -- Cost join: nearest-in-time dispatch cost.usage for this wi, after dispatch, before next dispatch --
-    // Find the index of the next build.dispatched for same wi (upper bound for the search).
-    let nextDispatchIdx = events.length; // default: no upper bound
-    for (let i = dispatchIdx + 1; i < events.length; i++) {
-      if (events[i]!.item === wi && events[i]!.type === 'build.dispatched') {
-        nextDispatchIdx = i;
-        break;
-      }
-    }
 
     // Among dispatch cost events for this wi in (dispatchIdx, nextDispatchIdx), pick first.
     // The wi field may be comma-joined (batch) — check with includes.
@@ -511,6 +602,19 @@ export function projectTrajectory(
     }
   }
 
+  // Attention cost (WI-165): the share of failures that reached the operator's desk
+  // (parkKind:'decision') vs. were handled mechanically (parkKind:'ops'), now that parkKind
+  // is actually populated via the item.parked correlation above. 'hold' is EXCLUDED from
+  // both numerator and denominator — a hold is a policy pause (operator explicitly stopped
+  // the item, or a decomposition/backoff park), not a failure outcome, so folding it in would
+  // understate attentionCostShare whenever the operator is actively working the queue. This is
+  // the number that shows whether an interface change reduced founder INTERRUPTIONS, as
+  // opposed to parkRateByClass which only shows which defect fired.
+  const attentionEligible = attemptRecords.filter(a => a.parkKind === 'decision' || a.parkKind === 'ops');
+  const decisionParks = attentionEligible.filter(a => a.parkKind === 'decision').length;
+  const opsParks = attentionEligible.filter(a => a.parkKind === 'ops').length;
+  const attentionCostShare = attentionEligible.length > 0 ? decisionParks / attentionEligible.length : 0;
+
   return {
     window: { days, from, to },
     attempts: attemptRecords,
@@ -526,6 +630,9 @@ export function projectTrajectory(
       scoutCoverage,
       judgeFailShare,
       parkRateByClass,
+      attentionCostShare,
+      decisionParks,
+      opsParks,
     },
   };
 }
