@@ -1202,8 +1202,12 @@ export function buildPrompt(
   repairEvidence?: string,
   resumeNote?: string,
   playbookContent?: string,
+  touches?: string,
 ): string {
-  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change, committed to the current branch by explicit path (never git add -A). COMMIT MECHANICS (your session's tool allowlist only matches plain single commands — anything else is silently denied and your work is lost): stage and commit as TWO separate Bash calls, \`git add <paths>\` then \`git commit -m "<message>"\`; never chain with && or ;, never prefix with cd, never use \`git -C <path>\` (you are already in the right directory), never use $(...) or heredocs in the commit command; keep the -m message single-line quoted. If a git command is denied, retry it in that plain form — do NOT finish without committing. Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope. If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into a commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
+  const touchesSection = touches
+    ? ` DECLARED FOOTPRINT: this item's declared Touches (the only files you are authorized to write) is: ${touches}. If the change genuinely requires writing outside this footprint, do NOT silently write there — escalate it in the manifest "notes" field using the INTENT/EVIDENCE/RISK/RECOMMENDATION format below instead, and make the smallest in-footprint change you safely can.`
+    : '';
+  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change, committed to the current branch by explicit path (never git add -A). COMMIT MECHANICS (your session's tool allowlist only matches plain single commands — anything else is silently denied and your work is lost): stage and commit as TWO separate Bash calls, \`git add <paths>\` then \`git commit -m "<message>"\`; never chain with && or ;, never prefix with cd, never use \`git -C <path>\` (you are already in the right directory), never use $(...) or heredocs in the commit command; keep the -m message single-line quoted. If a git command is denied, retry it in that plain form — do NOT finish without committing. Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope.${touchesSection} If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into a commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
   const playbookSection = playbookContent
     ? `\n\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout your implementation):\n${playbookContent}`
     : '';
@@ -1236,7 +1240,7 @@ export function buildPrompt(
  * The worker also writes one MANIFEST-<WI-id>.json per item at the worktree root.
  * @internal exported for tests
  */
-export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string }[], playbookContent?: string): string {
+export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string }[], playbookContent?: string): string {
   const playbookSection = playbookContent
     ? `\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout):\n${playbookContent}\n`
     : '';
@@ -1248,7 +1252,10 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
       const evidenceSection = it.repairEvidence
         ? `\n${it.repairEvidence}`
         : '';
-      return `### ITEM ${i + 1} — ${it.id}${briefSection}${evidenceSection}\n${it.spec}`;
+      const touchesSection = it.touches
+        ? `\nDeclared Touches for ${it.id} (the only files this item is authorized to write): ${it.touches}`
+        : '';
+      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${evidenceSection}\n${it.spec}`;
     })
     .join('\n\n');
   const batchManifestInstruction = `
@@ -1258,7 +1265,7 @@ CERTIFICATION: green tests alone are a brief, not a certification — fill in "c
 PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
 Make ONE SEPARATE COMMIT PER ITEM, and start each commit subject with the item id in parentheses — e.g. "feat(${items[0].id}): ..." — so each change is attributable. Commit by explicit path (never git add -A). COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
-Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, skip it (leave it uncommitted) and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.
+Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. Each item above may declare its own Touches footprint — the only files that item is authorized to write. If a change genuinely requires writing outside its declared footprint, do NOT silently write there — escalate it in that item's manifest "notes" field instead (see ESCALATION FORMAT below), and make the smallest in-footprint change you safely can. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, skip it (leave it uncommitted) and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.
 
 ${playbookSection}${list}${batchManifestInstruction}`;
 }
@@ -1922,7 +1929,7 @@ export async function runTargetLane(
 
     // ── Build worker in the target worktree ──────────────────────────────────
     const baseSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
-    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText));
+    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches);
 
     // ── ADR-008 §2 detached branch: spawn, record pgid, DON'T await this beat ──
     // onSpawn fires synchronously (claudeCli.ts) before run() resolves, so spawnedPgid is set right
@@ -2896,8 +2903,8 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // Brief (context pack) is injected when available; repair evidence after it.
       // Resume note sits between CONTEXT PACK and REPAIR EVIDENCE.
       const prompt = group.length > 1
-        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id) })), playbookContent)
-        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent);
+        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches })), playbookContent)
+        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches);
 
       // Run-controls hard-stop cancel poll: re-reads the ledger tail and fires when ANY member
       // of the co-located group has an
