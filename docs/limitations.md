@@ -47,7 +47,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:989`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1003`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -69,26 +69,27 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4118`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4172`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
   then a combination nothing ever tested. Porting the engineering lane's terminal to these two lanes
   is the fix.
 
-- **All three build lanes open their worktree from ambient `HEAD`, not a declared default branch**
-  (`packages/core/src/beats/dispatch.ts:812`<!--cite:openBuildWorktreeHead-->; the conductor's call at
-  `packages/core/src/conductor.ts:428`<!--cite:conductorWorktreeHead-->). The engineering lane makes this
-  safe by pulling first and re-gating after; the other two do not. *Bounded:* a plane host normally
-  sits on the default branch, so ambient `HEAD` usually *is* it. *Matters when:* it isn't — commits
-  already sitting on a non-default `HEAD` ride into the merge, while `Touches`-overstep and the judge
-  only ever inspect the diff *after* that ambient base. The extra commits are invisible to every guard
-  and visible in the merge.
+- **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
+  lane passes an explicit base ref to `openBuildWorktree`
+  (`packages/core/src/beats/dispatch.ts:824`<!--cite:openBuildWorktreeHead-->; the conductor's call at
+  `packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->), so the base the guards
+  measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
+  commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
+  ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
+  guard that defers when the checkout is not on `master` — and now passes it explicitly rather than
+  by omission.
 
 - **Claim-before-pick is narrower than it looks in the target lane.** The engineering lane closes the
   read-to-spawn race properly: re-fold under the ledger lock, drop what a foreign session took, claim
   every survivor in the same locked append. The shared pick list only *defers* to an already-active
-  claim (`packages/core/src/beats/dispatch.ts:2926`<!--cite:queuedClaimDeference-->), which is a read, not
+  claim (`packages/core/src/beats/dispatch.ts:2970`<!--cite:queuedClaimDeference-->), which is a read, not
   a reservation — and the target lane never appends a claim of its own. The conductor does claim, under
   the same lock (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). *Bounded:* single
   host, one dispatch beat, so the racing writer has to be an attended session starting in a
@@ -106,7 +107,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4304`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4358`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
