@@ -813,6 +813,48 @@ test('loopctl events --item WI-001 --json: returns only events for that item in 
   }
 });
 
+test('loopctl state --item: a respec\'d item renders the amended spec, not the stale capture text (WI-185)', async () => {
+  const dir = makeTemp('state-respec-single');
+  try {
+    await appendEvent(dir, makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'original stale description' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'original stale description' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-001', 'item.respec', { spec: 'corrected amended description', reason: 'steer' }));
+
+    const out = await runLoopctl(dir, 'state', '--item', 'WI-001');
+    assert.match(out, /corrected amended description/, 'human render must show the amended spec');
+    assert.doesNotMatch(out, /original stale description/, 'human render must not show the superseded capture text');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loopctl state --item: an item without a respec renders its original text unchanged', async () => {
+  const dir = makeTemp('state-no-respec-single');
+  try {
+    await appendEvent(dir, makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'plain unamended item text' }));
+
+    const out = await runLoopctl(dir, 'state', '--item', 'WI-002');
+    assert.match(out, /plain unamended item text/, 'human render falls back to sourceText when no spec exists');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loopctl state (all items): the list view also prefers the amended spec over stale capture text', async () => {
+  const dir = makeTemp('state-respec-list');
+  try {
+    await appendEvent(dir, makeEvent('operator', 'WI-003', 'item.captured', { source: 'cli', text: 'original stale list description' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'original stale list description' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-003', 'item.respec', { spec: 'corrected amended list description', reason: 'steer' }));
+
+    const out = await runLoopctl(dir, 'state');
+    assert.match(out, /corrected amended list description/, 'list render must show the amended spec');
+    assert.doesNotMatch(out, /original stale list description/, 'list render must not show the superseded capture text');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loopctl state: quarantined invalid id produces no stderr warning on the CLI path', async () => {
   const dir = makeTemp('quarantine-state');
   try {

@@ -480,6 +480,29 @@ test('board: answered items appear in the Answered section, not with live-work r
   assert.doesNotMatch(routedSection, /WI-041/, 'answered item not in routed bucket');
 });
 
+test('board: a respec\'d item renders the amended spec, not the stale original capture text (WI-185)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-050', 'item.captured', { source: 'cli', text: 'original stale description' }),
+    makeEvent('reactor', 'WI-050', 'item.queued', { spec: 'original stale description' }),
+    makeEvent('reactor', 'WI-050', 'item.respec', { spec: 'corrected amended description', reason: 'steer' }),
+  ];
+  const result = fold(events);
+  const board = renderBoard(result, { now: new Date('2026-01-01T12:00:00Z') });
+
+  assert.match(board, /corrected amended description/, 'board must show the amended spec');
+  assert.doesNotMatch(board, /original stale description/, 'board must not show the superseded capture text');
+});
+
+test('board: an item without a respec renders its original sourceText unchanged', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-051', 'item.captured', { source: 'cli', text: 'plain unamended item text' }),
+  ];
+  const result = fold(events);
+  const board = renderBoard(result, { now: new Date('2026-01-01T12:00:00Z') });
+
+  assert.match(board, /plain unamended item text/, 'board falls back to sourceText when no spec exists');
+});
+
 test('fold: non-WI item ids (ops events like loop.beat keyed "system") never materialize items', () => {
   const events = [
     makeEvent('reactor', 'system', 'loop.beat', { loop: 'reactor', result: '{}' }),

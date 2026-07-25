@@ -463,7 +463,10 @@ async function cmdState(rest: string[]): Promise<void> {
         ? `  manifest(conf=${manifestSummary.confidence.toFixed(2)},files=${manifestSummary.files})`
         : '';
       console.log(`${rec.id}  ${rec.state}  attempts=${rec.attempts}  messages=${rec.messages.length}${salvageAvailable ? '  salvageAvailable=true' : ''}${manifestTag}`);
-      if (rec.sourceText) console.log(`  text: ${rec.sourceText.slice(0, 100)}`);
+      // Operator-facing render: prefer the amended spec (item.respec target) over the
+      // immutable original capture text, so a respec'd item never shows superseded text.
+      const displayText = rec.spec ?? rec.sourceText;
+      if (displayText) console.log(`  text: ${displayText.slice(0, 100)}`);
     }
   } else {
     if (asJson) {
@@ -474,7 +477,9 @@ async function cmdState(rest: string[]): Promise<void> {
       console.log(renderBoard(result));
     } else {
       for (const [, rec] of result.items) {
-        console.log(`${rec.id.padEnd(8)}  ${rec.state.padEnd(12)}  ${rec.sourceText?.slice(0, 60) ?? ''}`);
+        // Operator-facing render: prefer the amended spec over the immutable original capture.
+        const displayText = rec.spec ?? rec.sourceText;
+        console.log(`${rec.id.padEnd(8)}  ${rec.state.padEnd(12)}  ${displayText?.slice(0, 60) ?? ''}`);
       }
     }
   }

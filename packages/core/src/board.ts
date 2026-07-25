@@ -62,10 +62,12 @@ function renderItem(rec: ItemRecord, now: Date): string {
   const modelStr = rec.model ? ` · model=${rec.model}` : '';
   const priorityStr = rec.priority ? ` · ${rec.priority}` : '';
 
-  const shortText = rec.sourceText
-    ? rec.sourceText.slice(0, 80).replace(/\n/g, ' ') + (rec.sourceText.length > 80 ? '…' : '')
-    : rec.spec
-      ? rec.spec.slice(0, 80).replace(/\n/g, ' ') + (rec.spec.length > 80 ? '…' : '')
+  // Operator-facing render prefers the amended spec (item.respec target) over the immutable
+  // original capture text — a respec'd item must never show its superseded description.
+  const shortText = rec.spec
+    ? rec.spec.slice(0, 80).replace(/\n/g, ' ') + (rec.spec.length > 80 ? '…' : '')
+    : rec.sourceText
+      ? rec.sourceText.slice(0, 80).replace(/\n/g, ' ') + (rec.sourceText.length > 80 ? '…' : '')
       : '';
 
   return [
