@@ -822,6 +822,37 @@ export function openBuildWorktree(
   return { ok: true };
 }
 
+/**
+ * WI-172: git mechanics shared by the target lane's and conductor's merge-and-close tails only
+ * (never the batch lane — ADR-012). Checkout `mergeDestination` (passed IN by the caller, NEVER
+ * derived here — deriving it is the false-green class ADR-012 calls out), `merge --no-ff`,
+ * abort+report on conflict, else resolve the merge commit. Mutex/loop-name/deploy stay at call
+ * sites (real per-caller differences, not lane accidents). The `stage` discriminant preserves
+ * an unverified asymmetry as-is: the target lane emits 1 event on checkout failure vs 2 on merge
+ * conflict; conductor's mutex-wrapped path always emits 2. Not resolved here — reproduced verbatim.
+ */
+export function closeMergedCluster(
+  gitRoot: string,
+  wtPath: string,
+  branch: string,
+  mergeDestination: string,
+  commitMessage: string,
+): { ok: true; commit: string }
+  | { ok: false; stage: 'checkout'; reason: string }
+  | { ok: false; stage: 'merge'; reason: string } {
+  const co = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
+  if (co.status !== 0) {
+    return { ok: false, stage: 'checkout', reason: co.stderr?.toString().trim() ?? '' };
+  }
+  const merge = spawnSync('git', ['merge', '--no-ff', '-m', commitMessage, branch], { cwd: gitRoot, stdio: 'pipe' });
+  if (merge.status !== 0) {
+    spawnSync('git', ['merge', '--abort'], { cwd: gitRoot, stdio: 'pipe' });
+    return { ok: false, stage: 'merge', reason: '' };
+  }
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' }).stdout?.toString().trim() ?? '';
+  return { ok: true, commit };
+}
+
 // ---------------------------------------------------------------------------
 // Worker evidence + worktree verification
 // ---------------------------------------------------------------------------
@@ -2282,25 +2313,26 @@ async function finalizeTargetBuild(
   if (judgeEvents.length > 0) await appendEvents(opts.ledgerDir, judgeEvents);
 
   // ── Merge into the target's default branch (in the target repo) ───────────
-  const mergeResult = spawnSync('git', ['checkout', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
-  if (mergeResult.status !== 0) {
-    const reason = `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${mergeResult.stderr?.toString().trim()}`;
+  // WI-172: shared git mechanics (closeMergedCluster) — mergeDestination passed IN
+  // (manifest.defaultBranch), never derived. Event-count asymmetry between checkout-failure
+  // (1 event) and merge-conflict (2 events) is this call site's own pre-existing shape,
+  // reproduced unchanged via the `stage` discriminant.
+  const closeResult = closeMergedCluster(gitRoot, wtPath, branch, manifest.defaultBranch, `feat(dispatch): ${rec.id} (target ${manifest.name})`);
+  if (!closeResult.ok) {
     removeWorktree(gitRoot, wtPath);
-    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
-    return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
-  }
-  const merge = spawnSync('git', ['merge', '--no-ff', '-m', `feat(dispatch): ${rec.id} (target ${manifest.name})`, branch], { cwd: gitRoot, stdio: 'pipe' });
-  if (merge.status !== 0) {
-    spawnSync('git', ['merge', '--abort'], { cwd: gitRoot, stdio: 'pipe' });
+    if (closeResult.stage === 'checkout') {
+      const reason = `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${closeResult.reason}`;
+      await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
+    }
     const reason = `target merge conflict on '${manifest.defaultBranch}'`;
-    removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
       makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 2, detail: reason };
   }
-  const mergeCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' }).stdout?.toString().trim() ?? '';
+  const mergeCommit = closeResult.commit;
 
   // Cleanup: drop the build worktree + branch (merge is in the target's default branch now).
   removeWorktree(gitRoot, wtPath);

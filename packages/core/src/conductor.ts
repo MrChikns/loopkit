@@ -38,6 +38,7 @@ import { LlmProvider } from './providers/types.js';
 import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import {
   buildPrompt,
+  closeMergedCluster,
   CommitMode,
   loadApprovedTouches,
   mergeEvidence,
@@ -553,23 +554,20 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
   const judgeEvents = built.flatMap(rec => judgeVerdictEvents(rec.id, 'conduct', guardOutcome.judgeVerdict));
   if (judgeEvents.length > 0) await appendEvents(ctx.ledgerDir, judgeEvents);
 
-  // ── Merge the cluster branch (per-repo mutex: concurrent clusters never race a checkout) ─
+  // ── Merge the cluster branch (per-repo mutex: concurrent clusters never race a checkout —
+  // WI-172: shared git mechanics via closeMergedCluster, mergeDestination passed IN as
+  // plan.defaultBranch, never derived; the mutex wrap stays here since it is conductor-only —
+  // the dispatch target lane is already a single serial loop and never needed one) ───────────
   const changedFiles = guardOutcome.changedFiles;
   const mergeResult = await ctx.mutex.run(plan.repoPath, async () => {
-    const co = spawnSync('git', ['checkout', plan.defaultBranch], { cwd: plan.repoPath, stdio: 'pipe' });
-    if (co.status !== 0) {
-      return { ok: false as const, reason: `cannot checkout '${plan.defaultBranch}': ${co.stderr?.toString().trim()}` };
+    const closed = closeMergedCluster(plan.repoPath, wtPath, branch, plan.defaultBranch, `conduct: ${ids.join(' ')} (${ctx.sessionId})`);
+    if (!closed.ok) {
+      const reason = closed.stage === 'checkout'
+        ? `cannot checkout '${plan.defaultBranch}': ${closed.reason}`
+        : `merge conflict on '${plan.defaultBranch}'`;
+      return { ok: false as const, reason };
     }
-    const merge = spawnSync('git', [
-      'merge', '--no-ff', '-m', `conduct: ${ids.join(' ')} (${ctx.sessionId})`, branch,
-    ], { cwd: plan.repoPath, stdio: 'pipe' });
-    if (merge.status !== 0) {
-      spawnSync('git', ['merge', '--abort'], { cwd: plan.repoPath, stdio: 'pipe' });
-      return { ok: false as const, reason: `merge conflict on '${plan.defaultBranch}'` };
-    }
-    const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: plan.repoPath, stdio: 'pipe' })
-      .stdout?.toString().trim() ?? '';
-    return { ok: true as const, commit };
+    return { ok: true as const, commit: closed.commit };
   });
 
   if (!mergeResult.ok) {
