@@ -7,15 +7,20 @@
  *
  * It also verifies the durability barrier: every append fsyncs its handle BEFORE closing
  * it. See the honesty note on `traceHandleOps` for exactly how much that proves.
+ *
+ * WI-195 additions — two PREDICATE boundaries in the same module that a mutation run proved
+ * were only ever crossed incidentally, never asserted:
+ *   - `acquireLock`'s stale-lock reclaim age test (every mutant on it survived)
+ *   - `loadAllEvents`' ts/id ordering tiebreak (a real event-sourcing invariant)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync, utimesSync, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { appendEvent, appendEvents } from '../src/ledger.js';
-import { makeEvent } from '../src/schema.js';
+import { appendEvent, appendEvents, withLock, loadAllEvents } from '../src/ledger.js';
+import { makeEvent, LedgerEvent } from '../src/schema.js';
 
 const WORK_DIR = join(tmpdir(), `loopkit-append-test-${process.pid}`);
 
@@ -281,6 +286,142 @@ test('append: large concurrent batch (stress) — no data loss', async () => {
     for (const line of lines) {
       JSON.parse(line); // throws if corrupt
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// acquireLock: the stale-lock reclaim AGE predicate (WI-195)
+//
+// `Date.now() - st.mtimeMs > LOCK_TIMEOUT_MS` decides whether a contended lock is stolen or
+// respected. Every mutant on it survived the mutation run (forced true, forced false, `<=`,
+// `-`→`+`, whole body deleted) — a forced-true version steals a LIVE holder's lock, which is
+// exactly the concurrent-append corruption the lock exists to prevent.
+// ---------------------------------------------------------------------------
+
+/**
+ * `LOCK_TIMEOUT_MS` in ledger.ts is module-private; mirrored here. It is BOTH the acquire spin
+ * deadline AND the staleness threshold — which is why these tests stub the clock instead of
+ * sleeping: a real contended acquire spins for 30 s before the reclaim branch is even reached.
+ */
+const LEDGER_LOCK_TIMEOUT_MS = 30_000;
+
+/**
+ * Run `fn` with Date.now() returning `first` on its first call and `rest` on every call after.
+ * acquireLock calls it three times on the contended path (deadline · loop condition · staleness
+ * check), so returning a past-the-deadline value from call 2 onward collapses the spin to zero
+ * while leaving the staleness arithmetic fully under the test's control.
+ */
+async function withStubbedNow<T>(first: number, rest: number, fn: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  let calls = 0;
+  Date.now = () => (++calls === 1 ? first : rest);
+  try {
+    return await fn();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+/** Pre-create a held `.ledger.lock` with a pinned mtime; returns the mtime the OS actually stored. */
+function heldLockMtimeMs(dir: string): number {
+  const lockPath = join(dir, '.ledger.lock');
+  mkdirSync(lockPath, { recursive: true });
+  const pinned = new Date(1_800_000_000_000);
+  utimesSync(lockPath, pinned, pinned);
+  return statSync(lockPath).mtimeMs;
+}
+
+test('ledger lock: a lock exactly LOCK_TIMEOUT_MS old is NOT stale — acquire fails rather than stealing it', async () => {
+  const dir = join(WORK_DIR, 'lock-not-stale');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const mtimeMs = heldLockMtimeMs(dir);
+    const checkNow = mtimeMs + LEDGER_LOCK_TIMEOUT_MS; // age === threshold; the test is STRICTLY `>`
+    let ran = false;
+    await assert.rejects(
+      withStubbedNow(checkNow - LEDGER_LOCK_TIMEOUT_MS, checkNow,
+        () => withLock(dir, async () => { ran = true; })),
+      /Could not acquire ledger lock/,
+      'a lock that has not yet outlived the timeout must never be reclaimed',
+    );
+    assert.equal(ran, false, 'the transaction body must not run without the lock');
+    assert.ok(existsSync(join(dir, '.ledger.lock')), "the holder's lock dir must be left in place");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger lock: a lock older than LOCK_TIMEOUT_MS IS reclaimed and the transaction proceeds', async () => {
+  const dir = join(WORK_DIR, 'lock-stale');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const mtimeMs = heldLockMtimeMs(dir);
+    const checkNow = mtimeMs + LEDGER_LOCK_TIMEOUT_MS + 1; // one ms past the threshold
+    let ran = false;
+    const result = await withStubbedNow(checkNow - LEDGER_LOCK_TIMEOUT_MS, checkNow,
+      () => withLock(dir, async () => { ran = true; return 'reclaimed'; }));
+    assert.equal(result, 'reclaimed', 'a stale lock must be reclaimed, not wedge the lane forever');
+    assert.equal(ran, true);
+    assert.equal(existsSync(join(dir, '.ledger.lock')), false, 'the reclaimed lock is released on exit');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// loadAllEvents ordering: ts first, event id as the deterministic tiebreak (WI-195)
+//
+// `t !== 0 ? t : a.id.localeCompare(b.id)` forced to `false` (always compare ids) survived.
+// Fold order is the kernel's replay order, so this is a load-bearing event-sourcing invariant,
+// not a cosmetic one.
+// ---------------------------------------------------------------------------
+
+/** A schema-valid event with a caller-chosen id (ids must start with `ev-`) and timestamp. */
+function eventWithId(id: string, ts: string, item: string): LedgerEvent {
+  return { ...makeEvent('test', item, 'item.queued', { spec: item }, ts), id } as unknown as LedgerEvent;
+}
+
+function writeSegment(dir: string, name: string, events: LedgerEvent[]): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+}
+
+const ID_AA = 'ev-00000000000000000000AA';
+const ID_ZZ = 'ev-00000000000000000000ZZ';
+
+test('loadAllEvents: same-timestamp events tiebreak on event id, NOT on file position', async () => {
+  const dir = join(WORK_DIR, 'order-tiebreak');
+  const SAME_TS = '2026-07-01T00:00:00.000Z';
+  // Written in DESCENDING id order, so "insertion order" and "id order" disagree.
+  writeSegment(dir, 'work-2026-07.jsonl', [
+    eventWithId(ID_ZZ, SAME_TS, 'WI-ZZ'),
+    eventWithId(ID_AA, SAME_TS, 'WI-AA'),
+  ]);
+  try {
+    const events = await loadAllEvents(dir);
+    // kills: `t !== 0 ? t : …` forced TRUE / `t !== 0` → `t === 0` (both fall back to the
+    //        comparator returning 0, i.e. file order, for a same-ms pair).
+    assert.deepEqual(events.map(e => e.item), ['WI-AA', 'WI-ZZ'],
+      'two events sharing a millisecond must replay in monotonic id order');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadAllEvents: timestamp wins over id — the id tiebreak applies ONLY when ts is equal', async () => {
+  const dir = join(WORK_DIR, 'order-ts-wins');
+  // ids deliberately contradict ts order: the LATER event carries the LOWER id.
+  writeSegment(dir, 'work-2026-07.jsonl', [
+    eventWithId(ID_AA, '2026-07-01T00:00:02.000Z', 'WI-LATE'),
+    eventWithId(ID_ZZ, '2026-07-01T00:00:01.000Z', 'WI-EARLY'),
+  ]);
+  try {
+    const events = await loadAllEvents(dir);
+    // kills: `t !== 0 ? t : …` forced FALSE (id compare would always win → ['WI-LATE','WI-EARLY']).
+    assert.deepEqual(events.map(e => e.item), ['WI-EARLY', 'WI-LATE'],
+      'timestamp ordering must not be replaced by id ordering');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

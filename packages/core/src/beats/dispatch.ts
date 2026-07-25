@@ -1343,7 +1343,7 @@ export async function captureDeferralChildren(
 // Spine check (accepts pre-computed file list)
 // ---------------------------------------------------------------------------
 
-function checkSpine(spineRegex: string, changedFiles: string[]): { touched: boolean; files: string[] } {
+export function checkSpine(spineRegex: string, changedFiles: string[]): { touched: boolean; files: string[] } {
   // An empty pattern means "no spine surfaces declared" (the framework default) — NOT "match
   // everything" (which `new RegExp('')` would otherwise do, since an empty pattern matches at
   // position 0 of any string).
@@ -1374,7 +1374,7 @@ function isWithinTouches(file: string, prefixes: string[]): boolean {
  * wrapper to key off). Both shapes forgive the same thing: a worker adding a test beside the
  * code it changed, one level up from the touched dir.
  */
-function isTouchesExempt(file: string, prefixes: string[]): boolean {
+export function isTouchesExempt(file: string, prefixes: string[]): boolean {
   if (file.endsWith('package-lock.json')) return true;
   const isTestFile = /\/test\//.test(file) || /\.(test|spec)\.[jt]sx?$/.test(file);
   if (!isTestFile) return false;
@@ -1411,7 +1411,7 @@ export function loadApprovedTouches(events: LedgerEvent[], itemId: string): stri
 }
 
 /** True iff `file` is an exact match or same-directory sibling of a previously-approved path. */
-function isPreviouslyApproved(file: string, approvedTouches: string[]): boolean {
+export function isPreviouslyApproved(file: string, approvedTouches: string[]): boolean {
   return approvedTouches.some(a => touchesSegmentMatch(a, file) || touchesSegmentMatch(dirname(a), file));
 }
 
@@ -1421,7 +1421,7 @@ function isPreviouslyApproved(file: string, approvedTouches: string[]): boolean 
  * overstep park for this same item — are treated as inside the effective Touches: exact match
  * or same directory as an approved file. A genuinely new path (different directory) still parks.
  */
-function checkTouchesOverstep(
+export function checkTouchesOverstep(
   changedFiles: string[],
   touches: string,
   approvedTouches: string[] = [],
