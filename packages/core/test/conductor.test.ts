@@ -172,8 +172,14 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
     ]);
 
     // Stub provider (same test-provider pattern the beat tests use): writes the file the
-    // spec names into the SHARED cluster worktree and commits it.
+    // spec names into the SHARED cluster worktree and commits it. The conductor lane is
+    // commitMode: 'worker' — a human is present, and the worker committing IS the contract
+    // (ADR-010 point 5) — so the fake legitimately commits here. What the fake must NOT be
+    // trusted to prove on its own is that the SYSTEM told it to: every prompt this fake
+    // receives is captured so the test below can assert the commit instruction actually
+    // reached the worker, rather than assuming the fake's own choice to commit was licensed.
     const calls: { cwd: string; file: string }[] = [];
+    const prompts: string[] = [];
     const provider: LlmProvider = {
       name: 'fake',
       async run(req: ProviderRequest): Promise<ProviderResult> {
@@ -181,6 +187,7 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
         assert.ok(existsSync(join(cwd, 'src', 'notes.js')), 'worker cwd must be a worktree of the target repo');
         assert.ok(req.tools?.includes('Edit') && req.tools?.includes('Write'),
           'conduct build request must carry the builder tool allowlist');
+        prompts.push(req.prompt);
         const file = req.prompt.includes('one.js') ? 'one.js' : 'two.js';
         calls.push({ cwd, file });
         writeFileSync(join(cwd, 'src', file), `export const marker = '${file}';\n`, 'utf8');
@@ -204,6 +211,19 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
     // Sequential in ONE worktree: both provider calls share the same cwd.
     assert.equal(calls.length, 2);
     assert.equal(calls[0].cwd, calls[1].cwd, 'items within a cluster share one worktree');
+
+    // ADR-010 point 5: for commitMode 'worker' the fake's commit is the correct contract,
+    // but the test must prove the SYSTEM supplied the instruction rather than assume the
+    // fake was licensed to commit on its own initiative. Every build prompt the conductor
+    // sent must carry the commit-it-yourself clause (commitClauseFor('worker') in
+    // dispatch.ts) — the same text commit-contract-pairing.test.ts pins for buildPrompt.
+    assert.equal(prompts.length, 2, 'both cluster items must have been prompted');
+    for (const p of prompts) {
+      assert.match(p, /commit it yourself with `git add` \+ `git commit`/,
+        'the conductor must instruct the worker to commit — the fake must not merely assume the license to commit');
+      assert.doesNotMatch(p, /you do not hold a git-commit tool/i,
+        'a worker-commit-mode prompt must never also claim the worker holds no commit tool');
+    }
 
     // ONE gate run for the whole cluster.
     const gateRuns = readFileSync(gateLog, 'utf8').trim().split('\n').filter(Boolean);
