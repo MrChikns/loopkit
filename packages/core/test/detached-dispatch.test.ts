@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 
 import { makeEvent, LedgerEvent } from '../src/schema.js';
 import { loadAllEvents, appendEvents } from '../src/ledger.js';
-import { runDispatch, collectDetachedBuilds } from '../src/beats/dispatch.js';
+import { runDispatch, collectDetachedBuilds, runTargetLane, DispatchOptions } from '../src/beats/dispatch.js';
 import { fold } from '../src/fold.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { loadConfig, CONFIG_DEFAULTS, LoopkitConfig } from '../src/config.js';
@@ -715,6 +715,124 @@ test('detached-dispatch (target lane, WI-079): flag ON + a registered-target sin
     const foldResult = fold(events);
     assert.equal(foldResult.items.get('WI-601')?.state, 'building', 'the targeted item must still read as building after the beat returns');
     assert.equal(foldResult.items.get('WI-601')?.currentBuild?.pgid, FAKE_PGID, 'the fold must carry the pgid on the targeted item currentBuild');
+  } finally {
+    cleanup();
+    cleanDir(targetRoot);
+  }
+});
+
+// (g) WI-172: the target lane's OWN collection scan (runTargetLane) must decode an AUTH exit file
+// the same way collectDetachedBuilds does — before decodeExitOutcome was extracted, this copy
+// never set `code: 'auth'`, so a collected targeted build's auth failure read as an indistinguishable
+// generic crash. This pins the fix: the reason must read as an auth failure, and it must never merge.
+test('detached-dispatch (target lane, WI-172): collection decodes an AUTH exit file with an auth-readable reason (not a generic crash)', async () => {
+  const targetRoot = join(makeTempDir(), 'acme');
+  const { hash } = await makeTargetRepo(targetRoot);
+
+  const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
+    makeEvent('cli', 'acme', 'target.registered', {
+      name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+    }),
+    makeEvent('cli', 'WI-602', 'item.captured', { source: 'cli', text: 'acme auth-failed widget', target: 'acme' }),
+    makeEvent('conductor', 'WI-602', 'item.queued', { spec: 'acme auth-failed widget', touches: 'src/' }),
+  ]);
+
+  try {
+    const PGID = 606061;
+    // Phase 1: spawn detached (mirrors the WI-079 test) to get the REAL branch/worktree the
+    // target lane names — never hand-reconstruct targetWorktreeDirName's opaque targetId segment.
+    const spawnProvider: LlmProvider = {
+      name: 'claude-cli',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        req.onSpawn?.(PGID);
+        return new Promise<ProviderResult>(() => { /* deliberately never resolves */ });
+      },
+    };
+    await runDispatch({
+      repoRoot,
+      ledgerDir,
+      artifactRunsDir: runsDir,
+      autonomy: 'on',
+      provider: spawnProvider,
+      config: makeTestConfig({ execution: { detachedDispatch: true } }),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+    });
+
+    const dispatchedEvent = (await loadAllEvents(ledgerDir)).find(e => e.type === 'build.dispatched' && e.item === 'WI-602');
+    assert.ok(dispatchedEvent, 'setup: the spawn phase must have recorded build.dispatched for WI-602');
+    const { worktree, branch } = dispatchedEvent!.data as { worktree: string; branch: string };
+
+    // AUTH exit file: the detached worker's session expired mid-build (mirrors claudeCli.ts's own
+    // write shape — authFailure:true, no usage json).
+    writeExitFile(runsDir, 'WI-602', 1, { exitCode: 0, authFailure: true });
+
+    // Setup-only quirk (pre-existing, not this slice's concern): runDispatch's top-level early
+    // return fires when BOTH the fresh-queue pick list AND the legacy/batch-only
+    // collectDetachedBuilds() are empty — it does not know a targeted detached build is waiting,
+    // since collectDetachedBuilds deliberately excludes rec.target items. A lone targeted
+    // detached build with no other queued work never reaches runTargetLane's own collection scan.
+    // Seed an UNTARGETED green detached build too so collectedWorkers is non-empty and the beat
+    // proceeds far enough to run the target lane (which then collects WI-602 independently).
+    const untargetedBranch = 'wi-603-a1';
+    const untargetedWt = join(repoRoot, '..', `loopkit-wt-${untargetedBranch}`);
+    {
+      const { spawnSync } = await import('node:child_process');
+      spawnSync('git', ['worktree', 'add', '-b', untargetedBranch, untargetedWt, 'HEAD'], { cwd: repoRoot, stdio: 'pipe' });
+      writeFileSync(join(untargetedWt, 'passthrough.txt'), 'passthrough', 'utf8');
+      spawnSync('git', ['add', 'passthrough.txt'], { cwd: untargetedWt, stdio: 'pipe' });
+      spawnSync('git', ['commit', '-m', 'feat(WI-603): passthrough'], { cwd: untargetedWt, stdio: 'pipe' });
+    }
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'WI-603', 'item.captured', { source: 'cli', text: 'plane passthrough feature' }),
+      makeEvent('conductor', 'WI-603', 'item.queued', { spec: 'plane passthrough feature', touches: 'src/' }),
+      makeEvent('dispatch', 'WI-603', 'build.dispatched', {
+        attempt: 1, worktree: untargetedWt, branch: untargetedBranch, pgid: 606062, provider: 'claude-cli',
+      }),
+    ]);
+    writeExitFile(runsDir, 'WI-603', 1, { exitCode: 0 });
+
+    // Phase 2: a later beat collects both. provider.run must never be called for an already-finished
+    // collected build.
+    const result = await runDispatch({
+      repoRoot,
+      ledgerDir,
+      artifactRunsDir: runsDir,
+      autonomy: 'on',
+      provider: { name: 'claude-cli', async run(): Promise<ProviderResult> {
+        throw new Error('provider.run must not be called for a collected (already-finished) build');
+      } },
+      config: makeTestConfig({ execution: { detachedDispatch: true } }),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      touchesDiffFiles: ['passthrough.txt'],
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+    });
+
+    assert.ok(
+      result.dispatched.some(d => d.item === 'WI-602' && d.gateOutcome === 'failed'),
+      `expected WI-602 to fail via the target lane's auth-decoding path (got: ${JSON.stringify(result.dispatched)})`,
+    );
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.find(e => e.type === 'item.merged' && e.item === 'WI-602'), undefined, 'an auth-failed exit file must never merge');
+    const crashed = events.find(e => e.type === 'build.crashed' && e.item === 'WI-602');
+    assert.ok(crashed, 'an auth failure collected by the target lane must route through build.crashed');
+    const reason = (crashed!.data as { reason?: string }).reason;
+    assert.ok(
+      reason?.includes('not logged in'),
+      `the target lane's decoded reason must read as an auth failure (not a generic crash), got: ${reason}`,
+    );
+
+    // Cleanup the worktree the spawn phase created (never awaited/removed since it never finished).
+    const { spawnSync } = await import('node:child_process');
+    spawnSync('git', ['worktree', 'remove', '--force', worktree], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['branch', '-D', branch], { cwd: targetRoot, stdio: 'pipe' });
   } finally {
     cleanup();
     cleanDir(targetRoot);

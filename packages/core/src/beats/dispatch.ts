@@ -42,7 +42,7 @@ import { loadConfig, LoopkitConfig } from '../config.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
 import { parseOutput, extractUsage } from '../providers/claudeCli.js';
-import { readExitFile } from '../exitfile.js';
+import { readExitFile, ExitRecord } from '../exitfile.js';
 import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
@@ -2158,7 +2158,7 @@ async function finalizeTargetBuild(
   },
   outcome:
     | { ok: true; text: string; usage?: { in: number; out: number; usd?: number } }
-    | { ok: false; error: string },
+    | { ok: false; error: string; code?: string },
 ): Promise<DispatchStepResult> {
   const { gitRoot, manifest, wtPath, branch, baseSha, targetRunDir, attempt } = ctx;
 
@@ -2172,7 +2172,13 @@ async function finalizeTargetBuild(
   }
 
   if (!outcome.ok) {
-    const reason = `target build failed: ${outcome.error}`;
+    // WI-172: an auth failure (session expired mid-build) reads distinctly from a generic crash
+    // so operators can tell the two apart — same event type and non-parking requeue-via-crashed
+    // behaviour as the generic path below (this lane has no flag-file/registry apparatus, unlike
+    // the legacy/batch lane's dedicated auth branch; that machinery is out of scope here).
+    const reason = outcome.code === 'auth'
+      ? `target build failed: infra: builder not logged in — run /login (${outcome.error})`
+      : `target build failed: ${outcome.error}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'build.crashed', { reason })]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
@@ -2288,6 +2294,40 @@ async function finalizeTargetBuild(
 }
 
 /**
+ * WI-172: decode an `ExitRecord` (a detached build's on-disk exit sentinel) into the resolved
+ * outcome shape both cross-beat collectors need — via the SAME parseOutput/extractUsage
+ * claudeCli.ts exports (one-parser invariant). Previously duplicated between the target lane's
+ * own collection scan (`runTargetLane`) and the legacy/batch lane's `collectDetachedBuilds`; the
+ * two copies had drifted — only the batch copy set `code: 'auth'` on an auth failure, so a
+ * collected targeted build's auth failure decoded as a generic error. Extracting closes that gap:
+ * both callers now get `code: 'auth'` whenever `exit.authFailure` is set.
+ */
+export function decodeExitOutcome(
+  exit: ExitRecord,
+): { ok: true; text: string; usage?: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } }
+  | { ok: false; error: string; code?: 'auth' } {
+  let text = '';
+  let usage: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } | undefined;
+  if (exit.usageJsonPath) {
+    try {
+      const { obj } = parseOutput(readFileSync(exit.usageJsonPath, 'utf8'));
+      if (obj) {
+        if (typeof obj.result === 'string') text = obj.result;
+        usage = extractUsage(obj) ?? usage;
+      }
+    } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
+  }
+  if (exit.exitCode === 0 && !exit.authFailure) return { ok: true, text, usage };
+  return {
+    ok: false,
+    error: exit.authFailure
+      ? 'detached worker: auth failure (session expired mid-build)'
+      : `detached worker exited ${exit.exitCode ?? '(signalled)'}`,
+    code: exit.authFailure ? 'auth' as const : undefined,
+  };
+}
+
+/**
  * Dispatch every queued TARGETED item (rec.target set), serially, each against ITS target repo.
  * Mirrors the engineering path's build→gate→merge but with the git root, gate, worktree prefix,
  * and merge branch all taken from the target's manifest — NOT the plane's own repoRoot/config.
@@ -2352,27 +2392,10 @@ export async function runTargetLane(
       // having advanced since dispatch.
       const baseSha = spawnSync('git', ['merge-base', cbBranch, manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' })
         .stdout?.toString().trim() ?? '';
-      // Decode the exit file into the same resolved shape the sync path gets from provider.run(),
-      // via the SAME parseOutput/extractUsage the plane collector uses (one-parser invariant).
-      let text = '';
-      let usage: { in: number; out: number; usd?: number } | undefined;
-      if (exit.usageJsonPath) {
-        try {
-          const { obj } = parseOutput(readFileSync(exit.usageJsonPath, 'utf8'));
-          if (obj) {
-            if (typeof obj.result === 'string') text = obj.result;
-            usage = extractUsage(obj) ?? usage;
-          }
-        } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
-      }
-      const outcome = exit.exitCode === 0 && !exit.authFailure
-        ? { ok: true as const, text, usage }
-        : {
-          ok: false as const,
-          error: exit.authFailure
-            ? 'detached worker: auth failure (session expired mid-build)'
-            : `detached worker exited ${exit.exitCode ?? '(signalled)'}`,
-        };
+      // Decode the exit file into the same resolved shape the sync path gets from provider.run()
+      // (WI-172: shared with collectDetachedBuilds's identical decode — one-parser invariant,
+      // and the fix for the auth-code gap the two copies used to disagree on).
+      const outcome = decodeExitOutcome(exit);
       results.push(await finalizeTargetBuild(opts, rec, {
         gitRoot, manifest, wtPath: cbWorktree, branch: cbBranch, baseSha, targetRunDir,
         attempt: cbAttempt, providerName: provider?.name, provider,
@@ -2628,37 +2651,18 @@ export function collectDetachedBuilds(
 
     const { attempt, branch, worktree } = carrier.currentBuild!;
 
-    // Decode the exit record into a resolved ProviderResult via the SAME parser the Phase-2
-    // loop's own exit-file preference uses (one-parser invariant) — never a second parser.
-    let text = '';
-    let usage: { in: number; out: number; usd?: number; turns?: number; durationMs?: number } | undefined;
-    if (exitRecord.usageJsonPath) {
-      try {
-        const { obj } = parseOutput(readFileSync(exitRecord.usageJsonPath, 'utf8'));
-        if (obj) {
-          if (typeof obj.result === 'string') text = obj.result;
-          usage = extractUsage(obj) ?? usage;
-        }
-      } catch { /* best-effort — an unreadable usage json still yields a resolved result below */ }
-    }
-    const ok = exitRecord.exitCode === 0 && !exitRecord.authFailure;
+    // Decode the exit record into a resolved ProviderResult (WI-172: shared decodeExitOutcome —
+    // one-parser invariant, same auth-code handling the target lane's collection scan now gets).
     // authFailure (exitfile.ts) is the ONLY signal a cross-beat collector has that a detached
-    // worker's terminal outcome was specifically "logged out mid-build" — decode it into the
-    // same `code: 'auth'` the in-process sync path gets from ClaudeCliProvider.run(), so the
-    // Phase-2 terminal loop's existing auth-failure branch (mark provider unhealthy, requeue via
-    // build.crashed, never park/count toward the breaker) handles both paths identically.
+    // worker's terminal outcome was specifically "logged out mid-build" — decodeExitOutcome turns
+    // it into the same `code: 'auth'` the in-process sync path gets from ClaudeCliProvider.run(),
+    // so the Phase-2 terminal loop's existing auth-failure branch (mark provider unhealthy,
+    // requeue via build.crashed, never park/count toward the breaker) handles both paths identically.
+    const decoded = decodeExitOutcome(exitRecord);
     const providerPromise = Promise.resolve(
-      ok
-        ? { text, ok: true as const, usage }
-        : {
-          text: '',
-          ok: false as const,
-          error: exitRecord.authFailure
-            ? 'detached worker: auth failure (session expired mid-build)'
-            : `detached worker exited ${exitRecord.exitCode ?? '(signalled)'}`,
-          code: exitRecord.authFailure ? 'auth' as const : undefined,
-          usage,
-        },
+      decoded.ok
+        ? { text: decoded.text, ok: true as const, usage: decoded.usage }
+        : { text: '', ok: false as const, error: decoded.error, code: decoded.code, usage: undefined },
     );
 
     // Carrier first (recs[0] drives branch/gate/merge), companions after — mirrors the
