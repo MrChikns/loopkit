@@ -2,8 +2,11 @@
  * pathology.test.ts — WI-084 the park pathologist: reactor-level stepPathology tests.
  *
  * Covers the full test matrix from the WI-084 contract:
- *   1. transient-infra → requeue + diagnosis.recorded + msg.out; attempts < breakerN.
- *   2. transient-infra with attempts>=breakerN → NO requeue, parks for review.
+ *   1. transient-infra → requeue + diagnosis.recorded + msg.out; requeue budget has room
+ *      (WI-170: gated by ItemRecord.transientRequeueCount / cfg.pathology.maxTransientRequeues,
+ *      the pathologist's OWN counter/threshold — deliberately independent of attempts/breakerN,
+ *      the build-attempt breaker stepApplyVerbs/doctor gate park/requeue on).
+ *   2. transient-infra with the requeue budget already spent → NO requeue, parks for review.
  *   3. plane-infra-bug → new repair item.captured + item.blocked on victim; victim stays parked.
  *   4. blocked-victim release: blocker merges → victim requeues + blockedOn clears.
  *   5. items-own-code first failure → requeue once, repairContext carries the diagnosis.
@@ -114,10 +117,10 @@ function seedParkedOpsItem(
 }
 
 // ---------------------------------------------------------------------------
-// 1. transient-infra, attempts < breakerN → requeue
+// 1. transient-infra, first diagnosis (transientRequeueCount 0 < maxTransientRequeues) → requeue
 // ---------------------------------------------------------------------------
 
-test('pathology: transient-infra requeues when attempts < breakerN', async () => {
+test('pathology: transient-infra requeues on its first diagnosis (requeue budget untouched)', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
@@ -131,7 +134,7 @@ test('pathology: transient-infra requeues when attempts < breakerN', async () =>
 
     const events = await loadAllEvents(ledgerDir);
     const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-050' && e.actor === 'reactor');
-    assert.equal(requeued.length, 1, 'must requeue once under the breaker');
+    assert.equal(requeued.length, 1, 'must requeue once — the pathologist\'s own requeue budget has room');
 
     const diag = events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-050');
     assert.equal(diag.length, 1);
@@ -149,14 +152,36 @@ test('pathology: transient-infra requeues when attempts < breakerN', async () =>
 });
 
 // ---------------------------------------------------------------------------
-// 2. transient-infra, breaker exhausted → parks for review, no requeue
+// 2. transient-infra, pathologist's OWN requeue budget exhausted → parks for review, no requeue
+//
+// WI-170: this budget is `ItemRecord.transientRequeueCount` /
+// `cfg.pathology.maxTransientRequeues` — DELIBERATELY independent of `attempts`/`breakerN` (the
+// build-attempt breaker stepApplyVerbs/doctor gate park/requeue on). Before WI-170 this test
+// exhausted the shared `attempts >= breakerN` counter directly; that counter is now build-
+// attempts-only, so exhausting the pathologist's OWN budget means seeding a PRIOR
+// diagnosis.recorded(transient-infra, actedAs:'requeued-transient') the fold counts toward
+// transientRequeueCount, not a higher build attempt.
 // ---------------------------------------------------------------------------
 
-test('pathology: transient-infra with breaker exhausted parks for review (no requeue)', async () => {
+test('pathology: transient-infra with its own requeue budget exhausted parks for review (no requeue)', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
-    await seedLedger(ledgerDir, seedParkedOpsItem('WI-051', { attempt: 3 }));
+    await seedLedger(ledgerDir, [
+      ...seedParkedOpsItem('WI-051', { attempt: 1 }),
+      // A prior pathologist requeue already spent the default maxTransientRequeues:1 budget —
+      // the park above is the item's SECOND transient-infra park (a fresh parkFingerprint, since
+      // parkReason differs from the first), so this beat must diagnose it again but find no
+      // budget left.
+      makeEvent('reactor', 'WI-051', 'diagnosis.recorded', {
+        parkFingerprint: 'prior-fingerprint',
+        classification: 'transient-infra',
+        evidence: ['a prior transient blip'],
+        proposedAction: 'retry as-is',
+        actedAs: 'requeued-transient',
+        model: 'opus',
+      }, '2026-01-01T00:00:02.500Z'),
+    ]);
 
     await runReactor({
       repoRoot, ledgerDir, autonomy: 'on',
@@ -166,14 +191,18 @@ test('pathology: transient-infra with breaker exhausted parks for review (no req
 
     const events = await loadAllEvents(ledgerDir);
     const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-051' && e.actor === 'reactor');
-    assert.equal(requeued.length, 0, 'must NOT requeue once the breaker is exhausted');
+    assert.equal(requeued.length, 0, 'must NOT requeue once the pathologist\'s own requeue budget is exhausted');
 
     const parked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-051' && e.actor === 'reactor');
     assert.equal(parked.length, 1, 'must park for review');
     assert.equal((parked[0].data as { parkKind?: string }).parkKind, 'decision');
 
-    const diag = events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-051');
-    assert.equal((diag[0].data as { actedAs?: string }).actedAs, 'parked-review');
+    // Two diagnosis.recorded events now exist for WI-051: the seeded prior one (fingerprint
+    // 'prior-fingerprint') and this beat's fresh one — assert on the LAST, which is the one this
+    // beat actually produced.
+    const diag = events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-051' && e.actor === 'reactor');
+    assert.equal(diag.length, 2, 'the seeded prior diagnosis plus this beat\'s fresh one');
+    assert.equal((diag[diag.length - 1].data as { actedAs?: string }).actedAs, 'parked-review');
 
     assert.equal(fold(events).items.get('WI-051')?.state, 'parked');
   } finally {

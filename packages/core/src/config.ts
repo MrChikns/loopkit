@@ -403,6 +403,21 @@ export interface LoopkitConfig {
      * instead of staying silently off it. Default: 24.
      */
     blockedWaitTimeoutHours?: number;
+    /**
+     * WI-170 — the pathologist's OWN diagnosis-driven-requeue breaker for the transient-infra
+     * branch, counted by ItemRecord.transientRequeueCount (diagnosis.recorded events the
+     * pathologist actually acted on with a requeue). Deliberately SEPARATE from `breakerN` (the
+     * build-attempt breaker `stepApplyVerbs`/doctor gate park/requeue on): before WI-170 both
+     * beats shared `attempts >= breakerN`, but a genuine breaker-exhaustion park only ever
+     * arrives with `attempts >= breakerN` already true, so the pathologist's requeue arm on that
+     * same counter was structurally unreachable for exactly the parks it exists to help with.
+     * Mirrors the sibling items-own-code branch's requeue-once-then-park-for-review shape.
+     * Default: 1 (requeue once per distinct transient-infra diagnosis, escalate to a
+     * parkKind:'decision' review park on a repeat — matches today's observed intent for the
+     * sibling own-code branch, and is the closest same-shape default preserving the
+     * requeue-once ceiling the shared-threshold bug was supposed to enforce).
+     */
+    maxTransientRequeues?: number;
   };
 
   /**
@@ -839,6 +854,7 @@ const DEFAULTS: LoopkitConfig = {
     maxTrailEvents: 15,
     maxDiffChars: 12_000,
     blockedWaitTimeoutHours: 24,
+    maxTransientRequeues: 1,
   },
   playbook: {
     enabled: true,
