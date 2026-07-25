@@ -96,10 +96,10 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2192`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2210`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2642`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2669`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery.
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
@@ -199,13 +199,13 @@ That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3169`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3196`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
 **Provider health is a chain, not a single provider.** The registry walks the configured chain; an
 auth failure marks the current provider unhealthy and falls over to the next
-(`packages/core/src/beats/dispatch.ts:3329`<!--cite:providerFallback-->), and a later successful beat
+(`packages/core/src/beats/dispatch.ts:3356`<!--cite:providerFallback-->), and a later successful beat
 clears the marker. With no healthy provider for an item's sensitivity tier, the item parks rather than
 routing to a disallowed one.
 
@@ -220,7 +220,7 @@ routing to a disallowed one.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3289`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3316`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - 🔵 Builds spawned in one beat are collected by a later one via on-disk exit files, so a long build
   does not pin the beat that started it ([ADR-008](decisions/ADR-008-detached-dispatch-staging.md)).
@@ -351,7 +351,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:3981`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4008`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -389,12 +389,12 @@ flowchart TD
 
 - The invariant: **no build reaches master without a gate covering every commit that landed since its
   branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4415`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4442`<!--cite:postIntegrationRegate-->).
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, hard-resets the primary tree onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4601`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:4628`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4627`<!--cite:pushRaceRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4654`<!--cite:pushRaceRegate-->).
 - Every failure here is a park, never a force. A conflict or a red re-gate stops the item; nothing is
   merged past a disagreement.
 - 🟠 This whole plate is engineering-lane only. See [limitations](limitations.md) for the target
@@ -459,11 +459,11 @@ counter, so by the time a park happened the budget was already spent.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3128`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3155`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:2923`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:2950`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
