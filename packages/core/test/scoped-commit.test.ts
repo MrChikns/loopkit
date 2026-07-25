@@ -1,7 +1,13 @@
 /**
- * scoped-commit.test.ts — Tests for scoped-commit fallback staging (dispatch.ts).
+ * scoped-commit.test.ts — Tests for scoped-commit fallback staging AND the post-commit
+ * diff guards it shares a call site with (dispatch.ts).
  *
  * Covers:
+ *   diff guards      — checkSpine / checkTouchesOverstep / isTouchesExempt /
+ *                      isPreviouslyApproved / loadApprovedTouches, asserted at the PREDICATE
+ *                      BOUNDARY (WI-195: a mutation run proved every one of these was only ever
+ *                      exercised through a caller's happy path, so the boolean could be pinned
+ *                      always-true, inverted, or deleted with the suite still green)
  *   planScopedCommit — pure unit tests (Touches partition, manifest widening, exemptions)
  *   fallback staging  — dispatch stages only in-scope files, surfaces residue (integration)
  *   no-commit residue — nothing in scope → no-commit park carries the residue in its reason
@@ -27,6 +33,11 @@ import {
   runDispatch,
   planScopedCommit,
   removeWorktree,
+  checkSpine,
+  checkTouchesOverstep,
+  isTouchesExempt,
+  isPreviouslyApproved,
+  loadApprovedTouches,
 } from '../src/beats/dispatch.js';
 import { fold } from '../src/fold.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
@@ -65,6 +76,138 @@ async function seedLedger(ledgerDir: string, events: LedgerEvent[]): Promise<voi
   mkdirSync(ledgerDir, { recursive: true });
   await appendEvents(ledgerDir, events);
 }
+
+// ---------------------------------------------------------------------------
+// Diff-guard predicate boundaries (WI-195)
+//
+// Every assertion below was written against a SPECIFIC surviving mutant and proven to go red
+// when that mutation is applied to dispatch.ts. Read each `// kills:` note as the contract the
+// test exists to hold — the happy-path integration tests further down this file exercise the
+// same code but pin none of these boundaries.
+// ---------------------------------------------------------------------------
+
+// ── checkSpine ─────────────────────────────────────────────────────────────
+// The spine check parks a diff that touches the plane's own event contracts. It scored 28.6%
+// on the mutation run — the worst in the kernel — because no test ever called it with a
+// non-empty pattern that matches.
+
+const SPINE_RE = '^packages/core/src/(schema|ledger)\\.ts$';
+
+test('checkSpine: a diff touching a spine file reports touched=true and names EXACTLY the spine files', () => {
+  const spine = checkSpine(SPINE_RE, [
+    'packages/core/src/schema.ts',
+    'docs/notes.md',
+    'packages/core/src/ledger.ts',
+  ]);
+  // kills: the `if (!spineRegex)` early return forced true (would report touched=false, i.e.
+  //        the spine check permanently disabled);
+  // kills: `spineFiles.length > 0` → `<= 0` (would invert touched to false);
+  // kills: `changedFiles.filter(...)` → `changedFiles` (files would include docs/notes.md).
+  assert.equal(spine.touched, true, 'a diff hitting a declared spine surface must be flagged');
+  assert.deepEqual(spine.files, ['packages/core/src/schema.ts', 'packages/core/src/ledger.ts'],
+    'only the matching files are reported — the non-matching diff entry must be filtered out');
+});
+
+test('checkSpine: a diff that matches nothing reports touched=false with no files', () => {
+  const spine = checkSpine(SPINE_RE, ['docs/notes.md', 'packages/ui/src/button.ts']);
+  // kills: `spineFiles.length > 0` → `>= 0` (would pin touched always-true, parking every build).
+  assert.equal(spine.touched, false, 'a non-spine diff must not park');
+  assert.deepEqual(spine.files, []);
+});
+
+test('checkSpine: an empty pattern means "no spine declared", never "match everything"', () => {
+  // kills: deleting the `if (!spineRegex)` guard — `new RegExp('')` matches at position 0 of
+  // every string, so every framework-default install would park its first diff.
+  const spine = checkSpine('', ['packages/core/src/schema.ts']);
+  assert.equal(spine.touched, false);
+  assert.deepEqual(spine.files, []);
+});
+
+// ── loadApprovedTouches ────────────────────────────────────────────────────
+
+test('loadApprovedTouches: approvals do NOT leak across work items or across event types', () => {
+  const approval = (item: string, files: string[]): LedgerEvent =>
+    makeEvent('operator', item, 'item.approved', { by: 'operator', approvedTouches: files });
+  const events: LedgerEvent[] = [
+    approval('WI-A', ['packages/a/src/one.ts']),
+    approval('WI-B', ['packages/b/src/two.ts']),
+    // Same item, but a DIFFERENT event type that happens to carry the same field shape.
+    makeEvent('operator', 'WI-A', 'item.parked', {
+      reason: 'touches overstep',
+      approvedTouches: ['packages/c/src/three.ts'],
+    } as unknown as { reason: string }),
+  ];
+  // kills: `ev.item !== itemId || ev.type !== 'item.approved'` forced false (nothing skipped —
+  //        every item's approvals leak into every other item's overstep gate);
+  // kills: the same condition's `||` → `&&` (each half alone stops skipping).
+  assert.deepEqual(loadApprovedTouches(events, 'WI-A'), ['packages/a/src/one.ts'],
+    "WI-B's approval and WI-A's non-approval event must both be ignored");
+  assert.deepEqual(loadApprovedTouches(events, 'WI-B'), ['packages/b/src/two.ts']);
+  assert.deepEqual(loadApprovedTouches(events, 'WI-C'), [], 'an item with no approvals gets nothing');
+});
+
+// ── checkTouchesOverstep ───────────────────────────────────────────────────
+
+test('checkTouchesOverstep: the two escape hatches (wildcard, no declared prefixes) return null', () => {
+  // `null` means "no Touches to enforce" and is NOT the same as `[]` ("enforced, nothing
+  // overstepped") — the caller branches on it.
+  // kills: `touches === '*'` forced false (a wildcard item would park on its own first file);
+  // kills: `prefixes.length === 0` forced false (same for an item with no declared Touches).
+  assert.equal(checkTouchesOverstep(['anywhere/at/all.ts'], '*'), null, 'wildcard Touches is unenforced');
+  assert.equal(checkTouchesOverstep(['anywhere/at/all.ts'], ''), null, 'no declared prefixes is unenforced');
+  assert.equal(checkTouchesOverstep(['anywhere/at/all.ts'], ' , , '), null,
+    'a Touches string that normalizes to zero prefixes is unenforced');
+});
+
+test('checkTouchesOverstep: with real prefixes it returns the offenders and an empty array when clean', () => {
+  assert.deepEqual(
+    checkTouchesOverstep(['packages/a/src/x.ts', 'packages/b/src/y.ts'], 'packages/a/'),
+    ['packages/b/src/y.ts'],
+    'a file outside the declared prefix is an overstep',
+  );
+  assert.deepEqual(checkTouchesOverstep(['packages/a/src/x.ts'], 'packages/a/'), [],
+    'a fully in-scope diff is enforced-and-clean ([]), not unenforced (null)');
+});
+
+// ── isPreviouslyApproved ───────────────────────────────────────────────────
+
+test('isPreviouslyApproved: an exact match OR a same-directory sibling of an approved path counts', () => {
+  // kills: the `||` → `&&` (which collapses the rule into "must be BOTH the same file and a
+  //        sibling", i.e. re-parking every already-approved sibling forever).
+  assert.equal(isPreviouslyApproved('a/b/new.ts', ['a/b/old.ts']), true,
+    'a sibling in the same directory as an approved path is covered');
+  assert.equal(isPreviouslyApproved('a/b/old.ts', ['a/b/old.ts']), true, 'the exact approved path is covered');
+  assert.equal(isPreviouslyApproved('a/c/new.ts', ['a/b/old.ts']), false,
+    'a genuinely new directory is NOT covered — it must still park');
+  assert.equal(isPreviouslyApproved('a/b/new.ts', []), false, 'nothing approved → nothing covered');
+});
+
+// ── isTouchesExempt ────────────────────────────────────────────────────────
+
+test('isTouchesExempt: the test-file marker is anchored — `foo.test.js.bak` is NOT a test file', () => {
+  const prefixes = ['packages/engine/src'];
+  // kills: removing the `$` anchor from /\.(test|spec)\.[jt]sx?$/ — the same too-loose-marker
+  // defect that bit the lane matrix. A backup/patch/generated artifact that merely CONTAINS
+  // `.test.js` would otherwise be waved through the overstep gate as a co-located test.
+  assert.equal(isTouchesExempt('packages/engine/src/foo.test.js.bak', prefixes), false,
+    'a .bak artifact must not be exempt just because `.test.js` appears in its name');
+  assert.equal(isTouchesExempt('packages/engine/src/foo.test.js', prefixes), true,
+    'the genuinely test-suffixed sibling IS exempt (the anchor must not over-tighten either)');
+});
+
+test('isTouchesExempt: a plain source file and an out-of-package test are both non-exempt', () => {
+  const prefixes = ['packages/engine/src'];
+  // kills: `if (!isTestFile) return false` → `return true` (every unrelated source file exempt).
+  assert.equal(isTouchesExempt('docs/readme.md', prefixes), false, 'a non-test file is never exempt');
+  // kills: the trailing `return false` → `return true` (a test file under a DIFFERENT package
+  //        would be exempt, defeating the point of scoping the exemption to the package root).
+  assert.equal(isTouchesExempt('packages/other/test/x.test.ts', prefixes), false,
+    "a test file outside the touched package's root is not exempt");
+  assert.equal(isTouchesExempt('packages/engine/test/x.test.ts', prefixes), true,
+    'a test under the SAME package root is exempt');
+  assert.equal(isTouchesExempt('any/where/package-lock.json', prefixes), true,
+    'package-lock.json is exempt anywhere');
+});
 
 // ---------------------------------------------------------------------------
 // planScopedCommit — pure unit tests

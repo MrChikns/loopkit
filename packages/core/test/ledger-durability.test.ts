@@ -10,6 +10,8 @@
  *     detected truncation; fail-open on a broken probe; watermark persists across calls.
  *   - runReactor / runDispatch wiring: the guard halts the WHOLE beat before any step runs,
  *     and commitResidue is invoked at the end of every non-dry-run beat.
+ *   - readLedgerMaxIds (ledger.ts, WI-195): the WATERMARK the guard compares — its running-max
+ *     predicate and its segment-filename anchors, both unpinned until the mutation run.
  */
 
 import { test } from 'node:test';
@@ -22,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { extractItemIds, commitLedgerResidue } from '../src/ledgerCommit.js';
 import { checkLedgerRegressionGuard } from '../src/regressionGuard.js';
 import { makeEvent, LedgerEvent } from '../src/schema.js';
-import { appendEvents } from '../src/ledger.js';
+import { appendEvents, readLedgerMaxIds, loadAllEvents } from '../src/ledger.js';
 import { runReactor, ReactorOptions } from '../src/beats/reactor.js';
 import { runDispatch, DispatchOptions } from '../src/beats/dispatch.js';
 import { CONFIG_DEFAULTS, LoopkitConfig } from '../src/config.js';
@@ -405,5 +407,76 @@ test('runDispatch: calls commitResidue exactly once at the end of a normal (non-
     assert.deepEqual(calls, ['dispatch']);
   } finally {
     cleanDir(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// readLedgerMaxIds — the truncation watermark itself (WI-195)
+//
+// The regression guard above is only as good as the watermark it compares. Both halves of
+// that watermark were unpinned on the mutation run:
+//   - the running max (`ev.id > max`) — all 8 mutants survived, including one computing the
+//     MINIMUM, which would make every subsequent append look like a truncation;
+//   - the segment-filename regex `/^(work|ops)-\d{4}-\d{2}\.jsonl$/` — both anchors are
+//     removable, so backup/renamed neighbours would be folded in as real ledger segments.
+// ---------------------------------------------------------------------------
+
+/** A schema-valid event with a caller-chosen id (validateEvent requires the `ev-` prefix). */
+function eventWithId(id: string, item: string, ts: string): LedgerEvent {
+  return { ...makeEvent('test', item, 'item.queued', { spec: item }, ts), id } as unknown as LedgerEvent;
+}
+
+function writeRawSegment(dir: string, name: string, events: LedgerEvent[]): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+}
+
+const WM_A = 'ev-00000000000000000000AA';
+const WM_B = 'ev-00000000000000000000BB';
+const WM_C = 'ev-00000000000000000000CC';
+
+test('readLedgerMaxIds: the watermark is the MAXIMUM id in the segment, whatever order the lines are in', async () => {
+  const dir = makeTempDir();
+  try {
+    // Deliberately out of order in the file — a, c, b — so the maximum is neither the first
+    // nor the last line. A union-merged or hand-edited segment really can look like this,
+    // which is why the running max must not assume append order. (An earlier draft of this
+    // fixture put the max FIRST; the "keep only the first id" mutant survived it, which is the
+    // decorative-test failure mode this whole exercise exists to eliminate.)
+    writeRawSegment(dir, 'work-2026-07.jsonl', [
+      eventWithId(WM_A, 'WI-A', '2026-07-01T00:00:00.000Z'),
+      eventWithId(WM_C, 'WI-C', '2026-07-03T00:00:00.000Z'),
+      eventWithId(WM_B, 'WI-B', '2026-07-02T00:00:00.000Z'),
+    ]);
+    const maxIds = await readLedgerMaxIds(dir);
+    // kills: `ev.id > max` → `<` (yields the MINIMUM, WM_A — every later fold then reads as a
+    //        truncation and halts the beat); dropping the `|| ev.id > max` update entirely
+    //        (first line wins → WM_A); and the assignment-deleted mutants.
+    assert.equal(maxIds['work-2026-07.jsonl'], WM_C,
+      'the watermark must be the highest id present, not the first or last line');
+  } finally {
+    cleanDir(dir);
+  }
+});
+
+test('readLedgerMaxIds: only exactly-named segments count — a .bak or prefixed neighbour is not a segment', async () => {
+  const dir = makeTempDir();
+  try {
+    writeRawSegment(dir, 'work-2026-07.jsonl', [eventWithId(WM_A, 'WI-A', '2026-07-01T00:00:00.000Z')]);
+    // Same content, names that only match if an anchor is dropped from the segment regex.
+    writeRawSegment(dir, 'work-2026-07.jsonl.bak', [eventWithId(WM_C, 'WI-BAK', '2026-07-01T00:00:00.000Z')]);
+    writeRawSegment(dir, 'xwork-2026-07.jsonl', [eventWithId(WM_B, 'WI-X', '2026-07-01T00:00:00.000Z')]);
+
+    const maxIds = await readLedgerMaxIds(dir);
+    // kills: dropping `$` (picks up `work-2026-07.jsonl.bak`) and dropping `^` (picks up
+    //        `xwork-2026-07.jsonl`) from /^(work|ops)-\d{4}-\d{2}\.jsonl$/.
+    assert.deepEqual(Object.keys(maxIds), ['work-2026-07.jsonl'],
+      'a backup copy or a prefixed lookalike must never be enumerated as a ledger segment');
+
+    // Same boundary through the read path: the non-segment files' events must not be folded.
+    const items = (await loadAllEvents(dir)).map(e => e.item);
+    assert.deepEqual(items, ['WI-A'], 'events in non-segment files must not reach the fold');
+  } finally {
+    cleanDir(dir);
   }
 });

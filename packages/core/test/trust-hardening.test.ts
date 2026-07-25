@@ -376,6 +376,19 @@ test('tier: never-judged real-code merge is NOT floored (stays at its base tier)
   assert.equal(tier, 'optional', 'never-judged non-surface code stays at base tier');
 });
 
+test('tier: judge-unavailable floors at review even when the reported confidence is HIGH', () => {
+  // WI-195. The test above uses confidence 0, which ALSO trips the confidence-floor flag lower
+  // down the function — so deleting the whole `verdict === 'unavailable'` branch still produced
+  // tier 'review' and the mutant survived. A high confidence isolates the branch: with it
+  // deleted, no flag trips and overseerFloor returns null, i.e. an item whose judge never
+  // answered would auto-accept on the strength of the judge's own self-reported confidence.
+  const floor = overseerFloor(['src/real.ts'], { verdict: 'unavailable', confidence: 0.95 }, 0.7);
+  assert.ok(floor, 'an unavailable verdict is an evidence gap regardless of the confidence number');
+  assert.equal(floor!.tier, 'review');
+  assert.match(floor!.reason, /judge unavailable/,
+    'the floor must name the evidence gap, not some other flag');
+});
+
 test('tier: judge-unavailable on a no-code item does NOT floor (nothing to review)', () => {
   // files empty → overseerFloor returns null even with an unavailable verdict, so a no-code
   // item stays auto (the "un-judged plane file stays auto" invariant is unaffected).
