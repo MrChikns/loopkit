@@ -69,6 +69,10 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
     // Certify-don't-brief payload — absent renders a visible "no certification provided"
     // line (acceptance-projection.ts certificationBlock), never a silent blank.
     ...(item.certification ? { certification: item.certification } : {}),
+    // Acceptance criteria (WI-193) — passed through from the fold, never re-derived here, so
+    // the desk shows exactly the bar the judge was given.
+    ...(item.criteria && item.criteria.length ? { criteria: item.criteria } : {}),
+    ...(item.criteriaExempt ? { criteriaExempt: true } : {}),
   };
 }
 

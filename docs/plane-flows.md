@@ -152,9 +152,13 @@ flowchart TD
   in its manifest's structured `deferred` field is auto-captured at merge as a child item — `captured`,
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
-- 🟠 A reply that steers an in-flight item appends `item.respec`, which amends the item's `spec`
-  (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->) while boards keep rendering its original
-  `text`. The builder gets the corrected instruction; your board can still show you the old one.
+- ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
+  and its acceptance criteria (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->), and every
+  operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
+  **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
+  slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
+  previously said boards kept showing the original text. That stopped being true when the surfaces
+  were fixed to prefer `spec`; the entry had simply not been corrected.)
 
 ---
 

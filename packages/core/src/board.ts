@@ -8,6 +8,7 @@
  */
 
 import { FoldResult, ItemRecord, ItemState } from './fold.js';
+import { criteriaAbsenceNote } from './criteria.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,6 +52,30 @@ const STATE_ORDER: ItemState[] = [
   'merged', 'accepted', 'done', 'rejected', 'answered',
 ];
 
+/**
+ * States where an acceptance bar is expected, so its ABSENCE is worth saying out loud. An
+ * answered/rejected/done item was never going to be measured against one, and printing a note
+ * on those would be noise that trains the eye to skip the line that matters.
+ */
+const CRITERIA_EXPECTED_STATES: ReadonlySet<ItemState> = new Set<ItemState>([
+  'queued', 'building', 'gated', 'approved', 'merged',
+]);
+
+/**
+ * The acceptance criteria block (WI-193 win 3). Rendered from `rec.criteria`, which the fold
+ * keeps CURRENT — an `item.respec` replaces the list wholesale, so a bar the operator has since
+ * withdrawn cannot keep sitting on the board (the same rule the amended `spec` already follows).
+ * Seeing what was promised beside what shipped is the whole payoff: it makes the human judgement
+ * faster without adding a single line of automation.
+ */
+function criteriaBlock(rec: ItemRecord): string[] {
+  if (rec.criteria && rec.criteria.length > 0) {
+    return ['  · acceptance criteria:', ...rec.criteria.map(c => `    - ${c}`)];
+  }
+  if (!CRITERIA_EXPECTED_STATES.has(rec.state)) return [];
+  return [`  · ${criteriaAbsenceNote(rec.criteriaExempt)}`];
+}
+
 function renderItem(rec: ItemRecord, now: Date): string {
   const createdAge = age(rec.createdAt ?? rec.capturedAt, now);
   const dispatchAge = rec.state === 'building' && rec.buildingAt
@@ -74,6 +99,7 @@ function renderItem(rec: ItemRecord, now: Date): string {
     `- **${rec.id}** ${stateEmoji(rec.state)} ${rec.state}`,
     `  · created ${createdAge} ago${dispatchAge}${attemptsStr}${modelStr}${priorityStr}${parkStr}`,
     shortText ? `  · ${shortText}` : '',
+    ...criteriaBlock(rec),
   ].filter(Boolean).join('\n');
 }
 

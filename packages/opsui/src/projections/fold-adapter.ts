@@ -96,6 +96,15 @@ export type FoldMergedItem = {
    *  manifest didn't fill in all three fields. The acceptance desk renders a visible
    *  "no certification provided" line when absent, never a silent blank. */
   certification?: { couldBreak: string; detection: string; rollback: string };
+  /** Acceptance criteria (loopkit ItemRecord.criteria, WI-193) — the falsifiable statements
+   *  authored BEFORE this work started. The desk renders them beside what shipped so the
+   *  operator can judge delivery rather than reconstruct the ask. Carried CURRENT by the fold:
+   *  an item.respec replaces the list wholesale, so a withdrawn bar never survives on screen
+   *  (the WI-185 rule, applied to criteria as well as to `spec`). */
+  criteria?: string[];
+  /** True when this item legitimately shipped with NO criteria — captured before the
+   *  requirement existed. Renders as a stated exemption, never as a blank that reads clean. */
+  criteriaExempt?: boolean;
   /** Lifetime clean-landing counters (loopkit ItemRecord, WI-108) — how many times each
    *  rough-landing signal fired on the way to THIS merge, over the item's whole lifecycle
    *  (not just the final attempt). Absent === 0 (loopkit only emits non-zero counts) — a

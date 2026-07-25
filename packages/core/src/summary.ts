@@ -193,6 +193,12 @@ export function buildSummary(
         priority: rec.priority,
         touches: rec.touches,
         spec: rec.spec ?? rec.sourceText,
+        // Acceptance criteria (WI-193 win 3) — carried straight off the fold, which keeps them
+        // CURRENT: an item.respec replaces the list wholesale, so an amended bar can never leave
+        // the withdrawn one on an operator surface. `criteriaExempt` travels with it so a blank
+        // renders as "predates the requirement" rather than as silence.
+        ...(rec.criteria ? { criteria: rec.criteria } : {}),
+        ...(rec.criteriaExempt ? { criteriaExempt: true } : {}),
         stderrTail: lastBuild?.stderrTail,
         crashReason: lastBuild?.crashReason,
         // scout context-pack coverage + judge status for the ops console
@@ -241,6 +247,11 @@ export function buildSummary(
           // carry touches so the ops console can derive the origin chip for shipped items on
           // the stream + acceptance desk.
           ...(rec.touches ? { touches: rec.touches } : {}),
+          // Acceptance criteria (WI-193 win 3): what was promised, beside what shipped. This is
+          // the pair the acceptance desk renders — the operator is the throughput bottleneck, so
+          // showing the pre-authored bar next to the merged diff is the win that pays immediately.
+          ...(rec.criteria ? { criteria: rec.criteria } : {}),
+          ...(rec.criteriaExempt ? { criteriaExempt: true } : {}),
           accepted: rec.state === 'accepted',
           ...(rec.acceptedAt ? { acceptedAt: rec.acceptedAt } : {}),
           // provisional flag for ops-console feature detection.

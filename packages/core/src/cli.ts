@@ -30,6 +30,7 @@ import { appendEvents, loadAllEventsWithQuarantine, withLock } from './ledger.js
 import { compact, formatCompactResult, loadQuarantine } from './hygiene.js';
 import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
+import { formatCriteriaLines } from './criteria.js';
 import { runDoctor, defaultPidProbe, detectDistDrift, DistDriftResult } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
 import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
@@ -465,6 +466,12 @@ async function cmdState(rest: string[]): Promise<void> {
       // immutable original capture text, so a respec'd item never shows superseded text.
       const displayText = rec.spec ?? rec.sourceText;
       if (displayText) console.log(`  text: ${displayText.slice(0, 100)}`);
+      // The bar beside the work (WI-193 win 3). Read from the fold, so a respec that amended
+      // the criteria shows the CURRENT ones — never the superseded promise.
+      console.log('  acceptance criteria:');
+      for (const line of formatCriteriaLines(rec.criteria, { indent: '    ', exempt: rec.criteriaExempt })) {
+        console.log(line);
+      }
     }
   } else {
     if (asJson) {

@@ -225,12 +225,15 @@ cited three lines that had drifted, and one gap that had since been fixed.
   old silent-loss shape returns for that build), or when the intake backlog is where items go to be
   forgotten — capture makes the remainder *visible*, it does not make it *prioritized*.
 
-- **A steered item can display one thing and build another.** An operator reply that re-scopes work
-  appends `item.respec`, which amends the item's `spec`
-  (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->) — the field builders are given. Boards render
-  the item's original `text`. *Bounded:* the correction is on the trail as a `msg.out`, and the paired
-  `item.queued` is what actually re-runs the work, so nothing is lost. *Matters when:* you scan the
-  board to remember what an item is about and read a description the builder was never given.
+- **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
+  page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
+  `item.respec`, which amends the item's `spec` *and* its acceptance criteria
+  (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->) — the fields builders and the judge are
+  given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
+  rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
+  does not linger. *What remains:* the original capture text is still on the trail and still the right
+  thing to read when you want to know what was *asked*, as opposed to what is being *built* — the two
+  legitimately differ after a steer, and no surface tries to reconcile them.
 
 ## Deliberately deferred (not bugs — scope)
 
