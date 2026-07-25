@@ -22,11 +22,12 @@
  *   - Breaker: N consecutive gate.failed/no-commit parks stop new dispatches.
  *   - Attempt-unique branches (wi-NNN-a<attempt>) so a re-dispatch never clobbers a
  *     prior attempt's operator-reviewable parked branch.
- *   - The engineering (batch) lane's worker never commits (WI-161): dispatch stages + commits
- *     the worker's in-scope output itself (DISPATCH_BUILDER_TOOLS grants no git add/commit),
- *     so a compound-shell-denied commit command is no longer a failure class this lane can
- *     reach. The target lane and conductor.ts's attended lane are unchanged — their workers
- *     still commit their own output (BUILDER_TOOLS).
+ *   - The engineering (batch) lane's worker never commits (WI-161), and neither does the
+ *     target lane's (WI-166): dispatch stages + commits the worker's in-scope output itself
+ *     (DISPATCH_BUILDER_TOOLS grants no git add/commit), so a compound-shell-denied commit
+ *     command is no longer a failure class either lane can reach. Only conductor.ts's attended
+ *     lane is unchanged — a human is present there, so its worker still commits its own output
+ *     (BUILDER_TOOLS).
  */
 
 import { join, resolve, dirname } from 'node:path';
@@ -80,9 +81,10 @@ export const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
  * Builder worker allowed-tools list — passed as --allowedTools to every headless build spawn.
- * Used by the TARGET lane (runTargetLane/finalizeTargetBuild, this file) and by conductor.ts's
- * attended session lane — neither has a dispatch-side commit fallback, so the worker is still
- * the only thing that can commit its own output there and needs `git add`/`git commit`.
+ * Used ONLY by conductor.ts's attended session lane now: a human is present there, so the
+ * worker still commits its own output and needs `git add`/`git commit`. The batch/engineering
+ * lane (WI-161) and the target lane (WI-166) both migrated to {@link DISPATCH_BUILDER_TOOLS} —
+ * dispatch commits their output itself, so their workers hold no commit tool at all.
  * A spawn that omits this list gets permission-prompted on every file write, and a headless
  * session has no approver — the worker then honestly parks with "no commit" instead. Every
  * lane that spawns a headless build must pass the list appropriate to it; a lane that forgets
@@ -104,12 +106,15 @@ export const BUILDER_TOOLS = [
 ];
 
 /**
- * Builder worker allowed-tools list for the engineering (batch) lane ONLY (WI-161). Identical
- * to {@link BUILDER_TOOLS} minus `git add`/`git commit`: this lane's dispatch-side scoped
- * commit (see the "Dispatch-side scoped commit" block below) is now the PRIMARY commit path,
- * so the worker is never granted a commit tool to race against or fall back from — a compound
- * shell command silently denied by the allowlist is no longer a failure class this lane can
- * even reach, because there is no worker-side commit attempt to deny.
+ * Builder worker allowed-tools list for lanes with a dispatch-side scoped commit: the
+ * batch/engineering lane (WI-161) AND the target lane (WI-166). Identical to
+ * {@link BUILDER_TOOLS} minus `git add`/`git commit`: dispatch's own scoped commit (see
+ * `attemptScopedCommit` and the "Dispatch-side scoped commit" block below) is the PRIMARY
+ * commit path for both lanes, so their workers are never granted a commit tool to race against
+ * or fall back from — a compound shell command silently denied by the allowlist is no longer a
+ * failure class either lane can even reach, because there is no worker-side commit attempt to
+ * deny. conductor.ts's attended lane is unaffected (BUILDER_TOOLS, unchanged) — a human is
+ * present there.
  */
 export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
   t => t !== 'Bash(git add:*)' && t !== 'Bash(git commit:*)',
@@ -1185,6 +1190,84 @@ function readManifestSubject(wtPath: string, id: string): string | undefined {
   }
 }
 
+/** Result of {@link attemptScopedCommit}. */
+export interface ScopedCommitResult {
+  /** HEAD after the attempt — unchanged from the caller's `headBranch` when nothing was committed. */
+  headEffective: string;
+  /** Dirty paths left uncommitted (outside scope) — surfaced in park reasons / msg.out notes. */
+  residue: string[];
+  /** True when this call actually made a commit. */
+  committed: boolean;
+  /** Human-readable note describing what happened, for logging/msg.out — '' when nothing was dirty. */
+  note: string;
+}
+
+/**
+ * Shared dispatch-side scoped-commit attempt (WI-161, generalized WI-166): given a worktree that
+ * a worker just finished in, stage ONLY the files within scope (declared Touches ∪ manifest
+ * filesTouched) and commit them under dispatch's own identity — the worker never holds a
+ * git-commit tool in either lane that calls this. Used by the batch/engineering lane (worker
+ * runs with {@link DISPATCH_BUILDER_TOOLS}) and the target lane (WI-166 migration). A blanket
+ * `git add -A` would sweep scratch/residue into the commit and trip the Touches-overstep park;
+ * scoped staging avoids that by leaving residue uncommitted and reporting it. Manifests +
+ * node_modules plumbing are never staged. No-op (returns the input `headBranch` unchanged) when
+ * the tree is already clean or nothing dirty falls in scope.
+ *
+ * `touches` — the effective declared-Touches string for the item(s) in this worktree ('*' or
+ * undefined = wildcard, no prefix narrowing — everything falls back to manifest-file matching).
+ * `manifestIds` — ids whose `MANIFEST-<id>.json` may be read for `filesTouched` + `subject`
+ * (the batch lane passes every group member; the target lane passes just the one item).
+ * `subjectId` — whose manifest `subject` field is used verbatim for the commit message, when
+ * present (the batch lane's carrier; the target lane's sole item).
+ * `fallbackKind` — short description of why dispatch is committing (folded into the generated
+ * commit message when no `subject` is supplied).
+ */
+export function attemptScopedCommit(
+  wtPath: string,
+  headBranch: string,
+  branchBase: string,
+  touches: string | undefined,
+  manifestIds: string[],
+  subjectId: string,
+  fallbackKind: string,
+): ScopedCommitResult {
+  let headEffective = headBranch;
+  let residue: string[] = [];
+  let note = '';
+  let committed = false;
+  if (!existsSync(wtPath)) return { headEffective, residue, committed, note };
+  const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: wtPath, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER })
+    .stdout.toString().split('\n')
+    .filter(l => l.trim() && !/MANIFEST-WI-\d+\.json/.test(l) && !isDependencyPlumbing(l))
+    .map(l => l.slice(3).trim())
+    .filter(Boolean);
+  if (dirty.length === 0) return { headEffective, residue, committed, note };
+
+  const touchPrefixes = (touches && touches !== '*') ? normalizeTouches(touches) : [];
+  const manifestFiles = readManifestFilesTouched(wtPath, manifestIds);
+  const plan = planScopedCommit(dirty, touchPrefixes, manifestFiles);
+  residue = plan.residue;
+  if (plan.inScope.length === 0) return { headEffective, residue, committed, note };
+
+  const added = spawnSync('git', ['add', '--', ...plan.inScope], { cwd: wtPath, stdio: 'pipe' });
+  if (added.status !== 0) return { headEffective, residue, committed, note };
+
+  const workerSubject = readManifestSubject(wtPath, subjectId);
+  const commitMessage = workerSubject
+    ? workerSubject
+    : `feat(${subjectId}): worker output, committed by dispatch (${fallbackKind})`;
+  const commitResult = spawnSync('git', ['commit', '-m', commitMessage], { cwd: wtPath, stdio: 'pipe' });
+  if (commitResult.status !== 0) return { headEffective, residue, committed, note };
+
+  headEffective = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout.toString().trim();
+  committed = true;
+  const residueNote = residue.length > 0
+    ? ` — left ${residue.length} out-of-scope change(s) uncommitted: ${residue.slice(0, 8).join(', ')}`
+    : '';
+  note = `${fallbackKind} — dispatch committed ${plan.inScope.length} in-scope change(s)${residueNote}, proceeding to gate`;
+  return { headEffective, residue, committed, note };
+}
+
 // ---------------------------------------------------------------------------
 // Scout prompt
 // ---------------------------------------------------------------------------
@@ -1665,13 +1748,13 @@ export function targetWorktreeDirName(
 }
 
 /**
- * Terminal half of a targeted build — commit-check → manifest gate → merge into the target's
- * default branch → evidence. Shared by BOTH the sync spawn path and the detached-collection path
- * (ADR-008 §3): a collected detached target build reuses the EXACT gate/merge pipeline the sync
- * path uses, never a forked second implementation. `outcome` is the decoded provider (sync) or
- * exit-file (collection) result; `providerName` is best-effort cost attribution (a cross-beat
- * collector may not know which provider ran the detached worker → 'unknown'). Returns the single
- * DispatchStepResult the caller pushes.
+ * Terminal half of a targeted build — dispatch-side scoped commit (WI-166) → commit-check →
+ * manifest gate → merge into the target's default branch → evidence. Shared by BOTH the sync
+ * spawn path and the detached-collection path (ADR-008 §3): a collected detached target build
+ * reuses the EXACT gate/merge pipeline the sync path uses, never a forked second implementation.
+ * `outcome` is the decoded provider (sync) or exit-file (collection) result; `providerName` is
+ * best-effort cost attribution (a cross-beat collector may not know which provider ran the
+ * detached worker → 'unknown'). Returns the single DispatchStepResult the caller pushes.
  */
 async function finalizeTargetBuild(
   opts: DispatchOptions,
@@ -1708,10 +1791,39 @@ async function finalizeTargetBuild(
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
   }
 
-  // The worker must have committed. An empty branch (no commit past HEAD) is a no-commit park.
-  const branchHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
+  // ── Dispatch-side scoped commit (WI-166, target lane) ────────────────────
+  // The target lane's worker holds no git-commit tool (DISPATCH_BUILDER_TOOLS — see
+  // runTargetLane), so dispatch commits the worker's in-scope output itself here, mirroring
+  // the batch/engineering lane's WI-161 fallback via the shared attemptScopedCommit helper.
+  // headBranch/branchBase distinguish "worker finished, nothing committed yet" from "residue
+  // left after an already-landed commit" for the fallback commit message only.
+  let branchHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
+  const scopedResult = attemptScopedCommit(
+    wtPath,
+    branchHead ?? baseSha,
+    baseSha,
+    rec.touches,
+    [rec.id],
+    rec.id,
+    (branchHead ?? baseSha) === baseSha
+      ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
+      : 'residue the worker left uncommitted after a prior dispatch commit',
+  );
+  if (scopedResult.committed) {
+    branchHead = scopedResult.headEffective;
+    process.stderr.write(`[dispatch] ${rec.id}: ${scopedResult.note}\n`);
+    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'msg.out', {
+      text: `dispatch committed the worker's in-scope output — gate judges it normally (${scopedResult.note})`,
+    })]);
+  }
+
+  // The worker must have committed (directly, or via the scoped-commit attempt above). An
+  // empty branch (no commit past HEAD) is a no-commit park.
   if (!branchHead || branchHead === baseSha) {
-    const reason = 'target build produced no commit';
+    const residueNote = scopedResult.residue.length > 0
+      ? ` — left ${scopedResult.residue.length} out-of-scope change(s), all outside declared Touches: ${scopedResult.residue.slice(0, 8).join(', ')}`
+      : '';
+    const reason = `target build produced no commit${residueNote}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
@@ -1985,7 +2097,10 @@ export async function runTargetLane(
         prompt,
         model: rec.model ?? cfg.models.builderDefault,
         cwd: wtPath,
-        tools: BUILDER_TOOLS,
+        // WI-166: this lane's dispatch-side scoped commit (finalizeTargetBuild) is now the
+        // primary commit path — DISPATCH_BUILDER_TOOLS grants no git add/commit, mirroring the
+        // batch lane (WI-161).
+        tools: DISPATCH_BUILDER_TOOLS,
         timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
         detached: true,
         onSpawn: pgid => { spawnedPgid = pgid; },
@@ -2011,9 +2126,11 @@ export async function runTargetLane(
       prompt,
       model: rec.model ?? cfg.models.builderDefault,
       cwd: wtPath,
-      // Same allowed-tools contract as the batch lane — omitting it permission-blocks every
-      // write in a headless session (no approver) and the build parks with "no commit".
-      tools: BUILDER_TOOLS,
+      // WI-166: dispatch commits this lane's output too now (finalizeTargetBuild's scoped-commit
+      // attempt) — DISPATCH_BUILDER_TOOLS, same as the batch lane (WI-161). Omitting a tools list
+      // entirely would still permission-block every write in a headless session (no approver)
+      // and the build would park with "no commit"; that invariant is unchanged.
+      tools: DISPATCH_BUILDER_TOOLS,
       timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
     });
     results.push(await finalizeTargetBuild(opts, rec, {
