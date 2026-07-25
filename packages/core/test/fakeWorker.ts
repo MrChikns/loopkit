@@ -46,7 +46,9 @@ export interface NonCommittingWorkerOptions {
   name?: string;
   /** Optional hook to run extra assertions against the request before writing files
    *  (e.g. asserting req.tools carries no commit tool for this lane). Thrown assertions
-   *  propagate — node:test fails the calling test. */
+   *  propagate — node:test fails the calling test. Only invoked for build calls (req.cwd
+   *  set) — a lane's cwd-less judge reuse of this same provider never runs it, so the hook
+   *  never needs to defensively check req.cwd itself. */
   assertRequest?: (req: ProviderRequest) => void;
 }
 
@@ -61,14 +63,17 @@ export function makeNonCommittingWorker(opts: NonCommittingWorkerOptions): LlmPr
   return {
     name: opts.name ?? 'fake-no-commit',
     async run(req: ProviderRequest): Promise<ProviderResult> {
-      opts.assertRequest?.(req);
       // The provider interface's own contract is "NEVER throws — always returns a
       // ProviderResult" (providers/types.ts); a lane may reuse this same provider for a
       // later non-build call (e.g. dispatch's post-merge judge review) that carries no
       // cwd. Writing nothing and returning ok is the well-behaved no-op for that case —
-      // it must never crash the calling lane's fail-open handling.
+      // it must never crash the calling lane's fail-open handling. `assertRequest` is a
+      // build-request assertion (its examples all read req.cwd/req.tools as if a build is
+      // in progress), so it is gated the same way: skipping it on the cwd-less reuse means
+      // a caller's hook never has to defensively guard against a call it didn't ask for.
       const cwd = req.cwd;
       if (cwd) {
+        opts.assertRequest?.(req);
         for (const f of opts.files) {
           const full = join(cwd, f.path);
           mkdirSync(dirname(full), { recursive: true });
