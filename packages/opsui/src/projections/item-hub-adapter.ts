@@ -11,7 +11,7 @@ import { buildRunControlActions, type WorkItemAction } from './work-adapter.ts';
 import { buildAcceptanceVerbActions } from './acceptance-projection.ts';
 import type { ArtifactRow } from './artifacts-adapter.ts';
 import type { ThreadDetailData } from './thread-detail-projection.ts';
-import type { TimelineRow } from './timeline-adapter.ts';
+import type { TimelineEvent, TimelineRow } from './timeline-adapter.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import { deriveItemStatus } from '../states/status-catalog.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
@@ -47,7 +47,12 @@ export type ItemHubData = {
   thread?: ThreadDetailData;
   artifacts: ArtifactRow[];
   artifactsTruncated: boolean;
-  deployReceipt?: { commit: string; deployed: boolean };
+  /** Absent when nothing about a deploy has ever been reported for this item — not
+   *  every merged item has a deploy command configured, and WI-176 made `deployed: false`
+   *  at merge mean exactly that ("not yet observed"), never "failed". `ok` distinguishes a
+   *  reported deploy.succeeded (true) from a reported deploy.failed (false); `label` carries
+   *  the commit or failure reason for display. See {@link deployReceiptFrom}. */
+  deployReceipt?: { label: string; ok: boolean };
 };
 
 /** Last state-transition timestamp for an active item, mirroring fold-adapter's own
@@ -57,6 +62,40 @@ function lastActivity(candidates: Array<string | undefined>): string | undefined
   const valid = candidates.filter((t): t is string => !!t && !Number.isNaN(new Date(t).getTime()));
   if (valid.length === 0) return undefined;
   return valid.reduce((latest, t) => (new Date(t).getTime() > new Date(latest).getTime() ? t : latest));
+}
+
+/**
+ * The deploy receipt: resolved from the item's own deploy.succeeded/deploy.failed events
+ * (latest wins — a re-deploy after a failure supersedes it), falling back to the merged
+ * fold record's own merge evidence when no deploy event has landed yet. Mirrors
+ * @loopkit/console's views.ts `deployReceipt` (WI-176's console fix) so the two surfaces
+ * can never disagree about whether — and what — shipped. `deployed: false` at merge (every
+ * lane, since WI-176) means "no deploy observed yet", NOT "the deploy failed" — a real
+ * failure only ever arrives as a `deploy.failed` event, handled first below. Returns
+ * undefined when nothing has been reported at all, so the caller renders an honest "not
+ * deployed" rather than inventing a success or a failure.
+ */
+function deployReceiptFrom(
+  mergeCommit: string | undefined,
+  itemId: string,
+  events: TimelineEvent[],
+): { label: string; ok: boolean } | undefined {
+  const deployEvents = events
+    .filter((e) => e.item === itemId && (e.type === 'deploy.succeeded' || e.type === 'deploy.failed'))
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
+  const last = deployEvents[deployEvents.length - 1];
+  if (last) {
+    if (last.type === 'deploy.succeeded') {
+      const commit = typeof last.data['commit'] === 'string' ? (last.data['commit'] as string) : mergeCommit;
+      return { label: commit ? `deployed ${commit}` : 'deployed', ok: true };
+    }
+    const reason = typeof last.data['reason'] === 'string' ? (last.data['reason'] as string) : undefined;
+    return { label: reason ? `deploy failed — ${reason}` : 'deploy failed', ok: false };
+  }
+  // No deploy.succeeded/deploy.failed event yet — the fold's own merge evidence never
+  // asserts a deploy outcome (WI-176: mergeCommit is who-landed-what, not deploy status), so
+  // there is nothing honest to report. Fall through to "not deployed" at the render layer.
+  return undefined;
 }
 
 const failed = (
@@ -104,6 +143,11 @@ export function itemHubProjectionFromInput(
     artifacts: ArtifactRow[];
     artifactsTruncated: boolean;
     nextPath: string;
+    /** Raw ledger events for this item (same pre-read the app layer already does for the
+     *  timeline) — the deploy receipt reads deploy.succeeded/deploy.failed off these, never
+     *  off the fold's merge evidence alone. Defaults to [] so existing callers that haven't
+     *  been threaded yet degrade to "not deployed" rather than throwing. */
+    events?: TimelineEvent[];
   },
   opts: { ledgerSequence: number; staleAfterSeconds?: number } = { ledgerSequence: 0 },
 ): ProjectionEnvelope<ItemHubData> {
@@ -207,7 +251,12 @@ export function itemHubProjectionFromInput(
       ...(input.thread ? { thread: input.thread } : {}),
       artifacts: input.artifacts,
       artifactsTruncated: input.artifactsTruncated,
-      ...(merged?.mergeCommit ? { deployReceipt: { commit: merged.mergeCommit, deployed: true } } : {}),
+      ...(merged
+        ? (() => {
+            const receipt = deployReceiptFrom(merged.mergeCommit, input.itemId, input.events ?? []);
+            return receipt ? { deployReceipt: receipt } : {};
+          })()
+        : {}),
     },
     evidence: [
       { id: 'fold-summary', kind: 'fold-definition', label: 'loopctl summary --json' },
