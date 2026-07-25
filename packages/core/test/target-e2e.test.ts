@@ -183,11 +183,11 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
       makeEvent('cli', 'WI-001', 'item.queued', { spec: 'add a deleteNote helper', touches: 'src/' }, '2026-01-01T00:02:00Z'),
     ]);
 
-    // Same non-committing fake as the primary E2E test above. Its run() is a documented no-op
-    // when req.cwd is unset (fakeWorker.ts) — the judge call carries no cwd (runJudge passes
-    // {prompt, model, tools: [], timeoutMs}), so this same fake doubles as a harmless judge
-    // "provider" whose reply ('done') is not judge-output grammar and parses as 'unparseable'.
-    // That is sufficient to prove the EVENT gets recorded; parsing correctness is judge-review.test.ts's job.
+    // Same non-committing fake as the primary E2E test above. Its run() explicitly handles the
+    // no-cwd case (fakeWorker.ts) — the judge call carries no cwd (runJudge passes
+    // {prompt, model, tools: [], timeoutMs}) — by returning real judge-output grammar (a
+    // parseable VERDICT: pass), so the assertions below check a GENUINE parsed verdict actually
+    // travelled the pipe into the ledger, not merely that some review.verdict event exists.
     const provider = makeNonCommittingWorker({
       files: [
         { path: 'src/extra.js', contents: 'export const marker = 42;\n' },
@@ -204,6 +204,9 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
         notes: 'added marker',
         subject: 'feat(WI-001): add extra marker',
       },
+      // Usage on the judge call so the cost.usage{loop:'judge'} assertion below is checking a
+      // real recorded figure, not merely that the event type is absent-or-present.
+      judgeUsage: { in: 40, out: 20, usd: 0.0004 },
     });
 
     await runDispatch({
@@ -223,10 +226,28 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
     // review.verdict, no cost.usage — for the target lane. This is the defect this fix closes.
     const verdictEvents = events.filter(e => e.type === 'review.verdict' && e.item === 'WI-001');
     assert.equal(verdictEvents.length, 1, 'target-lane build must record exactly one review.verdict');
-    const vData = verdictEvents[0]!.data as { verdict: string; judge: string };
+    const vData = verdictEvents[0]!.data as {
+      verdict: string; confidence: number; specSatisfied: string; judge: string;
+    };
+    // A GENUINE parsed verdict (not a provider-error fail-open 'unavailable', and not an
+    // incidental 'unparseable' from non-grammar reply text) — proves the judge call actually
+    // ran and its output travelled the pipe intact into the ledger.
+    assert.equal(vData.verdict, 'pass');
+    assert.equal(vData.confidence, 0.9);
+    assert.equal(vData.specSatisfied, 'yes');
     assert.equal(vData.judge, 'merge-review');
     // Actor recorded as 'dispatch' — the target lane's ledger actor, mirroring the batch lane.
     assert.equal(verdictEvents[0]!.actor, 'dispatch');
+
+    // cost.usage{loop:'judge'} — the second half of this test's title — with the ACTUAL
+    // token/usd figures the fake's judge call returned (mirrors conductor.test.ts's equivalent
+    // assertion for the attended lane).
+    const judgeCost = events.filter(e =>
+      e.type === 'cost.usage' && e.item === 'WI-001' && (e.data as { loop: string }).loop === 'judge');
+    assert.equal(judgeCost.length, 1, 'target-lane build must record one cost.usage{loop:judge}');
+    const costData = judgeCost[0]!.data as { tokens: number; usd?: number };
+    assert.equal(costData.tokens, 60);
+    assert.equal(costData.usd, 0.0004);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -256,10 +277,26 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
     // commit tool (mirrors the real headless worker under DISPATCH_BUILDER_TOOLS post-WI-166).
     // Also writes a manifest with a "subject" — proving dispatch's scoped commit picks it up,
     // exactly as the batch lane's WI-161 fallback does.
+    //
+    // This same provider instance is reused by dispatch's post-build judge call, which carries
+    // no req.cwd (runJudge always sends { tools: [], no cwd } — see judge.ts). That call is
+    // handled as its own explicit branch below — WI-171: an earlier version of this fake
+    // dereferenced req.cwd! unconditionally (mirroring the same defect fakeWorker.ts had), which
+    // threw TypeError [ERR_INVALID_ARG_TYPE] on the judge call; runPostBuildGuards' fail-open
+    // try/catch swallowed it silently. This test doesn't assert on review.verdict/cost.usage, so
+    // the throw never failed it — but it meant the judge never ran for real here either.
     const provider: LlmProvider = {
       name: 'fake',
       async run(req: ProviderRequest): Promise<ProviderResult> {
-        const cwd = req.cwd!;
+        if (!req.cwd) {
+          // Judge call: explicit, well-behaved handling — never throw, never touch cwd-shaped
+          // logic below.
+          return {
+            ok: true,
+            text: 'VERDICT: pass\nCONFIDENCE: 0.9\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- fake judge stub: default pass',
+          };
+        }
+        const cwd = req.cwd;
         assert.ok(!req.tools?.includes('Bash(git commit:*)'),
           'worker must not be able to self-commit in this scenario');
         writeFileSync(join(cwd, 'src', 'extra.js'), 'export const marker = 43;\n', 'utf8');
