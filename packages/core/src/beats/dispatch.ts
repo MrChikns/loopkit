@@ -120,6 +120,29 @@ export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
   t => t !== 'Bash(git add:*)' && t !== 'Bash(git commit:*)',
 );
 
+/**
+ * ADR-010: the ONE commit contract, explicit in the type system. `'dispatch'` = dispatch
+ * stages + commits the worker's in-scope output itself (the worker holds no commit tool,
+ * matches DISPATCH_BUILDER_TOOLS); `'worker'` = a human is present (the attended conductor
+ * lane), so the worker commits its own output and needs BUILDER_TOOLS. Every `buildPrompt`/
+ * `buildBatchPrompt` call site and every spawn's toolset MUST derive from the SAME
+ * `commitMode` value — see {@link toolsForCommitMode} — so prompt text and granted tools can
+ * never disagree. This is the fix for the 2026-07-25 outage class where a shared prompt said
+ * "you do NOT hold a git-commit tool" while a lane still granted commit tools (or vice versa).
+ */
+export type CommitMode = 'worker' | 'dispatch';
+
+/**
+ * ONE place the commitMode -> toolset pairing is decided. Every spawn site MUST derive its
+ * tools from this helper (never hand-pick BUILDER_TOOLS/DISPATCH_BUILDER_TOOLS per call site) —
+ * that hand-picking is exactly how the prompt-text/toolset mismatch happened twice. See the
+ * load-bearing pairing test (dispatch-batch-commit-mode.test.ts) that asserts this can never
+ * drift again — ADR-010 says that test must never be deleted.
+ */
+export function toolsForCommitMode(mode: CommitMode): string[] {
+  return mode === 'worker' ? BUILDER_TOOLS : DISPATCH_BUILDER_TOOLS;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -635,12 +658,20 @@ export function hasUnconsumedCancelRequest(
 // Gate runner
 // ---------------------------------------------------------------------------
 
-function runGate(
+/**
+ * ADR-010 step 3: exported (was internal to this beat) so conductor.ts can use the ONE gate
+ * runner instead of maintaining its own fork (`runClusterGate`, now deleted). `timeoutMs`
+ * defaults to 5 minutes — the beat's own historical hardcoded value — so both existing beat
+ * call sites (which don't pass it) are byte-for-byte unchanged; the conductor passes its own
+ * per-target `buildTimeoutMinutes`-derived value explicitly.
+ */
+export function runGate(
   gateCommand: string,
   gateWorkdir: string,
   wtPath: string,
   dryRun: boolean,
   baseSha?: string,
+  timeoutMs: number = 5 * 60 * 1000,
 ): { passed: boolean; reason: string; output: string } {
   if (dryRun) return { passed: true, reason: 'dry-run', output: '' };
   const cwd = resolve(wtPath, gateWorkdir);
@@ -660,7 +691,7 @@ function runGate(
     cwd,
     env,
     stdio: 'pipe',
-    timeout: 5 * 60 * 1000,
+    timeout: timeoutMs,
     maxBuffer: SPAWN_MAX_BUFFER,
   });
   // Combined stdout + stderr tail — persisted as the gate log artifact on failure.
@@ -770,13 +801,18 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
  * `.ai/runs/loopkit/<WI>-attempt-<N>.log` and return the log path. Called on EVERY
  * terminal path — a no-commit / dirty-tree park used to leave zero evidence. The
  * text is the provider's success output or its error string, whichever is present.
+ *
+ * ADR-010 step 3: exported so conductor.ts can use this instead of its own fork
+ * (`persistConductLog`, now deleted) — best-effort `mkdirSync` added so a caller whose
+ * run dir may not exist yet (the conductor's `ctx.runDir`) does not need its own guard.
  */
-function persistWorkerLog(
+export function persistWorkerLog(
   runDir: string,
   itemId: string,
   attempt: number,
   output: string,
 ): string {
+  try { mkdirSync(runDir, { recursive: true }); } catch { /* best-effort */ }
   const logPath = join(runDir, `${itemId}-attempt-${attempt}.log`);
   try {
     const tail = output.split('\n').slice(-100).join('\n');
@@ -1368,6 +1404,33 @@ CERTIFICATION: green tests alone are a brief, not a certification — fill in "c
 PORTABILITY: name any OTHER registered targets this change's pattern applies to (or "none") — REQUIRED when the work is ADR-bearing or an incident-fix. The reactor files a sibling item on each named target.
 Do NOT commit this file. It is read by the dispatch gate for attribution and observability.`;
 
+/**
+ * ADR-010: the commit-related prompt clause for a single-item build, DERIVED from
+ * {@link CommitMode} so it can never disagree with the granted toolset (see
+ * {@link toolsForCommitMode}). `'dispatch'` (the default — no human present, dispatch commits
+ * the worker's output itself) tells the worker it holds no commit tool at all; `'worker'` (a
+ * human is present — the attended conductor lane) restores the commit instructions AND the
+ * compound-shell-syntax warning that lane actually needs (a worker composing its own
+ * `git add && git commit` can get silently denied by the allowlist on a compound command).
+ */
+function commitClauseFor(mode: CommitMode): string {
+  if (mode === 'worker') {
+    return `Once your change is complete and tested, commit it yourself with \`git add\` + \`git commit\` (a single-line, descriptive commit message) — do NOT merge, push, or deploy. IMPORTANT — shell syntax: issue \`git add\` and \`git commit\` as SEPARATE Bash tool calls, not chained with \`&&\`/\`;\`/a heredoc — a compound command can be silently denied by the sandbox allowlist even though each piece alone is permitted, which looks like a hang or a silent no-op rather than an error.`;
+  }
+  return `Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits your finished work on your behalf by explicit path, scoped to your declared footprint, then gates it. Leave your finished, tested change in the working tree uncommitted. If you want to influence the commit message, set the manifest's optional "subject" field to a single-line summary — dispatch uses it verbatim when present, else generates one.`;
+}
+
+/**
+ * ADR-010: the batch-prompt counterpart of {@link commitClauseFor} — same derivation, batch
+ * wording (dispatch commits the GROUP's output as one commit in `'dispatch'` mode).
+ */
+function batchCommitClauseFor(mode: CommitMode): string {
+  if (mode === 'worker') {
+    return `Once every item's change is complete and tested, commit them yourself with \`git add\` + \`git commit\` (a single-line, descriptive commit message covering the batch) — do NOT merge, push, or deploy. IMPORTANT — shell syntax: issue \`git add\` and \`git commit\` as SEPARATE Bash tool calls, not chained with \`&&\`/\`;\`/a heredoc — a compound command can be silently denied by the sandbox allowlist even though each piece alone is permitted, which looks like a hang or a silent no-op rather than an error.`;
+  }
+  return `Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits the group's finished, in-scope work on your behalf as ONE commit, scoped to the union of the group's declared footprints, then gates it. Leave your finished, tested changes in the working tree uncommitted.`;
+}
+
 /** @internal exported for tests */
 export function buildPrompt(
   spec: string,
@@ -1379,11 +1442,12 @@ export function buildPrompt(
   playbookContent?: string,
   touches?: string,
   operatorNotes?: string,
+  commitMode: CommitMode = 'dispatch',
 ): string {
   const touchesSection = touches
     ? ` DECLARED FOOTPRINT: this item's declared Touches (the only files you are authorized to write) is: ${touches}. If the change genuinely requires writing outside this footprint, do NOT silently write there — escalate it in the manifest "notes" field using the INTENT/EVIDENCE/RISK/RECOMMENDATION format below instead, and make the smallest in-footprint change you safely can.`
     : '';
-  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change. Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits your finished work on your behalf by explicit path, scoped to your declared footprint, then gates it. Leave your finished, tested change in the working tree uncommitted. If you want to influence the commit message, set the manifest's optional "subject" field to a single-line summary — dispatch uses it verbatim when present, else generates one. Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope.${touchesSection} If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into the manifest's "subject" field — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
+  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change. ${commitClauseFor(commitMode)} Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope.${touchesSection} If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into the manifest's "subject" field — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
   const playbookSection = playbookContent
     ? `\n\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout your implementation):\n${playbookContent}`
     : '';
@@ -1423,7 +1487,7 @@ export function buildPrompt(
  * intersecting the merged diff, so every item MUST write its own accurate manifest.
  * @internal exported for tests
  */
-export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string; operatorNotes?: string }[], playbookContent?: string): string {
+export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string; operatorNotes?: string }[], playbookContent?: string, commitMode: CommitMode = 'dispatch'): string {
   const playbookSection = playbookContent
     ? `\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout):\n${playbookContent}\n`
     : '';
@@ -1450,7 +1514,7 @@ Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdde
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.
 PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
-Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits the group's finished, in-scope work on your behalf as ONE commit, scoped to the union of the group's declared footprints, then gates it. Leave your finished, tested changes in the working tree uncommitted. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's manifest "subject" — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
+${batchCommitClauseFor(commitMode)} COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's manifest "subject" — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
 Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. Each item above may declare its own Touches footprint — the only files that item is authorized to write. If a change genuinely requires writing outside its declared footprint, do NOT silently write there — escalate it in that item's manifest "notes" field instead (see ESCALATION FORMAT below), and make the smallest in-footprint change you safely can. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, leave its files unchanged and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.
 
 ${playbookSection}${list}${batchManifestInstruction}`;
@@ -2148,7 +2212,11 @@ export async function runTargetLane(
     // elsewhere in this file), not a threaded parameter: this lane dispatches serially (one
     // item at a time), so the cost is one read per build, not per beat.
     const operatorNotes = operatorNotesFor(await loadAllEventsWithQuarantine(opts.ledgerDir), rec.id);
-    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches, operatorNotes);
+    // ADR-010: the target lane is a dispatch-side-commit lane — commitMode 'dispatch' derives
+    // both this prompt's commit clause AND the toolset below (toolsForCommitMode) from the
+    // SAME value, so they cannot drift apart the way they did pre-ADR-010 (WI-166 outage).
+    const targetCommitMode: CommitMode = 'dispatch';
+    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches, operatorNotes, targetCommitMode);
 
     // ── ADR-008 §2 detached branch: spawn, record pgid, DON'T await this beat ──
     // onSpawn fires synchronously (claudeCli.ts) before run() resolves, so spawnedPgid is set right
@@ -2161,10 +2229,10 @@ export async function runTargetLane(
         prompt,
         model: rec.model ?? cfg.models.builderDefault,
         cwd: wtPath,
-        // WI-166: this lane's dispatch-side scoped commit (finalizeTargetBuild) is now the
-        // primary commit path — DISPATCH_BUILDER_TOOLS grants no git add/commit, mirroring the
-        // batch lane (WI-161).
-        tools: DISPATCH_BUILDER_TOOLS,
+        // WI-166 / ADR-010: this lane's dispatch-side scoped commit (finalizeTargetBuild) is
+        // the primary commit path — tools derived from targetCommitMode via toolsForCommitMode
+        // (never hand-picked) so this can never drift from the prompt's commit clause again.
+        tools: toolsForCommitMode(targetCommitMode),
         timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
         detached: true,
         onSpawn: pgid => { spawnedPgid = pgid; },
@@ -2190,11 +2258,12 @@ export async function runTargetLane(
       prompt,
       model: rec.model ?? cfg.models.builderDefault,
       cwd: wtPath,
-      // WI-166: dispatch commits this lane's output too now (finalizeTargetBuild's scoped-commit
-      // attempt) — DISPATCH_BUILDER_TOOLS, same as the batch lane (WI-161). Omitting a tools list
-      // entirely would still permission-block every write in a headless session (no approver)
-      // and the build would park with "no commit"; that invariant is unchanged.
-      tools: DISPATCH_BUILDER_TOOLS,
+      // WI-166 / ADR-010: dispatch commits this lane's output too (finalizeTargetBuild's
+      // scoped-commit attempt) — tools derived from targetCommitMode via toolsForCommitMode.
+      // Omitting a tools list entirely would still permission-block every write in a headless
+      // session (no approver) and the build would park with "no commit"; that invariant is
+      // unchanged.
+      tools: toolsForCommitMode(targetCommitMode),
       timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
     });
     results.push(await finalizeTargetBuild(opts, rec, {
@@ -2692,12 +2761,15 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       try { rmSync(flagPath, { force: true }); } catch { /* ignore */ }
     }
 
-    // Builder allowed tools for THIS (batch/engineering) lane — DISPATCH_BUILDER_TOOLS (WI-161):
-    // no git add/commit, since this lane's dispatch-side scoped commit is the primary commit
-    // path (see below) and the worker is never meant to commit its own output here. Omitting
-    // the list entirely would still permission-prompt every write and honestly park with
-    // "no commit" — that part of the invariant is unchanged, only the git-verb subset shrank.
-    const builderTools = DISPATCH_BUILDER_TOOLS;
+    // ADR-010: this (batch/engineering) lane is a dispatch-side-commit lane (WI-161) — no git
+    // add/commit, since this lane's dispatch-side scoped commit is the primary commit path (see
+    // below) and the worker is never meant to commit its own output here. Both the prompt's
+    // commit clause AND this toolset now derive from the SAME batchCommitMode value via
+    // toolsForCommitMode, so they cannot drift apart again. Omitting the list entirely would
+    // still permission-prompt every write and honestly park with "no commit" — that part of the
+    // invariant is unchanged, only the git-verb subset shrank.
+    const batchCommitMode: CommitMode = 'dispatch';
+    const builderTools = toolsForCommitMode(batchCommitMode);
 
     // ── Build routing table once per beat ──────────────────────
     // Reuse the allEvents already loaded above; projectTrajectory is pure (no I/O).
@@ -3137,8 +3209,8 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // Brief (context pack) is injected when available; operator notes after it, then repair
       // evidence. Resume note sits between OPERATOR NOTES and REPAIR EVIDENCE.
       const prompt = group.length > 1
-        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches, operatorNotes: operatorNotesByItem.get(r.id) })), playbookContent)
-        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches, operatorNotesByItem.get(rec.id));
+        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches, operatorNotes: operatorNotesByItem.get(r.id) })), playbookContent, batchCommitMode)
+        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches, operatorNotesByItem.get(rec.id), batchCommitMode);
 
       // Run-controls hard-stop cancel poll: re-reads the ledger tail and fires when ANY member
       // of the co-located group has an
