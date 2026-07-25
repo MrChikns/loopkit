@@ -1351,6 +1351,196 @@ export function attemptScopedCommit(
 }
 
 // ---------------------------------------------------------------------------
+// Post-build guard pipeline (ADR-010 point 2 — one implementation, configured per lane)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-lane configuration for {@link runPostBuildGuards}. Every lane that runs a worker passes
+ * ONE of these — the guard set a lane gets is an explicit value here, never the accident of
+ * which inline code path a lane happened to duplicate (ADR-010: "no Touches-overstep, no spine,
+ * no judge" for two of four lanes was silent omission, not a decision anyone made).
+ *
+ * `gateWrapper` picks which gate-running helper decides pass/fail: `runLaneGate` resolves the
+ * item's lane-specific gate id ({@link resolveGateId}); `runGate` always runs the plain
+ * configured gate command — the right choice when the lane has no per-item lane concept (e.g. a
+ * target's own manifest-declared gate). Turning a guard on for a lane that never had it is a
+ * real behaviour change — see each call site's own comment for why that lane's value is what it is.
+ */
+export interface PostBuildGuardConfig {
+  commitMode: CommitMode;
+  touchesOverstep: boolean;
+  spineCheck: boolean;
+  judge: boolean;
+  gateWrapper: 'runLaneGate' | 'runGate';
+}
+
+/** One item's outcome from {@link runPostBuildGuards} — the caller decides what to DO with it
+ * (merge into which repo, push or not) since that varies legitimately by lane; this pipeline
+ * only decides whether the build's diff is fit to merge at all. */
+export type PostBuildGuardOutcome =
+  | { kind: 'no-commit'; reason: string; residue: string[] }
+  | { kind: 'dirty-worktree'; reason: string }
+  | { kind: 'touches-overstep'; reason: string; files: string[] }
+  | { kind: 'spine'; reason: string; files: string[] }
+  | { kind: 'gate-red'; reason: string; output: string }
+  | { kind: 'passed'; headSha: string; changedFiles: string[]; gateReason: string };
+
+export interface PostBuildGuardCtx {
+  wtPath: string;
+  branch: string;
+  baseSha: string;
+  /** Declared Touches for the item(s) sharing this worktree (union for a co-located group). */
+  touches: string | undefined;
+  /** Manifest ids to read `filesTouched`/`subject` from (batch: every group member; target/
+   * conductor: the one item). */
+  manifestIds: string[];
+  /** Whose manifest `subject` becomes the fallback commit's message when present. */
+  subjectId: string;
+  /** Spine pattern to check changed files against (empty string = no spine declared). Read
+   * independently of `gateCommand`/`gateWorkdir` below so a target-repo caller (whose gate
+   * command comes from its own manifest, not the plane's `cfg`) never has to fabricate a full
+   * plane config just to run this pipeline. */
+  spineRegex: string;
+  /** Gate command + workdir for the `runGate` wrapper (plane's `cfg.gateCommand`/`gateWorkdir`,
+   * or a target's manifest-declared gate — whichever this lane's gate authority is). Only
+   * consulted when `gateWrapper: 'runGate'`. */
+  gateCommand: string;
+  gateWorkdir: string;
+  /** Full config — only consulted when `gateWrapper: 'runLaneGate'` (needs lane-gate lookup +
+   * claim-audit config). Omit when this lane always uses `'runGate'` (e.g. a target repo, which
+   * has no concept of the plane's per-lane gate ids). */
+  cfg?: LoopkitConfig;
+  /** Gate id (only consulted when `gateWrapper: 'runLaneGate'`). */
+  gateId?: string;
+  gateTimeoutMs?: number;
+  /** Prior approved-overstep paths for the touches-overstep guard (empty = none on file). */
+  approvedTouches: string[];
+  /** Judge inputs — only used when `config.judge` is true. */
+  judge?: {
+    provider: LlmProvider | null;
+    model: string;
+    timeoutMs: number;
+    itemId: string;
+    spec: string;
+    itemTouches?: string;
+  };
+}
+
+/**
+ * The ONE post-build sequence every lane runs on a finished worker's worktree, before the
+ * lane-specific merge step: dispatch-side scoped commit (when `commitMode: 'dispatch'`) → no-
+ * commit park → dirty/wrong-branch verification → Touches-overstep → spine → gate → judge
+ * (advisory, never blocks). A lane opts a stage in/out via `config`, never by re-implementing
+ * (or skipping) the stage's own code — see {@link PostBuildGuardConfig}.
+ *
+ * Judge is advisory-only and fail-open by construction: this function still returns `'passed'`
+ * even when the judge stage errors or is skipped — the caller is responsible for recording
+ * `review.verdict` events, since those differ in ledger shape by loop name (`dispatch` vs
+ * `conduct`) and this pipeline has no ledger dependency of its own (pure over its git/gate
+ * inputs so it is trivially testable without a ledger fixture).
+ */
+export async function runPostBuildGuards(
+  ctx: PostBuildGuardCtx,
+  config: PostBuildGuardConfig,
+): Promise<PostBuildGuardOutcome> {
+  let headSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ctx.wtPath, stdio: 'pipe' })
+    .stdout?.toString().trim() ?? ctx.baseSha;
+
+  // ── Dispatch-side scoped commit ──────────────────────────────────────────
+  if (config.commitMode === 'dispatch') {
+    const scoped = attemptScopedCommit(
+      ctx.wtPath,
+      headSha,
+      ctx.baseSha,
+      ctx.touches,
+      ctx.manifestIds,
+      ctx.subjectId,
+      headSha === ctx.baseSha
+        ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
+        : 'residue the worker left uncommitted after a prior dispatch commit',
+    );
+    if (scoped.committed) {
+      headSha = scoped.headEffective;
+      process.stderr.write(`[dispatch] ${ctx.subjectId}: ${scoped.note}\n`);
+    }
+    if (headSha === ctx.baseSha) {
+      const residueNote = scoped.residue.length > 0
+        ? ` — left ${scoped.residue.length} out-of-scope change(s), all outside declared Touches: ${scoped.residue.slice(0, 8).join(', ')}`
+        : '';
+      return { kind: 'no-commit', reason: `build produced no commit${residueNote}`, residue: scoped.residue };
+    }
+  } else if (headSha === ctx.baseSha) {
+    // 'worker' commit mode: the worker holds the commit tool itself — an unchanged HEAD means
+    // it never committed. No scoped-commit fallback applies (there is nothing for dispatch to
+    // stage on the worker's behalf in this mode).
+    return { kind: 'no-commit', reason: 'build produced no commit', residue: [] };
+  }
+
+  // ── Worktree verification: a commit alone doesn't prove a mergeable build ───────────────
+  const wtIssue = verifyWorktreeState(ctx.wtPath, ctx.branch);
+  if (wtIssue) {
+    return { kind: 'dirty-worktree', reason: wtIssue };
+  }
+
+  const changedFiles = getChangedFiles(ctx.wtPath, ctx.baseSha);
+
+  // ── Touches-overstep ─────────────────────────────────────────────────────
+  if (config.touchesOverstep && ctx.touches && ctx.touches !== '*') {
+    const overstep = checkTouchesOverstep(changedFiles, ctx.touches, ctx.approvedTouches);
+    if (overstep && overstep.length > 0) {
+      return {
+        kind: 'touches-overstep',
+        reason: `needs-decision: files outside declared Touches (${ctx.touches}): ${overstep.join(', ')}`,
+        files: overstep,
+      };
+    }
+  }
+
+  // ── Spine check ───────────────────────────────────────────────────────────
+  if (config.spineCheck) {
+    const spine = checkSpine(ctx.spineRegex, changedFiles);
+    if (spine.touched) {
+      return {
+        kind: 'spine',
+        reason: `needs-decision: touches spine (${spine.files.join(', ')}) — approve to merge`,
+        files: spine.files,
+      };
+    }
+  }
+
+  // ── Gate ──────────────────────────────────────────────────────────────────
+  if (config.gateWrapper === 'runLaneGate' && !ctx.cfg) {
+    throw new Error('runPostBuildGuards: gateWrapper "runLaneGate" requires ctx.cfg + ctx.gateId');
+  }
+  const gateOutcome = config.gateWrapper === 'runLaneGate'
+    ? runLaneGate(ctx.gateId!, ctx.cfg!, ctx.wtPath, false, ctx.baseSha, changedFiles)
+    : runGate(ctx.gateCommand, ctx.gateWorkdir, ctx.wtPath, false, ctx.baseSha, ctx.gateTimeoutMs);
+  if (!gateOutcome.passed) {
+    return { kind: 'gate-red', reason: gateOutcome.reason, output: gateOutcome.output };
+  }
+
+  // ── Judge (advisory-only, fail-open, never blocks) ─────────────────────────
+  if (config.judge && ctx.judge?.provider) {
+    const diff = captureWorktreeDiff(ctx.wtPath, ctx.baseSha, 20_000);
+    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches);
+    try {
+      const judgeRunResult = await runJudge(ctx.judge.provider, ctx.judge.model, prompt, ctx.judge.timeoutMs);
+      if (judgeRunResult.parsed) {
+        process.stderr.write(
+          `[dispatch] judge: ${ctx.judge.itemId} verdict=${judgeRunResult.parsed.verdict} confidence=${judgeRunResult.parsed.confidence.toFixed(2)}\n`,
+        );
+      } else {
+        process.stderr.write(`[dispatch] judge: ${ctx.judge.itemId} provider error (${judgeRunResult.providerError ?? 'unknown'}) — merge proceeds\n`);
+      }
+    } catch (e) {
+      process.stderr.write(`[dispatch] judge: ${ctx.judge.itemId} threw (${e}) — merge proceeds (advisory, fail-open)\n`);
+    }
+  }
+
+  return { kind: 'passed', headSha, changedFiles, gateReason: gateOutcome.reason };
+}
+
+// ---------------------------------------------------------------------------
 // Scout prompt
 // ---------------------------------------------------------------------------
 
@@ -1892,6 +2082,9 @@ async function finalizeTargetBuild(
     targetRunDir: string;
     attempt: number;
     providerName?: string;
+    /** Resolved provider for THIS build (judge stage reuses it — same sensitivity-scoped
+     * provider the build itself ran under, never a second resolution). */
+    provider?: LlmProvider | null;
   },
   outcome:
     | { ok: true; text: string; usage?: { in: number; out: number; usd?: number } }
@@ -1915,39 +2108,43 @@ async function finalizeTargetBuild(
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
   }
 
-  // ── Dispatch-side scoped commit (WI-166, target lane) ────────────────────
-  // The target lane's worker holds no git-commit tool (DISPATCH_BUILDER_TOOLS — see
-  // runTargetLane), so dispatch commits the worker's in-scope output itself here, mirroring
-  // the batch/engineering lane's WI-161 fallback via the shared attemptScopedCommit helper.
-  // headBranch/branchBase distinguish "worker finished, nothing committed yet" from "residue
-  // left after an already-landed commit" for the fallback commit message only.
-  let branchHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
-  const scopedResult = attemptScopedCommit(
-    wtPath,
-    branchHead ?? baseSha,
-    baseSha,
-    rec.touches,
-    [rec.id],
-    rec.id,
-    (branchHead ?? baseSha) === baseSha
-      ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
-      : 'residue the worker left uncommitted after a prior dispatch commit',
-  );
-  if (scopedResult.committed) {
-    branchHead = scopedResult.headEffective;
-    process.stderr.write(`[dispatch] ${rec.id}: ${scopedResult.note}\n`);
-    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'msg.out', {
-      text: `dispatch committed the worker's in-scope output — gate judges it normally (${scopedResult.note})`,
-    })]);
-  }
+  // ── Post-build guard pipeline (ADR-010 point 2) ──────────────────────────
+  // Gate via plain runGate against the target's OWN manifest-declared gate command/workdir (a
+  // target has no concept of the plane's per-lane gate ids, so runLaneGate does not apply here).
+  // Touches-overstep and judge are NEWLY APPLIED to this lane (see runPostBuildGuards's doc
+  // comment for what that changes). Spine stays OFF: `spineRegex` is a property of the PLANE's
+  // own repo, and a target's manifest declares no equivalent concept for its own repo (the
+  // nearest analogue, `boundaries.escalationPatterns`, is a distinct mechanism already enforced
+  // by the claim-audit gate) — applying the plane's spine pattern to a foreign repo's changed
+  // files would be a false-positive machine, not a real guard.
+  const approvedTouches = loadApprovedTouches(await loadAllEventsWithQuarantine(opts.ledgerDir), rec.id);
+  const guardOutcome = await runPostBuildGuards({
+    wtPath, branch, baseSha,
+    touches: rec.touches,
+    manifestIds: [rec.id],
+    subjectId: rec.id,
+    spineRegex: '',
+    gateCommand: manifest.gateCommand,
+    gateWorkdir: manifest.gateWorkdir,
+    approvedTouches,
+    judge: {
+      provider: ctx.provider ?? null,
+      model: opts.config?.judge?.model ?? 'sonnet',
+      timeoutMs: opts.config?.judge?.timeoutMs ?? 240_000,
+      itemId: rec.id,
+      spec: rec.spec ?? rec.sourceText ?? '',
+      itemTouches: rec.touches,
+    },
+  }, {
+    commitMode: 'dispatch',
+    touchesOverstep: true,
+    spineCheck: false,
+    judge: opts.config?.judge?.enabled ?? true,
+    gateWrapper: 'runGate',
+  });
 
-  // The worker must have committed (directly, or via the scoped-commit attempt above). An
-  // empty branch (no commit past HEAD) is a no-commit park.
-  if (!branchHead || branchHead === baseSha) {
-    const residueNote = scopedResult.residue.length > 0
-      ? ` — left ${scopedResult.residue.length} out-of-scope change(s), all outside declared Touches: ${scopedResult.residue.slice(0, 8).join(', ')}`
-      : '';
-    const reason = `target build produced no commit${residueNote}`;
+  if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
+    const reason = `target build ${guardOutcome.reason}`;
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
@@ -1955,18 +2152,24 @@ async function finalizeTargetBuild(
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
   }
-
-  // ── Gate: the MANIFEST's gate command, in its gateWorkdir, in the worktree ─
-  const gate = runGate(manifest.gateCommand, manifest.gateWorkdir, wtPath, false, baseSha);
-  if (!gate.passed) {
-    // Keep the branch for review (like the engineering park path); drop only the worktree.
+  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine') {
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
-      makeEvent('dispatch', rec.id, 'gate.failed', { reason: gate.reason }),
-      makeEvent('dispatch', rec.id, 'item.parked', { reason: gate.reason, parkKind: 'ops' as const }),
+      makeEvent('dispatch', rec.id, 'gate.parked', { reason: guardOutcome.kind }),
+      makeEvent('dispatch', rec.id, 'item.parked', { reason: guardOutcome.reason, parkKind: 'decision' as const }),
     ]);
-    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: gate.reason };
+    return { item: rec.id, dispatched: true, gateOutcome: 'parked-spine', eventsWritten: 2, detail: guardOutcome.reason };
   }
+  if (guardOutcome.kind === 'gate-red') {
+    persistGateLog(targetRunDir, rec.id, attempt, guardOutcome.output ?? '');
+    removeWorktree(gitRoot, wtPath);
+    await appendEvents(opts.ledgerDir, [
+      makeEvent('dispatch', rec.id, 'gate.failed', { reason: guardOutcome.reason }),
+      makeEvent('dispatch', rec.id, 'item.parked', { reason: guardOutcome.reason, parkKind: 'ops' as const }),
+    ]);
+    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: guardOutcome.reason };
+  }
+  const gate = { passed: true, reason: guardOutcome.gateReason };
 
   // ── Merge into the target's default branch (in the target repo) ───────────
   const mergeResult = spawnSync('git', ['checkout', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
@@ -2098,7 +2301,7 @@ export async function runTargetLane(
         };
       results.push(await finalizeTargetBuild(opts, rec, {
         gitRoot, manifest, wtPath: cbWorktree, branch: cbBranch, baseSha, targetRunDir,
-        attempt: cbAttempt, providerName: provider?.name,
+        attempt: cbAttempt, providerName: provider?.name, provider,
       }, outcome));
     }
   }
@@ -2267,7 +2470,8 @@ export async function runTargetLane(
       timeoutMs: manifest.buildTimeoutMinutes * 60 * 1000,
     });
     results.push(await finalizeTargetBuild(opts, rec, {
-      gitRoot, manifest, wtPath, branch, baseSha: baseSha ?? '', targetRunDir, attempt, providerName: activeProvider.name,
+      gitRoot, manifest, wtPath, branch, baseSha: baseSha ?? '', targetRunDir, attempt,
+      providerName: activeProvider.name, provider: activeProvider,
     }, result.ok
       ? { ok: true, text: result.text, usage: result.usage }
       : { ok: false, error: result.error ?? 'unknown error' }));
@@ -3493,58 +3697,32 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // compound shape — `a && b`, `cd wt && git …`, `git -C wt …`, heredoc/-$() commit
       // messages — was silently denied, leaving a FINISHED, gate-ready tree uncommitted and
       // the item parked); promoting it to the ONLY path removes that failure class by
-      // construction instead of detecting-then-parking it. Dispatch stages ONLY the files
-      // within scope — the group's declared Touches ∪ the workers' manifest filesTouched —
-      // and commits them, so the normal gate + Touches-overstep checks judge the result
-      // exactly as if the worker had committed. A blanket `git add -A` would sweep
-      // scratch/residue into the commit and then trip the Touches-overstep park; scoped
-      // staging avoids that by leaving residue uncommitted and surfacing it so the operator
-      // sees what the worker actually did. Manifests + node_modules stay unstaged. Skipped
-      // when tests inject a synthetic diff list.
-      // Commit message: the carrier's manifest may supply a one-line `subject` (the worker's
-      // only remaining lever over message quality, since it never runs `git commit` itself);
-      // falls back to the dispatch-generated message when absent/empty.
-      // residueNote is carried into the no-commit park reason / commit-fallback msg.out note.
+      // construction instead of detecting-then-parking it. ADR-010 point 3: this now calls the
+      // SAME shared `attemptScopedCommit` the target lane and conductor use (was an inline
+      // duplicate of the identical staging/commit sequence, now deleted) — one implementation,
+      // one caller shape, differing only in which ids/subject it reads. Skipped when tests
+      // inject a synthetic diff list.
       let headEffective = headBranch;
       let fallbackResidue: string[] = [];
       if (!opts.touchesDiffFiles && existsSync(w.wtPath)) {
-        const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: w.wtPath, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER })
-          .stdout.toString().split('\n')
-          .filter(l => l.trim() && !/MANIFEST-WI-\d+\.json/.test(l) && !isDependencyPlumbing(l))
-          .map(l => l.slice(3).trim())
-          .filter(Boolean);
-        if (dirty.length > 0) {
-          const gt = groupTouches(recs);
-          const touchPrefixes = (gt && gt !== '*') ? normalizeTouches(gt) : [];
-          const manifestFiles = readManifestFilesTouched(w.wtPath, recs.map(r => r.id));
-          const plan = planScopedCommit(dirty, touchPrefixes, manifestFiles);
-          fallbackResidue = plan.residue;
-          if (plan.inScope.length > 0) {
-            const added = spawnSync('git', ['add', '--', ...plan.inScope],
-              { cwd: w.wtPath, stdio: 'pipe' });
-            if (added.status === 0) {
-              const kind = headBranch === branchBase
-                ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
-                : 'residue the worker left uncommitted after a prior dispatch commit';
-              const workerSubject = readManifestSubject(w.wtPath, rec.id);
-              const commitMessage = workerSubject
-                ? workerSubject
-                : `feat(${rec.id}): worker output, committed by dispatch (${kind})`;
-              const committed = spawnSync('git', ['commit', '-m', commitMessage],
-                { cwd: w.wtPath, stdio: 'pipe' });
-              if (committed.status === 0) {
-                headEffective = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: w.wtPath, stdio: 'pipe' })
-                  .stdout.toString().trim();
-                const residueNote = fallbackResidue.length > 0
-                  ? ` — left ${fallbackResidue.length} out-of-scope change(s) uncommitted: ${fallbackResidue.slice(0, 8).join(', ')}`
-                  : '';
-                process.stderr.write(`[dispatch] ${rec.id}: ${kind} — dispatch committed ${plan.inScope.length} in-scope change(s)${residueNote}, proceeding to gate\n`);
-                await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'msg.out', {
-                  text: `dispatch committed the worker's in-scope output (${plan.inScope.length} change(s); ${kind})${residueNote} — gate judges it normally`,
-                })]);
-              }
-            }
-          }
+        const scoped = attemptScopedCommit(
+          w.wtPath,
+          headBranch,
+          branchBase,
+          groupTouches(recs),
+          recs.map(r => r.id),
+          rec.id,
+          headBranch === branchBase
+            ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
+            : 'residue the worker left uncommitted after a prior dispatch commit',
+        );
+        fallbackResidue = scoped.residue;
+        if (scoped.committed) {
+          headEffective = scoped.headEffective;
+          process.stderr.write(`[dispatch] ${rec.id}: ${scoped.note}\n`);
+          await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'msg.out', {
+            text: `dispatch committed the worker's in-scope output (${scoped.note}) — gate judges it normally`,
+          })]);
         }
       }
 

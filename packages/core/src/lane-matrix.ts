@@ -288,6 +288,32 @@ const BOOLEAN_MARKERS: Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, Re
 };
 
 /**
+ * ADR-010 stage 2: a lane running through the shared `runPostBuildGuards` pipeline no longer
+ * calls `checkTouchesOverstep`/`checkSpine`/`runJudge` directly in its own span — those live
+ * inside the pipeline function, invoked only when the lane's OWN config literal turns them on.
+ * For these three guards, a `<key>: false` in the lane's `PostBuildGuardConfig` literal is an
+ * explicit, unambiguous "off" (checked FIRST, so it wins over the direct-call fallback below —
+ * a lane could theoretically still have a stray direct call in scope while declaring the guard
+ * off, and the declared config is the one that actually executes); any other value for that key
+ * (a literal `true`, or a conditional expression such as `!plan.target`) counts as "present" —
+ * the guard fires under at least some condition. Declared literals win over the BOOLEAN_MARKERS
+ * direct-call fallback (which stays live for a lane that hasn't migrated, e.g. the batch lane).
+ */
+const CONFIG_KEY_FOR_GUARD: Partial<Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, string>> = {
+  touchesOverstep: 'touchesOverstep',
+  spineCheck: 'spineCheck',
+  judge: 'judge',
+};
+
+function detectDeclaredGuard(span: string, key: string): boolean | undefined {
+  const re = new RegExp(`\\b${key}\\s*:\\s*([^,\\n}]+)`);
+  const m = re.exec(span);
+  if (!m) return undefined;
+  const value = m[1]!.trim();
+  return value !== 'false';
+}
+
+/**
  * Which gate wrapper a span calls: the lane-aware dispatcher, the shared plain one, or a fork
  * local to the lane's own file.
  *
@@ -297,8 +323,19 @@ const BOOLEAN_MARKERS: Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, Re
  * began calling the beat's exported `runGate`: the cell then read "local fork" for a call that had
  * just been de-duplicated, i.e. it reported the opposite of what had been fixed. A cell that lies
  * is worse than a missing cell, so the signal has to come from the source, not the filename.
+ *
+ * ADR-010 stage 2: a lane that runs its gate through the shared `runPostBuildGuards` pipeline
+ * (`beats/dispatch.ts`) no longer calls `runGate`/`runLaneGate` directly in its OWN span — the
+ * call lives inside the pipeline function instead, and the lane merely DECLARES which wrapper it
+ * wants via a `gateWrapper: 'runGate' | 'runLaneGate'` config literal passed to it. Prefer that
+ * DECLARED value (same "declared beats inferred" rule {@link detectCommitSide} already uses for
+ * commit contracts) over the direct-call markers, which remain the fallback for a lane that still
+ * calls the wrapper itself (the batch lane, pre-migration to the shared pipeline).
  */
 function detectGateWrapper(span: string, fileSource: string): string {
+  const declaredMatch = /gateWrapper\s*:\s*'(runGate|runLaneGate)'/.exec(span);
+  if (declaredMatch) return `${declaredMatch[1]} (declared)`;
+
   // A FORK is a gate helper a lane's own file defines when the canonical implementation lives
   // elsewhere — i.e. defined here AND imported nowhere. dispatch.ts is the canonical home of
   // runGate/runLaneGate, so its own definitions are not forks; annotating them as such is how an
@@ -403,7 +440,9 @@ function buildRow(spec: LaneSpanSpec, sources: Record<keyof typeof LANE_SOURCE_F
 
   const cells = {} as Record<GuardId, Cell>;
   for (const id of Object.keys(BOOLEAN_MARKERS) as (keyof typeof BOOLEAN_MARKERS)[]) {
-    cells[id] = BOOLEAN_MARKERS[id].test(combined);
+    const configKey = CONFIG_KEY_FOR_GUARD[id];
+    const declared = configKey ? detectDeclaredGuard(combined, configKey) : undefined;
+    cells[id] = declared !== undefined ? declared : BOOLEAN_MARKERS[id].test(combined);
   }
   // Whole-file source (comments stripped) so "local fork" is decided by whether this lane's file
   // DEFINES the gate helper or imports it — see detectGateWrapper.

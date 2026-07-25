@@ -19,9 +19,9 @@ blindly accepting whatever the regen produces) before committing both together.
 | lane | Touches-overstep | spine check | judge | scout | git push | alreadyShippedCommit | denialNote | gate wrapper | commit side |
 |---|---|---|---|---|---|---|---|---|---|
 | planning | no | no | no | no | no | no | no | none | n/a (no code diff) |
-| target | no | no | no | no | no | no | no | runGate | dispatch (declared) |
+| target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) |
 | batch | yes | yes | yes | yes | yes | yes | yes | runLaneGate | dispatch (declared) |
-| conductor | no | no | no | no | no | no | no | runGate | worker (declared) |
+| conductor | yes | yes | yes | no | no | no | no | runGate (declared) | worker (declared) |
 
 ## Reading the columns
 

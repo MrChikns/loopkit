@@ -40,11 +40,11 @@ import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import {
   buildPrompt,
   CommitMode,
+  loadApprovedTouches,
   mergeEvidence,
   persistWorkerLog,
   removeWorktree,
-  runGate,
-  SPAWN_MAX_BUFFER,
+  runPostBuildGuards,
   groupSensitivity,
   resolveProviderForSensitivity,
   toolsForCommitMode,
@@ -219,13 +219,6 @@ export function planClusters(
 // ---------------------------------------------------------------------------
 
 const CONDUCT_COMMIT_MODE: CommitMode = 'worker';
-
-function getChangedFiles(cwd: string, baseSha: string): string[] {
-  const r = spawnSync('git', ['diff', '--name-only', `${baseSha}..HEAD`], {
-    cwd, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER,
-  });
-  return (r.stdout?.toString() ?? '').trim().split('\n').filter(Boolean);
-}
 
 /** Serialize merges into one repo across concurrently running clusters. */
 class RepoMutex {
@@ -495,37 +488,73 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
     return { ...base, outcome: 'error', detail: `no item built: ${failures.join('; ')}` };
   }
 
-  // The workers must have committed — an unchanged HEAD merged green would close items on
-  // nothing. Treat as a hold-park (same degradation as a red gate).
-  const headSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' })
-    .stdout?.toString().trim();
-  if (!headSha || headSha === baseSha) {
-    const reason = 'cluster produced no commit';
+  // ── Post-build guard pipeline (ADR-010 point 2) ────────────────────────────────────────
+  // commitMode stays 'worker' (a human is present — CONDUCT_COMMIT_MODE above). Touches-overstep
+  // and judge are NEWLY APPLIED (this file's top-of-file comment used to call their absence out
+  // as an MVP degradation — no longer true). Spine is scoped to clusters on the PLANE's OWN repo
+  // (`!plan.target`) — a target cluster's changed files live in a foreign repo with no spine
+  // concept of its own (same reasoning as finalizeTargetBuild). Touches-overstep uses the UNION
+  // of the cluster's declared prefixes, same rule the batch beat lane applies to a co-located group.
+  const clusterTouches = plan.items.map(r => r.touches).filter((t): t is string => !!t).join(',') || undefined;
+  const clusterEvents = await loadAllEventsWithQuarantine(ctx.ledgerDir);
+  const approvedTouches = plan.items.flatMap(r => loadApprovedTouches(clusterEvents, r.id));
+  const guardOutcome = await runPostBuildGuards({
+    wtPath, branch, baseSha: baseSha ?? '',
+    touches: clusterTouches,
+    manifestIds: plan.items.map(r => r.id),
+    subjectId: plan.items[0]!.id,
+    spineRegex: plan.target ? '' : ctx.cfg.spineRegex,
+    gateCommand: plan.gateCommand,
+    gateWorkdir: plan.gateWorkdir,
+    gateTimeoutMs: plan.buildTimeoutMinutes * 60 * 1000,
+    approvedTouches,
+    judge: {
+      provider: clusterProvider,
+      model: ctx.cfg.judge?.model ?? 'sonnet',
+      timeoutMs: ctx.cfg.judge?.timeoutMs ?? 240_000,
+      itemId: plan.items[0]!.id,
+      spec: plan.items[0]!.spec ?? plan.items[0]!.sourceText ?? '',
+      itemTouches: clusterTouches,
+    },
+  }, {
+    commitMode: CONDUCT_COMMIT_MODE,
+    touchesOverstep: true,
+    spineCheck: !plan.target,
+    judge: ctx.cfg.judge?.enabled ?? true,
+    gateWrapper: 'runGate',
+  });
+
+  if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
+    const reason = guardOutcome.kind === 'no-commit' ? 'cluster produced no commit' : guardOutcome.reason;
     await appendEvents(ctx.ledgerDir, built.flatMap(rec => [
       makeEvent('conduct', rec.id, 'gate.failed', { reason }),
       makeEvent('conduct', rec.id, 'item.parked', { reason, parkKind: 'hold' as const }),
     ]));
     return { ...base, outcome: 'gate-red', detail: reason };
   }
-
-  // ── ONE gate for the whole cluster ─────────────────────────────────────────────────────
-  const gate = runGate(
-    plan.gateCommand, plan.gateWorkdir, wtPath, /* dryRun */ false, baseSha,
-    plan.buildTimeoutMinutes * 60 * 1000,
-  );
-  if (!gate.passed) {
+  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine') {
+    // Attended mode: a human is present, so a boundary overstep parks `hold` (same desk as any
+    // other conductor park) rather than the beat's `decision` kind — the operator running this
+    // session sees it immediately, not via a separate needs-you queue.
+    await appendEvents(ctx.ledgerDir, built.flatMap(rec => [
+      makeEvent('conduct', rec.id, 'gate.failed', { reason: guardOutcome.reason }),
+      makeEvent('conduct', rec.id, 'item.parked', { reason: guardOutcome.reason, parkKind: 'hold' as const }),
+    ]));
+    return { ...base, outcome: 'gate-red', detail: `${guardOutcome.reason} (worktree kept: ${wtPath})` };
+  }
+  if (guardOutcome.kind === 'gate-red') {
     // Keep the worktree for inspection; park the cluster's items and let other clusters run.
     await appendEvents(ctx.ledgerDir, built.flatMap(rec => [
-      makeEvent('conduct', rec.id, 'gate.failed', { reason: gate.reason }),
+      makeEvent('conduct', rec.id, 'gate.failed', { reason: guardOutcome.reason }),
       makeEvent('conduct', rec.id, 'item.parked', {
-        reason: `cluster gate red: ${gate.reason}`, parkKind: 'hold' as const,
+        reason: `cluster gate red: ${guardOutcome.reason}`, parkKind: 'hold' as const,
       }),
     ]));
-    return { ...base, outcome: 'gate-red', detail: `${gate.reason} (worktree kept: ${wtPath})` };
+    return { ...base, outcome: 'gate-red', detail: `${guardOutcome.reason} (worktree kept: ${wtPath})` };
   }
 
   // ── Merge the cluster branch (per-repo mutex: concurrent clusters never race a checkout) ─
-  const changedFiles = baseSha ? getChangedFiles(wtPath, baseSha) : [];
+  const changedFiles = guardOutcome.changedFiles;
   const mergeResult = await ctx.mutex.run(plan.repoPath, async () => {
     const co = spawnSync('git', ['checkout', plan.defaultBranch], { cwd: plan.repoPath, stdio: 'pipe' });
     if (co.status !== 0) {
