@@ -50,6 +50,82 @@ export interface AttemptRecord {
   model?: string;
   briefed: boolean;                    // item had item.briefed before this dispatch
   judgeVerdict?: 'pass' | 'fail' | 'unparseable';  // latest review.verdict before terminal
+  /**
+   * Raw failure/park classification carried by the terminal event, when present.
+   * Populated from terminalEv.data.reason (gate.failed / gate.parked / build.crashed all
+   * carry a `reason` string) and terminalEv.data.parkKind (only some item.parked-adjacent
+   * events carry this; gate.parked itself does not, so parkKind is frequently absent even
+   * when reason is present). Not populated for 'merged' or 'in-flight' outcomes.
+   */
+  reason?: string;
+  parkKind?: string;
+  /**
+   * Deterministic, normalized failure class derived from `reason` by classifyReason().
+   * Always present when `reason` is present; never guessed — unmatched reasons land in
+   * the explicit 'other' class rather than being dropped.
+   */
+  reasonClass?: ReasonClass;
+}
+
+/**
+ * Normalized failure/park classes. Derived deterministically from the raw `reason`
+ * string emitted by the dispatch beat (packages/core/src/beats/dispatch.ts). Keep this
+ * list in sync with the reason prefixes/literals dispatch actually emits — see
+ * classifyReason() below for the matching rules. 'other' is the explicit catch-all for
+ * any reason string that doesn't match a known class; it must never be silently dropped.
+ */
+export type ReasonClass =
+  | 'no-commit'
+  | 'touches-overstep'
+  | 'spine'
+  | 'dirty-tree'
+  | 'wrong-branch'
+  | 'batch-attribution'
+  | 'breaker'
+  | 'infra'
+  | 'sensitivity'
+  | 'merge-conflict'
+  | 'gate-red'
+  | 'other';
+
+/**
+ * Classify a raw terminal-event `reason` string into a normalized ReasonClass.
+ *
+ * Pure and deterministic — no guessing. Matches are based on the literal reason
+ * strings/prefixes emitted by the dispatch beat (packages/core/src/beats/dispatch.ts):
+ *   - 'no-commit: ...'                        → 'no-commit'
+ *   - 'touches-overstep' (gate.parked literal) → 'touches-overstep'
+ *   - 'spine' (gate.parked literal)            → 'spine'
+ *   - '...dirty...' / '...wrong/detached branch...' worktree-issue text folded into the
+ *     'no-commit: <wtIssue>' prefix by dispatch, so they are already covered by 'no-commit'
+ *     above; a bare 'dirty-tree' or 'wrong-branch' token (in case a future emitter sends
+ *     the bare class name instead of the folded prefix) is still matched explicitly.
+ *   - 'batch-attribution' (gate.parked literal) → 'batch-attribution'
+ *   - 'breaker: ...'                            → 'breaker'
+ *   - 'infra: ...'                               → 'infra'
+ *   - 'sensitivity(...): ...'                    → 'sensitivity'
+ *   - '...merge conflict...'                     → 'merge-conflict'
+ *   - 'tests-red' / 'gate exited ...' / other test-failure text → 'gate-red'
+ *   - anything else (including undefined)        → 'other'
+ */
+export function classifyReason(reason: string | undefined): ReasonClass {
+  if (!reason) return 'other';
+  const r = reason.trim();
+  const lower = r.toLowerCase();
+
+  if (lower.startsWith('no-commit:') || lower === 'no-commit') return 'no-commit';
+  if (r === 'touches-overstep') return 'touches-overstep';
+  if (r === 'spine') return 'spine';
+  if (lower === 'dirty-tree' || lower.includes('dirty tree') || lower.includes('dirty-tree')) return 'dirty-tree';
+  if (lower === 'wrong-branch' || lower.includes('wrong branch') || lower.includes('detached branch')) return 'wrong-branch';
+  if (r === 'batch-attribution') return 'batch-attribution';
+  if (lower.startsWith('breaker:')) return 'breaker';
+  if (lower.startsWith('infra:')) return 'infra';
+  if (lower.startsWith('sensitivity(')) return 'sensitivity';
+  if (lower.includes('merge conflict')) return 'merge-conflict';
+  if (lower === 'tests-red' || lower.startsWith('gate exited') || lower.includes('tests red')) return 'gate-red';
+
+  return 'other';
 }
 
 export interface TrajectoryAggregates {
@@ -68,6 +144,13 @@ export interface TrajectoryAggregates {
   scoutCoverage: number;
   /** Fraction of judge verdicts (where present) that are 'fail'. */
   judgeFailShare: number;
+  /**
+   * Park/failure rate broken out by normalized ReasonClass, over attempts that have a
+   * reason at all (merged/in-flight attempts, which carry no reason, are excluded from
+   * the denominator). Lets the plane rank which failure class costs the most, not just
+   * which model has the best first-pass rate (routing.ts:167).
+   */
+  parkRateByClass: Partial<Record<ReasonClass, number>>;
 }
 
 export interface TrajectoryProjection {
@@ -100,6 +183,7 @@ const ZERO_AGGREGATES: TrajectoryAggregates = {
   avgDurationMinutes: 0,
   scoutCoverage: 0,
   judgeFailShare: 0,
+  parkRateByClass: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +323,19 @@ export function projectTrajectory(
       }
     }
 
+    // -- Failure classification: carry the terminal event's raw reason/parkKind and
+    // derive a normalized class. Only non-merged, non-in-flight outcomes carry a reason
+    // in practice (gate.passed/item.merged data shapes don't include one), but we read
+    // generically off terminalEv.data so we never silently assume the shape.
+    let reason: string | undefined;
+    let parkKind: string | undefined;
+    if (terminalEv) {
+      const td = terminalEv.data as Record<string, unknown>;
+      if (typeof td['reason'] === 'string') reason = td['reason'];
+      if (typeof td['parkKind'] === 'string') parkKind = td['parkKind'];
+    }
+    const reasonClass: ReasonClass | undefined = reason !== undefined ? classifyReason(reason) : undefined;
+
     const endedAt = terminalEv?.ts;
     let durationMinutes: number | undefined;
     if (endedAt) {
@@ -310,6 +407,9 @@ export function projectTrajectory(
       ...(model !== undefined ? { model } : {}),
       briefed,
       ...(judgeVerdict !== undefined ? { judgeVerdict } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(parkKind !== undefined ? { parkKind } : {}),
+      ...(reasonClass !== undefined ? { reasonClass } : {}),
     });
   });
 
@@ -395,6 +495,22 @@ export function projectTrajectory(
   const judgeFailCount = withVerdict.filter(a => a.judgeVerdict === 'fail').length;
   const judgeFailShare = withVerdict.length > 0 ? judgeFailCount / withVerdict.length : 0;
 
+  // Park/failure rate by normalized class: count of attempts per reasonClass / attempts
+  // that carry a reasonClass at all (merged/in-flight attempts have none and are excluded
+  // from the denominator — this is a rate over *classified* failures, not over all attempts).
+  const withReasonClass = attemptRecords.filter(a => a.reasonClass !== undefined);
+  const classCounts = new Map<ReasonClass, number>();
+  for (const a of withReasonClass) {
+    const cls = a.reasonClass!;
+    classCounts.set(cls, (classCounts.get(cls) ?? 0) + 1);
+  }
+  const parkRateByClass: Partial<Record<ReasonClass, number>> = {};
+  if (withReasonClass.length > 0) {
+    for (const [cls, count] of classCounts) {
+      parkRateByClass[cls] = count / withReasonClass.length;
+    }
+  }
+
   return {
     window: { days, from, to },
     attempts: attemptRecords,
@@ -409,6 +525,7 @@ export function projectTrajectory(
       avgDurationMinutes,
       scoutCoverage,
       judgeFailShare,
+      parkRateByClass,
     },
   };
 }
