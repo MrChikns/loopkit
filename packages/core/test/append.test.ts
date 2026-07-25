@@ -292,20 +292,27 @@ test('append: large concurrent batch (stress) — no data loss', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// acquireLock: the stale-lock reclaim AGE predicate (WI-195)
+// acquireLock: the stale-lock reclaim AGE predicate (WI-195) + the spin/staleness split (WI-197)
 //
-// `Date.now() - st.mtimeMs > LOCK_TIMEOUT_MS` decides whether a contended lock is stolen or
+// `Date.now() - st.mtimeMs > LOCK_STALE_MS` decides whether a contended lock is stolen or
 // respected. Every mutant on it survived the mutation run (forced true, forced false, `<=`,
 // `-`→`+`, whole body deleted) — a forced-true version steals a LIVE holder's lock, which is
 // exactly the concurrent-append corruption the lock exists to prevent.
+// WI-197 note: while one constant served as both the spin deadline and the staleness threshold,
+// the "respect the live holder" outcome was unreachable in production — the reclaim branch is only
+// entered once the spin has already run out, so age >= threshold always held. The third test below
+// pins the band that split opened up.
 // ---------------------------------------------------------------------------
 
 /**
- * `LOCK_TIMEOUT_MS` in ledger.ts is module-private; mirrored here. It is BOTH the acquire spin
- * deadline AND the staleness threshold — which is why these tests stub the clock instead of
- * sleeping: a real contended acquire spins for 30 s before the reclaim branch is even reached.
+ * ledger.ts's two lock constants are module-private; mirrored here. WI-197 split them apart:
+ * `LOCK_SPIN_TIMEOUT_MS` is how long a contender waits, `LOCK_STALE_MS` is the age at which the
+ * holder is presumed dead. They are independent, which is what makes the "slow but alive holder is
+ * respected" band below exist at all. These tests stub the clock rather than sleep, since a real
+ * contended acquire spins for the whole deadline before the reclaim branch is even reached.
  */
-const LEDGER_LOCK_TIMEOUT_MS = 30_000;
+const LEDGER_LOCK_SPIN_TIMEOUT_MS = 10_000;
+const LEDGER_LOCK_STALE_MS = 120_000;
 
 /**
  * Run `fn` with Date.now() returning `first` on its first call and `rest` on every call after.
@@ -333,15 +340,15 @@ function heldLockMtimeMs(dir: string): number {
   return statSync(lockPath).mtimeMs;
 }
 
-test('ledger lock: a lock exactly LOCK_TIMEOUT_MS old is NOT stale — acquire fails rather than stealing it', async () => {
+test('ledger lock: a lock exactly LOCK_STALE_MS old is NOT stale — acquire fails rather than stealing it', async () => {
   const dir = join(WORK_DIR, 'lock-not-stale');
   mkdirSync(dir, { recursive: true });
   try {
     const mtimeMs = heldLockMtimeMs(dir);
-    const checkNow = mtimeMs + LEDGER_LOCK_TIMEOUT_MS; // age === threshold; the test is STRICTLY `>`
+    const checkNow = mtimeMs + LEDGER_LOCK_STALE_MS; // age === threshold; the test is STRICTLY `>`
     let ran = false;
     await assert.rejects(
-      withStubbedNow(checkNow - LEDGER_LOCK_TIMEOUT_MS, checkNow,
+      withStubbedNow(checkNow - LEDGER_LOCK_SPIN_TIMEOUT_MS, checkNow,
         () => withLock(dir, async () => { ran = true; })),
       /Could not acquire ledger lock/,
       'a lock that has not yet outlived the timeout must never be reclaimed',
@@ -353,18 +360,45 @@ test('ledger lock: a lock exactly LOCK_TIMEOUT_MS old is NOT stale — acquire f
   }
 });
 
-test('ledger lock: a lock older than LOCK_TIMEOUT_MS IS reclaimed and the transaction proceeds', async () => {
+test('ledger lock: a lock older than LOCK_STALE_MS IS reclaimed and the transaction proceeds', async () => {
   const dir = join(WORK_DIR, 'lock-stale');
   mkdirSync(dir, { recursive: true });
   try {
     const mtimeMs = heldLockMtimeMs(dir);
-    const checkNow = mtimeMs + LEDGER_LOCK_TIMEOUT_MS + 1; // one ms past the threshold
+    const checkNow = mtimeMs + LEDGER_LOCK_STALE_MS + 1; // one ms past the threshold
     let ran = false;
-    const result = await withStubbedNow(checkNow - LEDGER_LOCK_TIMEOUT_MS, checkNow,
+    const result = await withStubbedNow(checkNow - LEDGER_LOCK_SPIN_TIMEOUT_MS, checkNow,
       () => withLock(dir, async () => { ran = true; return 'reclaimed'; }));
     assert.equal(result, 'reclaimed', 'a stale lock must be reclaimed, not wedge the lane forever');
     assert.equal(ran, true);
     assert.equal(existsSync(join(dir, '.ledger.lock')), false, 'the reclaimed lock is released on exit');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger lock: a holder alive PAST the spin deadline but under the staleness threshold is NOT reclaimed (WI-197)', async () => {
+  const dir = join(WORK_DIR, 'lock-slow-but-alive');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const mtimeMs = heldLockMtimeMs(dir);
+    // The whole point of splitting the constants: this age is comfortably past the spin
+    // deadline (so the contender has stopped waiting and reached the reclaim branch) yet
+    // nowhere near the staleness threshold — the holder is slow, not dead.
+    const age = LEDGER_LOCK_SPIN_TIMEOUT_MS * 6; // 60 s: 6x the spin deadline, half the stale window
+    assert.ok(age > LEDGER_LOCK_SPIN_TIMEOUT_MS && age < LEDGER_LOCK_STALE_MS,
+      'fixture must sit strictly between the two constants, or it proves nothing');
+    const checkNow = mtimeMs + age;
+    let ran = false;
+    // First Date.now() sets the spin deadline; an hour in the past collapses the spin to zero
+    // for ANY plausible deadline constant, so this test measures only the staleness predicate.
+    await assert.rejects(
+      withStubbedNow(checkNow - 3_600_000, checkNow, () => withLock(dir, async () => { ran = true; })),
+      /Could not acquire ledger lock/,
+      'a live holder past the spin deadline must be respected, not reaped',
+    );
+    assert.equal(ran, false, 'the transaction body must not run without the lock');
+    assert.ok(existsSync(join(dir, '.ledger.lock')), "the live holder's lock dir must survive");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

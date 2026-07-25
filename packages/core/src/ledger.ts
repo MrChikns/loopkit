@@ -39,12 +39,35 @@ function segmentFile(dir: string, type: string, date: Date): string {
 // Lock (mkdir-based, POSIX-safe for single-host)
 // ---------------------------------------------------------------------------
 
-const LOCK_TIMEOUT_MS = 30_000;
+/**
+ * Two INDEPENDENT numbers (WI-197). One constant used to do both jobs, which made the
+ * "the holder is alive, respect it" branch near-unreachable: the staleness check is only
+ * reached *after* the spin gives up, so with one value a contended lock was always exactly
+ * at the threshold and a slow-but-alive holder got reaped by the next beat.
+ *
+ * SPIN — how long a contender waits before it stops waiting and judges the lock.
+ * A real transaction is a fold plus a few fsync'd appends: sub-second in practice, so 10 s is
+ * >10x headroom. It is deliberately kept well under the 30 s reactor beat, so a genuinely
+ * wedged lane surfaces inside one beat instead of stacking beats behind it.
+ */
+const LOCK_SPIN_TIMEOUT_MS = 10_000;
+/**
+ * STALE — how old a lock must be before another writer may assume the holder is DEAD and
+ * reclaim it. 2 minutes is 2x the slowest beat interval (60 s dispatch) and 12x the spin
+ * deadline, so no live beat's lock is ever reaped merely for being slow; reclaim now only
+ * fires for the case it exists for (holder crashed/killed without releasing), while still
+ * self-healing a wedged lane within two minutes rather than never.
+ *
+ * NOTE: mtime is the lock's CREATION time — nothing refreshes it while held — so staleness
+ * still means "the holder started a while ago", not "the holder stopped making progress",
+ * and the lock still carries no owner/PID token. See docs/limitations.md.
+ */
+const LOCK_STALE_MS = 120_000;
 const LOCK_RETRY_MS = 50;
 
 async function acquireLock(dir: string): Promise<string> {
   const lockPath = join(dir, '.ledger.lock');
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + LOCK_SPIN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
       await mkdir(lockPath, { recursive: false });
@@ -53,10 +76,10 @@ async function acquireLock(dir: string): Promise<string> {
       await new Promise(r => setTimeout(r, LOCK_RETRY_MS));
     }
   }
-  // Stale lock? Check mtime
+  // Spin gave up. Is the holder dead (reclaim) or just slow (respect it)?
   try {
     const st = statSync(lockPath);
-    if (Date.now() - st.mtimeMs > LOCK_TIMEOUT_MS) {
+    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
       rmdirSync(lockPath);
       await mkdir(lockPath, { recursive: false });
       return lockPath;

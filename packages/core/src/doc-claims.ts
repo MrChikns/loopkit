@@ -353,12 +353,20 @@ export const NUMERIC_CLAIMS: NumericClaim[] = [
 
   // ── Ledger (limitations.md)
   {
-    id: 'lockTimeoutSeconds',
+    id: 'lockStaleSeconds',
     doc: 'limitations',
     what: 'the ledger lock staleness window, after which another beat may reap it',
-    sites: [{ file: 'ledger', pattern: /^const LOCK_TIMEOUT_MS = ([\d_]+);/m }],
+    sites: [{ file: 'ledger', pattern: /^const LOCK_STALE_MS = ([\d_]+);/m }],
     transform: n => n / 1000,
-    transformNote: 'LOCK_TIMEOUT_MS is in ms; the doc states seconds',
+    transformNote: 'LOCK_STALE_MS is in ms; the doc states seconds',
+  },
+  {
+    id: 'lockSpinSeconds',
+    doc: 'limitations',
+    what: 'how long a contender waits for the ledger lock before it judges the holder',
+    sites: [{ file: 'ledger', pattern: /^const LOCK_SPIN_TIMEOUT_MS = ([\d_]+);/m }],
+    transform: n => n / 1000,
+    transformNote: 'LOCK_SPIN_TIMEOUT_MS is in ms; the doc states seconds',
   },
   {
     id: 'eventIdRandomBits',
