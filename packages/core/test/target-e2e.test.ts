@@ -23,6 +23,7 @@ import { runDispatch } from '../src/beats/dispatch.js';
 import { manifestHash, readTargetManifest } from '../src/target.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
+import { makeNonCommittingWorker } from './fakeWorker.js';
 
 // Compiled test lives at packages/core/dist-test/test/; the examples dir is at the worktree
 // root. Walk up from the compiled test's dir to the first ancestor that has an examples/ dir so
@@ -90,14 +91,14 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
     ]);
 
     // Fake provider: writes a real, TEST-GREEN change into the TARGET worktree (req.cwd is the
-    // target repo's worktree) and commits it. It adds a passing test so the manifest gate stays green.
-    // (This provider self-commits, which the real headless worker no longer can — see the
-    // "WI-166: target lane merges via dispatch's own scoped commit" test below for the no-worker-
-    // commit path the fix actually targets. Kept here to prove the pre-existing self-commit path
-    // still works unchanged: the scoped-commit attempt is a no-op against an already-clean tree.)
-    const provider: LlmProvider = {
+    // target repo's worktree) but NEVER commits — the real headless worker under
+    // DISPATCH_BUILDER_TOOLS holds no git-commit tool at all (WI-166), so a fake that committed
+    // here would assert a property the test harness supplied, not the system (ADR-010 point 5).
+    // The commit that lands on target main is dispatch's OWN scoped commit, proven below by
+    // decisive assertions against the target repo's real git log.
+    const provider = makeNonCommittingWorker({
       name: 'fake',
-      async run(req: ProviderRequest): Promise<ProviderResult> {
+      assertRequest: (req) => {
         const cwd = req.cwd!;
         // Sanity: the worker's cwd must be a worktree of the TARGET repo (carries notes.js).
         assert.ok(existsSync(join(cwd, 'src', 'notes.js')), 'worker cwd must be a worktree of the target repo');
@@ -109,15 +110,23 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
           `target-lane build request must carry builder tools (got: ${JSON.stringify(req.tools)})`);
         assert.ok(!req.tools?.includes('Bash(git commit:*)'),
           'WI-166: the target lane must NOT grant a commit tool — dispatch commits on the worker\'s behalf');
-        writeFileSync(join(cwd, 'src', 'extra.js'), 'export const marker = 42;\n', 'utf8');
-        writeFileSync(join(cwd, 'test', 'extra.test.js'),
-          "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 42); });\n",
-          'utf8');
-        spawnSync('git', ['add', 'src/extra.js', 'test/extra.test.js'], { cwd, stdio: 'pipe' });
-        spawnSync('git', ['commit', '-m', 'feat(WI-001): add extra marker'], { cwd, stdio: 'pipe' });
-        return { ok: true, text: 'done' };
       },
-    };
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 42;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 42); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-001',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-001): add extra marker',
+      },
+    });
 
     const result = await runDispatch({
       repoRoot: planeRoot,
@@ -243,17 +252,15 @@ test('E2E legacy regression: an untargeted item still builds against the plane r
       makeEvent('cli', 'WI-010', 'item.queued', { spec: 'do X', touches: 'src/' }, '2026-01-01T00:01:00Z'),
     ]);
 
-    const provider: LlmProvider = {
-      name: 'fake',
-      async run(req: ProviderRequest): Promise<ProviderResult> {
-        const cwd = req.cwd!;
-        mkdirSync(join(cwd, 'src'), { recursive: true });
-        writeFileSync(join(cwd, 'src', 'x.ts'), '// x', 'utf8');
-        spawnSync('git', ['add', 'src/x.ts'], { cwd, stdio: 'pipe' });
-        spawnSync('git', ['commit', '-m', 'feat(WI-010): x'], { cwd, stdio: 'pipe' });
-        return { ok: true, text: 'done' };
-      },
-    };
+    // Fake writes files only, never commits — the legacy engineering path is also
+    // commitMode: 'dispatch' (WI-161), so the merge commit below must be dispatch's own
+    // scoped commit, not one the fake supplied (ADR-010 point 5). No manifest subject is
+    // given, so dispatch falls back to its generated "feat(<id>): worker output, committed
+    // by dispatch" message — which still carries the item id, so the assertion below is
+    // unchanged.
+    const provider = makeNonCommittingWorker({
+      files: [{ path: 'src/x.ts', contents: '// x' }],
+    });
 
     await runDispatch({
       repoRoot: planeRoot,
