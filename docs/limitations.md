@@ -69,7 +69,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4345`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4407`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
@@ -88,7 +88,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3144`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3181`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. The conductor claims under the same lock
   (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). What remains is ADR-007's
@@ -110,7 +110,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4531`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4593`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -168,13 +168,24 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 ## Acceptance tiering tells you, it does not authorize
 
-- **Tier is computed after the merge, from the real diff.** Nothing about tiering gates what is allowed
-  to land — it decides what reaches your desk and how long the plane waits before closing the item
-  itself. *Bounded:* for a single-operator plane this is coherent, because your intent plus the
-  autonomy you configured *is* the authorization; the diff-based classification and the judge floor
-  then make sure the riskiest merges are the ones you are actually shown. *Matters when:* you arrive
-  from a change-managed environment and read "review tier" as an approval gate. It is a notification
-  policy. If you need approval-before-merge, the honest answer today is to park the item rather than
+- **Tier is computed after the merge, from the real diff.** Tiering decides what reaches your desk and
+  how long the plane waits before closing the item itself; it is a **notification policy, not an
+  authorization model**. *Bounded:* for a single-operator plane this is coherent, because your intent
+  plus the autonomy you configured *is* the authorization; the diff-based classification and the judge
+  floor then make sure the riskiest merges are the ones you are actually shown. *Matters when:* you
+  arrive from a change-managed environment and read "review tier" as an approval gate.
+
+- **One narrow pre-merge read exists, and it is off by default (WI-180).** `preMergeRiskHold.enabled`
+  re-runs the same tier classifier over the **pre-merge** diff and **parks** (never fails) an item
+  whose paths hit a `must`-tier risk class — `autoApprove.escalationPatterns`, i.e. money/auth/
+  migrations. It is deliberately the whole feature: there is still **no identity, no approval event
+  and no RBAC**, and framing an unattended merge as "unauthorized" on a single-operator plane was
+  explicitly rejected. *Bounded:* default OFF, so behaviour is unchanged unless you turn it on; it
+  reads paths only (the judge is advisory and runs later, so a judge fail is not a landing-risk
+  class); and the conductor applies it to plane clusters only, since a targeted cluster's boundaries
+  live in a manifest that attended path does not read. *Matters when:* you expect it to be an
+  approval gate — it is a *pattern* hold. A risk change whose paths match nothing you listed still
+  lands, and the honest answer for real approval-before-merge is still to park the item rather than
   queue it.
 
 ## Re-planning is intake-only (a running build worker cannot re-scope its item)

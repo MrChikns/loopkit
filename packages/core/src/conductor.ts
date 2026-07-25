@@ -524,6 +524,20 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
     spineCheck: !plan.target,
     judge: ctx.cfg.judge?.enabled ?? true,
     gateWrapper: 'runGate',
+    // WI-180 pre-merge risk hold — absent (⇒ never runs) unless the flag is on. Scoped to
+    // PLANE clusters for the same reason spine is: a target cluster's changed files belong to a
+    // foreign repo whose own boundaries live in its manifest, which this attended path does not
+    // read. A targeted cluster therefore keeps today's behaviour; the beat's target lane, which
+    // does read the manifest, is where a targeted build gets the check.
+    ...(ctx.cfg.preMergeRiskHold?.enabled && !plan.target
+      ? {
+        preMergeRisk: {
+          surfacePrefixes: ctx.cfg.acceptance?.tiers?.surfacePrefixes ?? [],
+          planePrefixes: ctx.cfg.autoApprove.planePrefixes,
+          riskPatterns: ctx.cfg.autoApprove.escalationPatterns,
+        },
+      }
+      : {}),
   });
 
   if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
@@ -534,7 +548,7 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
     ]));
     return { ...base, outcome: 'gate-red', detail: reason };
   }
-  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine') {
+  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine' || guardOutcome.kind === 'risk-tier') {
     // Attended mode: a human is present, so a boundary overstep parks `hold` (same desk as any
     // other conductor park) rather than the beat's `decision` kind — the operator running this
     // session sees it immediately, not via a separate needs-you queue.

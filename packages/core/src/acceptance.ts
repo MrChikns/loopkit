@@ -271,6 +271,35 @@ export function classifyAcceptanceTier(
 }
 
 /**
+ * WI-180 — the PRE-merge read of the same tier classifier.
+ *
+ * Acceptance tier is computed only *after* merge, from the real diff, so it governs what the
+ * operator is TOLD, never what was permitted to land. For a single-operator plane that is
+ * coherent — operator intent plus configured autonomy IS the authorization, and this is
+ * deliberately NOT an authorization model (no identity, no approval events, no RBAC). But the
+ * specific classes acceptance treats as `must` (money, auth, migrations — `riskPatterns`) were
+ * not evaluated anywhere before the merge. This runs the SAME classifier against the pre-merge
+ * diff and returns a hold reason when it says `must`.
+ *
+ * `judgeVerdict` is deliberately NOT passed: the judge is advisory, runs later in the pipeline,
+ * and its 'fail' → must is a *review* signal, not a landing-risk class. So only the deterministic
+ * path-based `must` classes can hold a merge, which is exactly the scope of this check.
+ *
+ * Returns `null` for every other tier — the caller merges unchanged. It never *fails* a build:
+ * the caller parks, so the work is preserved and an operator decides.
+ *
+ * @returns a hold reason, or null when nothing in the diff is a `must`-tier risk class.
+ */
+export function preMergeRiskHoldReason(
+  files: string[],
+  cfg: AcceptanceTierClassifyConfig,
+): string | null {
+  const { tier, reason } = classifyAcceptanceTier(files, undefined, cfg);
+  if (tier !== 'must') return null;
+  return `needs-decision: pre-merge risk hold — ${reason}`;
+}
+
+/**
  * Deterministic base tier from paths + a judge fail.
  *
  * Rules, in order (highest attention wins):

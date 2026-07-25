@@ -47,7 +47,7 @@ import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
 import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
-import { runClaimAuditGate } from '../acceptance.js';
+import { runClaimAuditGate, preMergeRiskHoldReason, AcceptanceTierClassifyConfig } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
 import { projectTrajectory } from '../trajectory.js';
@@ -1611,6 +1611,13 @@ export interface PostBuildGuardConfig {
   spineCheck: boolean;
   judge: boolean;
   gateWrapper: 'runLaneGate' | 'runGate';
+  /**
+   * WI-180 pre-merge risk hold — the boundaries to classify this lane's pre-merge diff against.
+   * **ABSENT = the check does not run at all** (the default everywhere, since the config flag is
+   * default-off), which is what makes "off ⇒ byte-identical" true by construction rather than by
+   * a branch inside the classifier.
+   */
+  preMergeRisk?: AcceptanceTierClassifyConfig;
 }
 
 /** The judge stage's result, returned to the caller so IT can append `review.verdict` +
@@ -1634,6 +1641,9 @@ export type PostBuildGuardOutcome =
   | { kind: 'dirty-worktree'; reason: string }
   | { kind: 'touches-overstep'; reason: string; files: string[] }
   | { kind: 'spine'; reason: string; files: string[] }
+  /** WI-180: the pre-merge diff hit a `must`-tier risk class. Parks, never fails — see
+   *  {@link PostBuildGuardConfig}.preMergeRisk. Only reachable when that config is present. */
+  | { kind: 'risk-tier'; reason: string; files: string[] }
   | { kind: 'gate-red'; reason: string; output: string }
   | {
       kind: 'passed'; headSha: string; changedFiles: string[]; gateReason: string;
@@ -1763,6 +1773,21 @@ export async function runPostBuildGuards(
         kind: 'spine',
         reason: `needs-decision: touches spine (${spine.files.join(', ')}) — approve to merge`,
         files: spine.files,
+      };
+    }
+  }
+
+  // ── WI-180 pre-merge risk hold (config-gated, absent by default) ──────────
+  // Placed with the other BOUNDARY guards (before the gate), not with the gate outcome: this is
+  // "should this be allowed to land", the same question spine and Touches-overstep ask, and it
+  // parks the same way — branch and worktree kept, unpark merges normally.
+  if (config.preMergeRisk) {
+    const holdReason = preMergeRiskHoldReason(changedFiles, config.preMergeRisk);
+    if (holdReason) {
+      return {
+        kind: 'risk-tier',
+        reason: holdReason,
+        files: changedFiles.filter(f => config.preMergeRisk!.riskPatterns.some(p => f.includes(p))),
       };
     }
   }
@@ -2447,6 +2472,18 @@ async function finalizeTargetBuild(
     spineCheck: false,
     judge: opts.config?.judge?.enabled ?? true,
     gateWrapper: 'runGate',
+    // WI-180: classify against the TARGET's own declared boundaries (its manifest), never the
+    // plane's — same rule the reactor's post-merge tiering uses for a targeted item. Absent
+    // (⇒ check skipped entirely) unless the flag is explicitly on.
+    ...(opts.config?.preMergeRiskHold?.enabled
+      ? {
+        preMergeRisk: {
+          surfacePrefixes: manifest.boundaries.surfacePrefixes,
+          planePrefixes: manifest.boundaries.planePrefixes,
+          riskPatterns: manifest.boundaries.escalationPatterns,
+        },
+      }
+      : {}),
   });
 
   if (guardOutcome.kind === 'no-commit' || guardOutcome.kind === 'dirty-worktree') {
@@ -2458,7 +2495,7 @@ async function finalizeTargetBuild(
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
   }
-  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine') {
+  if (guardOutcome.kind === 'touches-overstep' || guardOutcome.kind === 'spine' || guardOutcome.kind === 'risk-tier') {
     removeWorktree(gitRoot, wtPath);
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.parked', { reason: guardOutcome.kind }),
@@ -4274,6 +4311,31 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           gateOutcome: 'parked-spine', eventsWritten: gateEvents.length, detail: reason,
         });
         continue;
+      }
+
+      // WI-180 pre-merge risk hold (config-gated, default OFF — with the flag off nothing below
+      // runs and this lane is byte-identical to before). Sits with the other boundary guards, one
+      // step after spine: same question ("should this be allowed to land"), same park shape —
+      // branch kept for review, worktree dropped, unpark merges normally on the next attempt.
+      if (cfg.preMergeRiskHold?.enabled) {
+        const holdReason = preMergeRiskHoldReason(changedFiles, {
+          surfacePrefixes: cfg.acceptance?.tiers?.surfacePrefixes ?? [],
+          planePrefixes: cfg.autoApprove.planePrefixes,
+          riskPatterns: cfg.autoApprove.escalationPatterns,
+        });
+        if (holdReason) {
+          gateEvents = forItems(id => [
+            makeEvent('dispatch', id, 'gate.parked', { reason: 'risk-tier' }),
+            makeEvent('dispatch', id, 'item.parked', { reason: holdReason, parkKind: 'decision' }),
+          ]);
+          await appendEvents(opts.ledgerDir, gateEvents);
+          removeWorktree(opts.repoRoot, w.wtPath);   // branch kept for review, as with spine
+          results.push({
+            item: rec.id, dispatched: true, branch: w.branch,
+            gateOutcome: 'parked-spine', eventsWritten: gateEvents.length, detail: holdReason,
+          });
+          continue;
+        }
       }
 
       // Run gate (use injected result if provided) — the item's delivery lane picks the
