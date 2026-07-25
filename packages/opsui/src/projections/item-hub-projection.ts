@@ -96,14 +96,17 @@ function evidenceRegion(data: ItemHubData): string {
     : artifacts.map(artifactRow).join('') +
       (artifactsTruncated ? `<p class="opsui-empty">Showing the newest ${artifacts.length} — older artifacts exist but are capped.</p>` : '');
 
+  // Three honest states (WI-187): a reported deploy.succeeded (ok), a reported
+  // deploy.failed (not ok), or nothing reported at all (deployReceipt absent) — never
+  // collapsed into an assumed success. Mirrors @loopkit/console's deployReceiptRow.
   const deployBody = deployReceipt
     ? EventRow({
-        state: 'success',
+        state: deployReceipt.ok ? 'success' : 'critical',
         title: 'Deploy receipt',
-        metadata: [deployReceipt.commit.slice(0, 7)],
-        badge: { state: 'success', label: deployReceipt.deployed ? 'deployed' : 'merged' },
+        metadata: [deployReceipt.label],
+        badge: { state: deployReceipt.ok ? 'success' : 'critical', label: deployReceipt.ok ? 'deployed' : 'deploy failed' },
       })
-    : `<p class="opsui-empty">No deploy receipt yet.</p>`;
+    : `<p class="opsui-empty">Not deployed — no deploy reported for this item yet.</p>`;
 
   return Card({
     title: 'Evidence',

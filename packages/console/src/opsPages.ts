@@ -1383,6 +1383,7 @@ export function renderItemHubPage(data: OpsData, ctx: OpsPageContext, itemId: st
     artifacts,
     artifactsTruncated,
     nextPath,
+    events: itemEvents as never,
   }, { ledgerSequence: 0, staleAfterSeconds: 45 });
 
   const stateLabel = envelope.state === 'failed'
