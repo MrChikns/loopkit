@@ -5,8 +5,10 @@
  *   <dir>/work-YYYY-MM.jsonl   — work events (item.*, msg.*, build.*, gate.*, review.*)
  *   <dir>/ops-YYYY-MM.jsonl    — ops events (slo.*, cost.*, loop.*)
  *
- * Appends are single-line JSON (< 4KB) via O_APPEND (atomic on POSIX).
- * A mkdir-based lock guards multi-event transactions and id allocation.
+ * Appends are single-line JSON (< 4KB) via O_APPEND (atomic on POSIX) and are fsync'd
+ * before the handle closes, so an acknowledged append survives a crash.
+ * A mkdir-based lock serializes multi-event batches and id allocation (it does NOT make a
+ * batch atomic — see appendEvents).
  * Reader streams all segments in chronological order.
  */
 
@@ -109,6 +111,20 @@ export function shrinkEventToFit(event: LedgerEvent, maxBytes: number = MAX_EVEN
 /**
  * Append a single event to the appropriate segment file.
  * O_APPEND + write of a single line <= MAX_EVENT_BYTES is atomic on POSIX.
+ *
+ * Durability barrier: the handle is fsync'd BEFORE it is closed. Closing only hands the
+ * bytes to the OS page cache — an unflushed page cache is lost on a panic/power cut, so
+ * without the sync an append that has already been acknowledged to the caller (and acted
+ * on: a build spawned, a lock released) could simply not exist after a crash. Every write
+ * path in this module funnels through here, so this is the single barrier for the ledger.
+ *
+ * A failing sync propagates, exactly like a failing write: an append we cannot make
+ * durable is a real failure and the caller must not treat it as written.
+ *
+ * Honest limit: fsync(2) guarantees the data reached the storage device. On macOS it does
+ * NOT flush the device's own volatile write cache (that needs F_FULLFSYNC, which Node does
+ * not expose). So this makes an append survive a process crash or an OS panic; a sudden
+ * power loss on a drive with a volatile cache is out of reach here.
  */
 export async function appendEvent(dir: string, event: LedgerEvent): Promise<void> {
   mkdirSync(dir, { recursive: true });
@@ -127,13 +143,33 @@ export async function appendEvent(dir: string, event: LedgerEvent): Promise<void
   const fh = await open(file, 'a');
   try {
     await fh.write(line);
+    await fh.sync(); // durability barrier — see above; must happen before close, not after
   } finally {
     await fh.close();
   }
 }
 
 /**
- * Append multiple events atomically (holds the mkdir lock).
+ * Append a batch of events under the ledger lock.
+ *
+ * NOT atomic — the old comment here claimed it was, and that was wrong. What is actually
+ * guaranteed:
+ *   - the mkdir lock serializes this batch against other appenders and against id
+ *     allocation in withLock(), so two batches never interleave their lines;
+ *   - each individual line is written O_APPEND and fsync'd (see appendEvent), so every
+ *     line that lands on disk is whole and durable.
+ *
+ * What is NOT guaranteed: all-or-nothing. This is N separate write+sync cycles, so a
+ * crash, a kill, or ENOSPC part-way through the loop leaves the first k events durably on
+ * disk and the rest missing — a *durably incomplete* state transition, which the reader
+ * then folds as if it were the whole truth. Per-line durability is not transition
+ * atomicity, and no amount of fsync makes it so.
+ *
+ * Callers therefore must not rely on rollback (there is none). A multi-event transition
+ * should be shaped so that a partial prefix is either harmless or re-derivable on the next
+ * beat — i.e. order the batch so the events that commit the transition come last, and keep
+ * re-appends idempotent.
+ *
  * Events must already have unique ids.
  */
 export async function appendEvents(dir: string, events: LedgerEvent[]): Promise<void> {
