@@ -12,3 +12,7 @@ the console) is a different thing: that is the plane asking its operator about
 - [ADR-004](ADR-004-one-console.md) — one console shape; target-specific surfaces are extensions, not forks
 - [ADR-005](ADR-005-self-hosting.md) — the plane builds its own framework as an ordinary target; self-hosting is not self-publishing
 - [ADR-006](ADR-006-decision-parsing-convention.md) — decision-source parsing is a documented convention (generic PREFIX-NNN ids), not a plugin interface
+- [ADR-007](ADR-007-claim-arbitration.md) — ownership is an event; claims arbitrate attended sessions against armed beats with no mode flip
+- [ADR-008](ADR-008-detached-dispatch-staging.md) — detached dispatch lands staged behind a default-off flag; an unset flag is byte-for-byte today's behaviour
+- [ADR-009](ADR-009-portability-completion.md) — the portability nudge gets a real completion path; an operator reply appends an event instead of sitting unparsed
+- [ADR-010](ADR-010-one-lane.md) — one parameterised build lane; lane is configuration, not a forked code path, and the plane must get smaller
