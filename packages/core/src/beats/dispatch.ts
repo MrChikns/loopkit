@@ -891,6 +891,52 @@ export function assembleRepairEvidence(
   return undefined; // no artifacts found — fail-open, prompt built cold
 }
 
+// Operator notes section caps (WI-168): most recent N notes, ~4000 chars total — sized like
+// the CONTEXT PACK brief cap (parseBrief, 4000 chars), since this is the same class of
+// "trust but verify" background material, not raw evidence.
+const OPERATOR_NOTES_MAX_COUNT = 5;
+const OPERATOR_NOTES_MAX_CHARS = 4_000;
+
+/**
+ * Assemble an OPERATOR NOTES section from an item's own `msg.out` ledger history (WI-168).
+ * The ledger records far more `msg.out` than a human ever writes — reactor/dispatch append
+ * routing acknowledgements, pathology re-queue notes, and engagement replies under actor
+ * 'reactor'/'dispatch' on nearly every beat, which would drown a worker's prompt in bookkeeping
+ * chatter if included unfiltered. Restricts to actor === 'cli': every msg.out actually observed
+ * from a human diagnosing an item (e.g. WI-164's ruled-out-hypotheses note) was appended under
+ * 'cli' — the two known machine-generated 'cli'-actor exceptions (verbs.ts's "could not parse
+ * your reply" rejections) are short, harmless noise in this context, and excluding them would
+ * require a dedicated authorship flag the schema doesn't carry; narrowing by actor is the
+ * available signal, not a guarantee of pure human authorship.
+ *
+ * Newest-first, capped to the most recent {@link OPERATOR_NOTES_MAX_COUNT} notes and
+ * ~{@link OPERATOR_NOTES_MAX_CHARS} total chars (each note further capped so one long note
+ * cannot crowd out the rest) — same truncate-and-say-so convention as assembleRepairEvidence.
+ * Returns undefined when the item has no operator-authored msg.out (fail-open: cold prompt).
+ */
+export function operatorNotesFor(allEvents: LedgerEvent[], itemId: string): string | undefined {
+  const notes = allEvents
+    .filter((e): e is LedgerEvent<'msg.out'> => e.type === 'msg.out' && e.item === itemId && e.actor === 'cli')
+    .map(e => ({ ts: e.ts, text: typeof (e.data as { text?: unknown }).text === 'string' ? (e.data as { text: string }).text : '' }))
+    .filter(n => n.text.trim().length > 0)
+    .reverse() // newest first
+    .slice(0, OPERATOR_NOTES_MAX_COUNT);
+  if (notes.length === 0) return undefined;
+
+  const perNoteMax = Math.floor(OPERATOR_NOTES_MAX_CHARS / notes.length);
+  let used = 0;
+  const rendered: string[] = [];
+  for (const n of notes) {
+    const remaining = OPERATOR_NOTES_MAX_CHARS - used;
+    if (remaining <= 0) break;
+    const cap = Math.min(perNoteMax, remaining);
+    const text = n.text.length > cap ? n.text.slice(0, cap) + ' [truncated]' : n.text;
+    rendered.push(`[${n.ts}] ${text}`);
+    used += text.length;
+  }
+  return `OPERATOR NOTES (most recent first — a human's own diagnosis on this item; trust this over your own re-derivation where they conflict):\n${rendered.join('\n\n')}`;
+}
+
 /**
  * Verify the worktree is in a mergeable shape after the worker exits: still on the
  * expected branch AND a clean tree (no uncommitted changes). A dirty tree means the
@@ -1329,6 +1375,7 @@ export function buildPrompt(
   resumeNote?: string,
   playbookContent?: string,
   touches?: string,
+  operatorNotes?: string,
 ): string {
   const touchesSection = touches
     ? ` DECLARED FOOTPRINT: this item's declared Touches (the only files you are authorized to write) is: ${touches}. If the change genuinely requires writing outside this footprint, do NOT silently write there — escalate it in the manifest "notes" field using the INTENT/EVIDENCE/RISK/RECOMMENDATION format below instead, and make the smallest in-footprint change you safely can.`
@@ -1340,13 +1387,20 @@ export function buildPrompt(
   const briefSection = brief
     ? `\n\nCONTEXT PACK (prepared by a read-only scout at branch point; trust but verify against the code):\n${brief}`
     : '';
+  // OPERATOR NOTES (WI-168): sits right after CONTEXT PACK, before RESUME NOTE/REPAIR EVIDENCE.
+  // Rationale: CONTEXT PACK and OPERATOR NOTES are both general "trust but verify" background —
+  // read once, up front, before the worker turns to attempt-specific mechanics (RESUME NOTE and
+  // REPAIR EVIDENCE describe what THIS attempt's predecessor did/broke). A human's own diagnosis
+  // is higher-trust than a scout's, so it is read early, not buried after the failure mechanics.
+  const operatorNotesSection = operatorNotes ? `\n\n${operatorNotes}` : '';
   const resumeSection = resumeNote ? `\n\n${resumeNote}` : '';
   const attachSuffix = attachments?.length
     ? `\n\nATTACHMENTS (operator uploaded — Read these paths before implementing):\n${attachments.map(p => '- ' + p).join('\n')}`
     : '';
-  // Section order: base → REPO PLAYBOOK → CONTEXT PACK → RESUME NOTE → REPAIR EVIDENCE → REQUEST.
-  // MANIFEST instruction is appended to every prompt so the worker writes a self-report.
-  const prefix = `${base}${playbookSection}${briefSection}`;
+  // Section order: base → REPO PLAYBOOK → CONTEXT PACK → OPERATOR NOTES → RESUME NOTE →
+  // REPAIR EVIDENCE → REQUEST. MANIFEST instruction is appended to every prompt so the worker
+  // writes a self-report.
+  const prefix = `${base}${playbookSection}${briefSection}${operatorNotesSection}`;
   if (repairEvidence) {
     return `${prefix}${resumeSection}\n\n${repairEvidence}\n\nREQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
   }
@@ -1366,7 +1420,7 @@ export function buildPrompt(
  * intersecting the merged diff, so every item MUST write its own accurate manifest.
  * @internal exported for tests
  */
-export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string }[], playbookContent?: string): string {
+export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string; operatorNotes?: string }[], playbookContent?: string): string {
   const playbookSection = playbookContent
     ? `\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout):\n${playbookContent}\n`
     : '';
@@ -1375,13 +1429,16 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
       const briefSection = it.brief
         ? `\nCONTEXT PACK for ${it.id} (prepared by a read-only scout at branch point; trust but verify against the code):\n${it.brief}`
         : '';
+      // OPERATOR NOTES sits right after CONTEXT PACK, before REPAIR EVIDENCE — same rationale
+      // as buildPrompt (WI-168): general background before attempt-specific failure mechanics.
+      const operatorNotesSection = it.operatorNotes ? `\n${it.operatorNotes}` : '';
       const evidenceSection = it.repairEvidence
         ? `\n${it.repairEvidence}`
         : '';
       const touchesSection = it.touches
         ? `\nDeclared Touches for ${it.id} (the only files this item is authorized to write): ${it.touches}`
         : '';
-      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${evidenceSection}\n${it.spec}`;
+      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${operatorNotesSection}${evidenceSection}\n${it.spec}`;
     })
     .join('\n\n');
   const batchManifestInstruction = `
@@ -2084,7 +2141,11 @@ export async function runTargetLane(
 
     // ── Build worker in the target worktree ──────────────────────────────────
     const baseSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' }).stdout?.toString().trim();
-    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches);
+    // WI-168: OPERATOR NOTES — a lazy per-item ledger read (mirrors the tailEvents re-reads
+    // elsewhere in this file), not a threaded parameter: this lane dispatches serially (one
+    // item at a time), so the cost is one read per build, not per beat.
+    const operatorNotes = operatorNotesFor(await loadAllEventsWithQuarantine(opts.ledgerDir), rec.id);
+    const prompt = buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, rec.touches, operatorNotes);
 
     // ── ADR-008 §2 detached branch: spawn, record pgid, DON'T await this beat ──
     // onSpawn fires synchronously (claudeCli.ts) before run() resolves, so spawnedPgid is set right
@@ -3034,6 +3095,14 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         }
       }
 
+      // Operator notes (WI-168): reuses the beat-start `allEvents` snapshot (loaded once above)
+      // rather than a fresh read per group — good enough for background context, unlike the
+      // cancel-poll's tailEvents re-read below, which needs a live read for a real-time decision.
+      const operatorNotesByItem = new Map<string, string | undefined>();
+      for (const r of group) {
+        operatorNotesByItem.set(r.id, operatorNotesFor(allEvents, r.id));
+      }
+
       // Salvage resume: if the highest prior attempt left a .salvage.patch,
       // try to apply it to the new worktree. Fail-open: apply failure → reference wording only.
       // Section order in prompt: CONTEXT PACK → RESUME NOTE → REPAIR EVIDENCE → REQUEST.
@@ -3062,11 +3131,11 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
 
       // One prompt: single spec, or a batch prompt listing every co-located spec.
-      // Brief (context pack) is injected when available; repair evidence after it.
-      // Resume note sits between CONTEXT PACK and REPAIR EVIDENCE.
+      // Brief (context pack) is injected when available; operator notes after it, then repair
+      // evidence. Resume note sits between OPERATOR NOTES and REPAIR EVIDENCE.
       const prompt = group.length > 1
-        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches })), playbookContent)
-        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches);
+        ? buildBatchPrompt(group.map(r => ({ id: r.id, spec: r.spec ?? r.sourceText ?? '', brief: briefByItem.get(r.id), repairEvidence: evidenceByItem.get(r.id), touches: r.touches, operatorNotes: operatorNotesByItem.get(r.id) })), playbookContent)
+        : buildPrompt(rec.spec ?? rec.sourceText ?? '', rec.repairContext, resolveAttachmentPaths(rec.sourceText), briefByItem.get(rec.id), evidenceByItem.get(rec.id), resumeNoteByItem.get(rec.id), playbookContent, rec.touches, operatorNotesByItem.get(rec.id));
 
       // Run-controls hard-stop cancel poll: re-reads the ledger tail and fires when ANY member
       // of the co-located group has an
