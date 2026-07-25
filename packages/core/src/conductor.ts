@@ -45,6 +45,7 @@ import {
   persistWorkerLog,
   removeWorktree,
   runPostBuildGuards,
+  judgeVerdictEvents,
   groupSensitivity,
   resolveProviderForSensitivity,
   toolsForCommitMode,
@@ -552,6 +553,13 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
     ]));
     return { ...base, outcome: 'gate-red', detail: `${guardOutcome.reason} (worktree kept: ${wtPath})` };
   }
+
+  // ── Judge verdict (advisory) — persisted here (ADR-010 stage-2 fix), same shared shape the
+  // dispatch beat's target/batch lanes use. One judge call covers the whole cluster (the pipeline
+  // judges once per invocation, keyed to plan.items[0]), so its verdict is recorded against EVERY
+  // built member — matching how gate.passed/item.merged already apply to the whole cluster below.
+  const judgeEvents = built.flatMap(rec => judgeVerdictEvents(rec.id, 'conduct', guardOutcome.judgeVerdict));
+  if (judgeEvents.length > 0) await appendEvents(ctx.ledgerDir, judgeEvents);
 
   // ── Merge the cluster branch (per-repo mutex: concurrent clusters never race a checkout) ─
   const changedFiles = guardOutcome.changedFiles;

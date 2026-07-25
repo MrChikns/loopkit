@@ -163,6 +163,75 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
   }
 });
 
+test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usage (was stderr-only)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-judge-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add deleteNote', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-001', 'item.queued', { spec: 'add a deleteNote helper', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    // Same non-committing fake as the primary E2E test above. Its run() is a documented no-op
+    // when req.cwd is unset (fakeWorker.ts) — the judge call carries no cwd (runJudge passes
+    // {prompt, model, tools: [], timeoutMs}), so this same fake doubles as a harmless judge
+    // "provider" whose reply ('done') is not judge-output grammar and parses as 'unparseable'.
+    // That is sufficient to prove the EVENT gets recorded; parsing correctness is judge-review.test.ts's job.
+    const provider = makeNonCommittingWorker({
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 42;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 42); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-001',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-001): add extra marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const merged = events.filter(e => e.type === 'item.merged' && e.item === 'WI-001');
+    assert.equal(merged.length, 1, 'the targeted item must still merge (judge stays advisory)');
+
+    // DECISIVE: before the fix, runPostBuildGuards' judge stage wrote ONLY to stderr — no
+    // review.verdict, no cost.usage — for the target lane. This is the defect this fix closes.
+    const verdictEvents = events.filter(e => e.type === 'review.verdict' && e.item === 'WI-001');
+    assert.equal(verdictEvents.length, 1, 'target-lane build must record exactly one review.verdict');
+    const vData = verdictEvents[0]!.data as { verdict: string; judge: string };
+    assert.equal(vData.judge, 'merge-review');
+    // Actor recorded as 'dispatch' — the target lane's ledger actor, mirroring the batch lane.
+    assert.equal(verdictEvents[0]!.actor, 'dispatch');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('WI-166: target lane merges via dispatch\'s own scoped commit when the worker never commits', async () => {
   const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-scoped-'));
   try {
