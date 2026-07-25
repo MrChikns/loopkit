@@ -3466,8 +3466,9 @@ async function stepDoctor(
     // Leaked-worktree reaper: remove build worktrees the beats' own cleanup missed (a
     // worker killed mid-cleanup orphans its dir with no fold owner; runDoctor only sees
     // fold-attached worktrees, so these accumulate — the leaked-worktree class). Filesystem-truth
-    // sweep, best-effort, never touches a worktree a live build/lock owns or one younger
-    // than the stall window. Non-destructive: removing a worktree keeps its branch ref.
+    // sweep, best-effort, never touches a worktree a live build owns, one an active session
+    // claim covers, one with uncommitted changes, or one younger than the stall window.
+    // Non-destructive: removing a worktree keeps its branch ref.
     // Runs before the early-return below because leaked dirs are independent of whether
     // the fold produced any orphan/stale-claim actions this beat.
     let reapedWt = 0;
@@ -3476,7 +3477,6 @@ async function stepDoctor(
         const wr = reapLeakedWorktrees(opts.repoRoot, foldResult, {
           now,
           graceMs: cfg.stalledBuildMinutes * 60_000,
-          pidProbe,
         });
         reapedWt = wr.reaped.length;
         if (reapedWt > 0) {
