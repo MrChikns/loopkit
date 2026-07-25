@@ -109,7 +109,9 @@ span and pinned by its own drift test. If this prose and that table disagree, th
   builds them in worktrees and lands `item.merged` on the same board. There is no separate code path
   for it — the CLI drain that used to be one was deleted in
   [ADR-013](decisions/ADR-013-delete-the-conductor.md) after never producing a single ledger event;
-  the `Touches` clustering it offered lives on in the engineering lane as batch co-location.
+  the `Touches` clustering it offered lives on in the engineering lane as batch co-location, though
+  today that is reachable only for untargeted items — the target lane above builds serially and never
+  calls it (see ADR-013's amendment).
 - 🟠 The target lane still lacks the post-integration re-gate. Recorded in
   [limitations](limitations.md).
 
@@ -615,7 +617,8 @@ by hand lands with the same trail as work done while you slept.
   (`loopctl conduct`) running its own copy of this procedure; it was deleted in
   [ADR-013](decisions/ADR-013-delete-the-conductor.md) — it had never produced a ledger event, and
   the `Touches` clustering it offered already ships inside the engineering lane as batch
-  co-location (off by default). What remains is the coordinator: it claims through the same lease
+  co-location (off by default, and today reachable only for untargeted items — see ADR-013's
+  amendment). What remains is the coordinator: it claims through the same lease
   kernel, builds in worktrees, and appends the same events.
 - Everything that appears to differ between the two — where a merge goes, whether it pushes, whether
   the plane's own spine is in scope — is a property of the **item**, not a mode you choose.
