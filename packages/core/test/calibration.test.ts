@@ -133,7 +133,7 @@ async function runReactorOnce(
 }
 
 function queuedEvent(wi: string, spec: string, touches: string, ts: string): LedgerEvent {
-  return makeEvent('conductor', wi, 'item.queued', { spec, touches }, ts);
+  return makeEvent('reactor', wi, 'item.queued', { spec, touches }, ts);
 }
 
 const DEFAULT_CALIB: TierCalibrationConfig = {

@@ -25,7 +25,7 @@ export function sampleLedger(): LedgerEvent[] {
     makeEvent('reactor', 'WI-003', 'item.routed', { route: 'build', reply: 'queuing' }, '2026-07-01T11:01:00.000Z'),
     makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'rename the public API' }, '2026-07-01T11:02:00.000Z'),
     makeEvent('dispatch', 'WI-003', 'build.dispatched', { attempt: 1 }, '2026-07-01T11:03:00.000Z'),
-    makeEvent('conductor', 'WI-003', 'item.parked', { reason: 'touches a public API boundary', parkKind: 'decision' }, '2026-07-01T11:10:00.000Z'),
+    makeEvent('reactor', 'WI-003', 'item.parked', { reason: 'touches a public API boundary', parkKind: 'decision' }, '2026-07-01T11:10:00.000Z'),
 
     // WI-004: merged, awaiting acceptance
     makeEvent('cli', 'WI-004', 'item.captured', { source: 'cli', text: 'tidy up docs' }, '2026-07-01T12:00:00.000Z'),
@@ -199,6 +199,6 @@ export function hostileLedger(): LedgerEvent[] {
     makeEvent('cli', 'WI-900', 'item.captured', { source: 'cli', text: payload }, '2026-07-02T09:00:00.000Z'),
     makeEvent('reactor', 'WI-900', 'item.routed', { route: 'build', reply: payload }, '2026-07-02T09:01:00.000Z'),
     makeEvent('reactor', 'WI-900', 'item.queued', { spec: payload }, '2026-07-02T09:02:00.000Z'),
-    makeEvent('conductor', 'WI-900', 'item.parked', { reason: payload, parkKind: 'decision' }, '2026-07-02T09:10:00.000Z'),
+    makeEvent('reactor', 'WI-900', 'item.parked', { reason: payload, parkKind: 'decision' }, '2026-07-02T09:10:00.000Z'),
   ];
 }

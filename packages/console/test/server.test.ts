@@ -2585,14 +2585,14 @@ function emojiVerbLedger(): ReturnType<typeof sampleLedger> {
   // 🛡 spine verb calls approveOrReject, which acts on any parked item regardless of parkClass
   // (the fold derives parkClass from the reason; the verb never inspects it).
   capture('WI-201', 'spine approve target', 9);
-  evs.push(makeEvent('conductor', 'WI-201', 'item.parked', { reason: 'needs-decision: touches spine', parkKind: 'decision' }, ts(9, 2)));
+  evs.push(makeEvent('reactor', 'WI-201', 'item.parked', { reason: 'needs-decision: touches spine', parkKind: 'decision' }, ts(9, 2)));
   capture('WI-202', 'spine reject target', 10);
-  evs.push(makeEvent('conductor', 'WI-202', 'item.parked', { reason: 'needs-decision: touches spine', parkKind: 'decision' }, ts(10, 2)));
+  evs.push(makeEvent('reactor', 'WI-202', 'item.parked', { reason: 'needs-decision: touches spine', parkKind: 'decision' }, ts(10, 2)));
 
   // Decision-parked.
   for (const [id, h] of [['WI-203', 11], ['WI-204', 12], ['WI-205', 13]] as const) {
     capture(id, `${id} decision`, h);
-    evs.push(makeEvent('conductor', id, 'item.parked', { reason: 'touches a public API boundary', parkKind: 'decision' }, ts(h, 2)));
+    evs.push(makeEvent('reactor', id, 'item.parked', { reason: 'touches a public API boundary', parkKind: 'decision' }, ts(h, 2)));
   }
 
   // Merged, awaiting acceptance.

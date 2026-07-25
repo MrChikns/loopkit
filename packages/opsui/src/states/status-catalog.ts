@@ -108,7 +108,7 @@ export const STATUS_CATALOG: Record<StatusId, StatusCatalogEntry> = {
     label: 'Needs your decision',
     tone: 'critical',
     icon: 'diamond',
-    meaning: 'Parked on an operator-owned call (conductor park, product-spine, touches-overstep) — the queue is blocked until you answer.',
+    meaning: 'Parked on an operator-owned call (router park, product-spine, touches-overstep) — the queue is blocked until you answer.',
   },
   'parked-ops': {
     id: 'parked-ops',

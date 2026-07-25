@@ -49,7 +49,7 @@ function cfg(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
 function initRepo(repoRoot: string): void {
   mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
   mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
   writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'engagement.md'), 'stub engagement prompt', 'utf8');
   const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
   g(['init', '-b', 'master']);
@@ -77,7 +77,7 @@ const ESCALATION = {
 test('fold back-compat: item.parked with no escalation field folds exactly as before', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-500', 'item.captured', { source: 'cli', text: 'old-shape park' }),
-    makeEvent('conductor', 'WI-500', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-500', 'item.queued', { spec: 'spec' }),
     makeEvent('reactor', 'WI-500', 'item.parked', { reason: 'needs decision: hosting', parkKind: 'decision' }),
   ];
   const result = fold(events);
@@ -91,7 +91,7 @@ test('fold back-compat: item.parked with no escalation field folds exactly as be
 test('fold: a well-formed escalation payload folds onto the record', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-501', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-501', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-501', 'item.queued', { spec: 'spec' }),
     makeEvent('reactor', 'WI-501', 'item.parked', {
       reason: 'needs decision: hosting',
       parkKind: 'decision',
@@ -107,7 +107,7 @@ test('fold: a well-formed escalation payload folds onto the record', () => {
 test('fold: a malformed (partial) escalation payload folds to undefined, never half-populated', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-502', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-502', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-502', 'item.queued', { spec: 'spec' }),
     makeEvent('reactor', 'WI-502', 'item.parked', {
       reason: 'needs decision: hosting',
       parkKind: 'decision',
@@ -126,7 +126,7 @@ test('fold: a malformed (partial) escalation payload folds to undefined, never h
 test('fold: escalation archives to lastEscalation and clears on exit-from-parked (same lifecycle as parkReason)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-503', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-503', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-503', 'item.queued', { spec: 'spec' }),
     makeEvent('reactor', 'WI-503', 'item.parked', {
       reason: 'needs decision: hosting',
       parkKind: 'decision',

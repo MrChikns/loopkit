@@ -151,7 +151,7 @@ test('ledger-merge guard: live ledger events present before the merge, but absen
     // exists for). None of this is part of any commit masterSha can resolve to.
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-100', 'item.captured', { source: 'cli', text: 'do x' }, '2026-07-01T00:01:00Z'),
-      makeEvent('conductor', 'WI-100', 'item.queued', { spec: 'do x' }, '2026-07-01T00:01:01Z'),
+      makeEvent('reactor', 'WI-100', 'item.queued', { spec: 'do x' }, '2026-07-01T00:01:01Z'),
       makeEvent('dispatch', 'WI-100', 'build.dispatched', {
         attempt: 1, pid: 1, branch: 'wi-100',
       }, '2026-07-01T00:01:02Z'),

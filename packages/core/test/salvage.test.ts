@@ -401,13 +401,13 @@ test('buildResumeNote: applied=false uses reference wording with path', () => {
 test('dispatch: resume note injected in prompt when salvage patch exists (applied)', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-100', 'item.captured', { source: 'cli', text: 'fix bug' }),
-    makeEvent('conductor', 'WI-100', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
+    makeEvent('reactor', 'WI-100', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
     // Prior attempt
     makeEvent('dispatch', 'WI-100', 'build.dispatched', { attempt: 1, branch: 'wi-100-a1', pid: 999 }),
     makeEvent('dispatch', 'WI-100', 'gate.failed', { reason: 'tests-red: prior' }),
     makeEvent('dispatch', 'WI-100', 'item.parked', { reason: 'tests-red: prior' }),
     makeEvent('operator', 'WI-100', 'item.unparked', {}),
-    makeEvent('conductor', 'WI-100', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
+    makeEvent('reactor', 'WI-100', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
     // Scout brief (for CONTEXT PACK section ordering test)
     makeEvent('dispatch', 'WI-100', 'item.briefed', { brief: 'BRIEF:\nFiles: src/fix.ts — must change', model: 'haiku' }),
   ]);
@@ -489,13 +489,13 @@ index 6b00c47..e4c6e6a 100644
 test('dispatch: resume note uses reference wording when patch does not apply cleanly', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-101', 'item.captured', { source: 'cli', text: 'fix bug' }),
-    makeEvent('conductor', 'WI-101', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
+    makeEvent('reactor', 'WI-101', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
     // Prior attempt
     makeEvent('dispatch', 'WI-101', 'build.dispatched', { attempt: 1, branch: 'wi-101-a1', pid: 999 }),
     makeEvent('dispatch', 'WI-101', 'gate.failed', { reason: 'tests-red: prior' }),
     makeEvent('dispatch', 'WI-101', 'item.parked', { reason: 'tests-red: prior' }),
     makeEvent('operator', 'WI-101', 'item.unparked', {}),
-    makeEvent('conductor', 'WI-101', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
+    makeEvent('reactor', 'WI-101', 'item.queued', { spec: 'fix the bug', touches: 'src/' }),
   ]);
 
   const artifactDir = makeTempDir();
@@ -566,12 +566,12 @@ index 0000000..1111111 100644
 test('dispatch: salvage disabled → no resume note in prompt', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-102', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-102', 'item.queued', { spec: 'build it', touches: 'src/' }),
+    makeEvent('reactor', 'WI-102', 'item.queued', { spec: 'build it', touches: 'src/' }),
     makeEvent('dispatch', 'WI-102', 'build.dispatched', { attempt: 1, branch: 'wi-102-a1', pid: 999 }),
     makeEvent('dispatch', 'WI-102', 'gate.failed', { reason: 'tests-red: prior' }),
     makeEvent('dispatch', 'WI-102', 'item.parked', { reason: 'tests-red: prior' }),
     makeEvent('operator', 'WI-102', 'item.unparked', {}),
-    makeEvent('conductor', 'WI-102', 'item.queued', { spec: 'build it', touches: 'src/' }),
+    makeEvent('reactor', 'WI-102', 'item.queued', { spec: 'build it', touches: 'src/' }),
   ]);
 
   const artifactDir = makeTempDir();
@@ -636,7 +636,7 @@ index 6b00c47..e4c6e6a 100644
 test('dispatch: auth-crash path calls salvage + appends msg.out trail', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-110', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-110', 'item.queued', { spec: 'build it', touches: 'src/' }),
+    makeEvent('reactor', 'WI-110', 'item.queued', { spec: 'build it', touches: 'src/' }),
   ]);
 
   const artifactDir = makeTempDir();
@@ -691,7 +691,7 @@ test('dispatch: auth-crash path calls salvage + appends msg.out trail', async ()
 test('dispatch: provider TIMEOUT (no-commit path) calls salvage with reason timeout', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-111', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-111', 'item.queued', { spec: 'build it', touches: 'src/' }),
+    makeEvent('reactor', 'WI-111', 'item.queued', { spec: 'build it', touches: 'src/' }),
   ]);
 
   const artifactDir = makeTempDir();
@@ -765,7 +765,7 @@ test('doctor orphan path: salvages worktree + appends msg.out + removes worktree
     const deadPid = 99999999;  // assumed dead
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-200', 'item.captured', { source: 'cli', text: 'orphan test' }),
-      makeEvent('conductor', 'WI-200', 'item.queued', { spec: 'build it', touches: 'src/' }),
+      makeEvent('reactor', 'WI-200', 'item.queued', { spec: 'build it', touches: 'src/' }),
       makeEvent('dispatch', 'WI-200', 'build.dispatched', {
         attempt: 1,
         branch: 'wi-200-a1',
@@ -819,7 +819,7 @@ test('doctor orphan: no-worktree orphan is a no-op for salvage (worktree path ab
 
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-201', 'item.captured', { source: 'cli', text: 'gone worktree' }),
-      makeEvent('conductor', 'WI-201', 'item.queued', { spec: 'build', touches: 'src/' }),
+      makeEvent('reactor', 'WI-201', 'item.queued', { spec: 'build', touches: 'src/' }),
       makeEvent('dispatch', 'WI-201', 'build.dispatched', {
         attempt: 1,
         branch: 'wi-201-a1',

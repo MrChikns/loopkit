@@ -35,7 +35,7 @@ test('stopBuild: a building item gets a build.cancel-requested for its current a
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
       makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, worktree: '/wt/a' }),
     ]);
     const res = await stopBuild(ledgerDir, 'WI-001');
@@ -56,7 +56,7 @@ test('stopBuild: a non-building item is rejected, nothing appended', () =>
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
     ]);
     await assert.rejects(() => stopBuild(ledgerDir, 'WI-001'), VerbError);
     const events = await loadAllEvents(ledgerDir);
@@ -71,7 +71,7 @@ test('holdItem: a queued item is parked with parkKind hold', () =>
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
     ]);
     const res = await holdItem(ledgerDir, 'WI-001');
     assert.equal(res.wiId, 'WI-001');
@@ -103,7 +103,7 @@ test('unparkItem resume: a held item returns to queued via item.unparked', () =>
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
       makeEvent('cli', 'WI-001', 'item.parked', { reason: 'held by operator', parkKind: 'hold' }),
     ]);
     const res = await unparkItem(ledgerDir, 'WI-001', 'resume');
@@ -118,7 +118,7 @@ test('unparkItem requeue: an ops-parked item returns to queued via item.unparked
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
       makeEvent('dispatch', 'WI-001', 'item.parked', { reason: 'infra: no commit', parkKind: 'ops' }),
     ]);
     const before = fold(await loadAllEvents(ledgerDir)).items.get('WI-001')!;
@@ -135,7 +135,7 @@ test('unparkItem: a non-parked item is rejected, nothing appended', () =>
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
     ]);
     await assert.rejects(() => unparkItem(ledgerDir, 'WI-001', 'resume'), VerbError);
     const events = await loadAllEvents(ledgerDir);
@@ -150,7 +150,7 @@ test('escalateItem: a building item is flagged without leaving the building stat
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
       makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1 }),
     ]);
     const res = await escalateItem(ledgerDir, 'WI-001', { reason: 'looks stuck' });
@@ -172,7 +172,7 @@ test('escalateItem: a queued item can be escalated too', () =>
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
     ]);
     await escalateItem(ledgerDir, 'WI-001');
     const result = fold(await loadAllEvents(ledgerDir));
@@ -200,7 +200,7 @@ test('dismissItem: an ops-parked item is rejected (terminal), via the shared rej
   withTempLedger(async (ledgerDir) => {
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'add a widget' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }),
       makeEvent('dispatch', 'WI-001', 'item.parked', { reason: 'infra: no commit', parkKind: 'ops' }),
     ]);
     const res = await dismissItem(ledgerDir, 'WI-001');
@@ -222,14 +222,14 @@ test('dismissItem: an ops-parked item is rejected (terminal), via the shared rej
 test('isHeldPark / isOpsPark: partition non-decision parks by kind', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-101', 'item.captured', { source: 'cli', text: 'held' }),
-    makeEvent('conductor', 'WI-101', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-101', 'item.queued', { spec: 'spec' }),
     makeEvent('cli', 'WI-101', 'item.parked', { reason: 'held by operator', parkKind: 'hold' }),
     makeEvent('cli', 'WI-102', 'item.captured', { source: 'cli', text: 'ops' }),
-    makeEvent('conductor', 'WI-102', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-102', 'item.queued', { spec: 'spec' }),
     makeEvent('dispatch', 'WI-102', 'item.parked', { reason: 'infra: no commit', parkKind: 'ops' }),
     makeEvent('cli', 'WI-103', 'item.captured', { source: 'cli', text: 'decision' }),
-    makeEvent('conductor', 'WI-103', 'item.queued', { spec: 'spec' }),
-    makeEvent('conductor', 'WI-103', 'item.parked', { reason: 'spine review', parkKind: 'decision' }),
+    makeEvent('reactor', 'WI-103', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-103', 'item.parked', { reason: 'spine review', parkKind: 'decision' }),
   ];
   const result = fold(events);
   const held = result.items.get('WI-101')!;

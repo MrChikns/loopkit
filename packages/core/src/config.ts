@@ -257,7 +257,12 @@ export interface LoopkitConfig {
 
   /** Default model aliases per loop role */
   models: {
-    conductor: string;
+    /**
+     * Model for the reactor's routing wall — the `router.md` prompt that classifies a
+     * captured item into build/park/answer. Renamed from `conductor`; see
+     * {@link mergeModels} for the deprecated-key fallback.
+     */
+    router: string;
     builderDefault: string;
   };
 
@@ -284,7 +289,7 @@ export interface LoopkitConfig {
    */
   stalledBuildMinutes: number;
 
-  /** Directory containing prompt files (conductor.md, etc.) relative to repo root */
+  /** Directory containing prompt files (router.md, etc.) relative to repo root */
   promptsDir: string;
 
   /** Path to the phone notification hook script relative to repo root */
@@ -819,7 +824,7 @@ const DEFAULTS: LoopkitConfig = {
   },
   providerCooldownMs: 10 * 60 * 1000,   // 10 minutes half-open cooldown
   models: {
-    conductor: 'sonnet',
+    router: 'sonnet',
     builderDefault: 'sonnet',
   },
   breakerN: 3,
@@ -977,7 +982,7 @@ export function loadConfig(repoRoot: string): LoopkitConfig {
     },
     chains: mergeChains((raw as Partial<LoopkitConfig>).chains, DEFAULTS.chains),
     providerCooldownMs: (raw as Partial<LoopkitConfig>).providerCooldownMs ?? DEFAULTS.providerCooldownMs,
-    models: { ...DEFAULTS.models, ...(raw.models ?? {}) },
+    models: mergeModels(raw.models, DEFAULTS.models),
     breakerN: raw.breakerN ?? DEFAULTS.breakerN,
     batchMaxItems: raw.batchMaxItems ?? DEFAULTS.batchMaxItems,
     buildTimeoutMinutes: raw.buildTimeoutMinutes ?? DEFAULTS.buildTimeoutMinutes,
@@ -1269,6 +1274,48 @@ function mergeArmed(raw: unknown): ArmedItem[] {
     };
     return item;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Model aliases — merge + deprecated-key compatibility
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge `models`, honouring the pre-rename `models.conductor` key.
+ *
+ * `conductor` was renamed to `router` (the reactor's routing wall — see `router.md`).
+ * A plain spread would have dropped a configured `conductor` on the floor and silently
+ * reverted that deployment's routing model to the default, which is exactly the kind of
+ * invisible regression a rename must not cause. So the old key is honoured as a fallback
+ * and its use is announced on stderr once per config load — the same deprecate-loudly
+ * shape `LOOPKIT_LEDGER` uses in {@link resolvePlaneHome}.
+ *
+ * `router` wins when both are set (the warning says so).
+ */
+export function mergeModels(
+  raw: Partial<LoopkitConfig['models']> | undefined,
+  defaults: LoopkitConfig['models'],
+  warn: (msg: string) => void = (m) => process.stderr.write(m + '\n'),
+): LoopkitConfig['models'] {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const legacy = typeof r['conductor'] === 'string' ? (r['conductor'] as string) : undefined;
+  const router = typeof r['router'] === 'string' ? (r['router'] as string) : undefined;
+
+  if (legacy !== undefined) {
+    warn(
+      router !== undefined
+        ? `[loopkit] models.conductor is deprecated and IGNORED — models.router ('${router}') wins. Delete models.conductor from your config.`
+        : `[loopkit] models.conductor is deprecated — using it as models.router ('${legacy}'). Rename the key to models.router.`,
+    );
+  }
+
+  const { conductor: _dropped, ...rest } = r;
+  void _dropped;
+  return {
+    ...defaults,
+    ...(rest as Partial<LoopkitConfig['models']>),
+    router: router ?? legacy ?? defaults.router,
+  };
 }
 
 // ---------------------------------------------------------------------------

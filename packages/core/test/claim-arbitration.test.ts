@@ -363,7 +363,7 @@ test('WI-186: the target lane RESERVES the item it picks — item.claimed preced
   const env = await makePlaneEnv([
     makeEvent('cli', 'acme', 'target.registered', { name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main' }),
     makeEvent('cli', 'WI-701', 'item.captured', { source: 'cli', text: 'add acme widget', target: 'acme' }),
-    makeEvent('conductor', 'WI-701', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-701', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
   ]);
 
   try {
@@ -416,7 +416,7 @@ test('WI-186: a foreign claim landing in the read-to-spawn window makes the targ
     makeEvent('cli', 'WI-710', 'item.captured', { source: 'cli', text: 'decompose an epic' }),
     makeEvent('reactor', 'WI-710', 'item.queued', { spec: 'decompose an epic', lane: 'planning' }),
     makeEvent('cli', 'WI-711', 'item.captured', { source: 'cli', text: 'add acme widget', target: 'acme' }),
-    makeEvent('conductor', 'WI-711', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-711', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
   ]);
 
   try {

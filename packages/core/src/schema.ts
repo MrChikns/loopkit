@@ -122,7 +122,7 @@ export interface ItemRoutedData {
   /** Delivery lane the router assigned. Absent → 'engineering'. See DEFAULT_LANE. */
   lane?: string;
   /**
-   * Router-stamped short title, 3-5 words. A direct LLM output (TITLE: in the conductor
+   * Router-stamped short title, 3-5 words. A direct LLM output (TITLE: in the router
    * block), not computed server-side. Absent on any routing where the model omitted it —
    * consumers fall back to the deterministic shortTitle() spec/text truncation (see
    * threads-adapter.ts).

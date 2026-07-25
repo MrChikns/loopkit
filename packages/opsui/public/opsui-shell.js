@@ -213,7 +213,7 @@
     if (savedSheet) savedSheet.removeAttribute('hidden');
   }
 
-  // Live-reply: ops-chat.js fires this when the conductor replies to the captured item (WI-171).
+  // Live-reply: ops-chat.js fires this when the router replies to the captured item (WI-171).
   // Reuses the existing /command/chat/stream SSE endpoint — no new endpoint built.
   window.addEventListener('opsui:live-reply', function () {
     var el = document.querySelector('.opsui-composer__captured');

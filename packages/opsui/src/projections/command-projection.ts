@@ -1,5 +1,5 @@
 // Command projection — the operator's operating picture, composed
-// ONLY from shared components: glance metrics, conductor, company
+// ONLY from shared components: glance metrics, in-flight workers, company
 // stream, decision desk, ops health, pipeline, and provenance. The renderer takes a
 // typed `ProjectionEnvelope<CommandData>` and returns the workspace HTML the AppShell
 // slots in. On a failed envelope it renders `ProjectionFailure`, never stale data.
@@ -94,7 +94,7 @@ export type CommandEvent = {
   evidence?: { id: string; label: string; href?: string };
 };
 
-/** One pipeline stage count — the conductor's throughput at a glance. */
+/** One pipeline stage count — the build lane's throughput at a glance. */
 export type PipelineStage = {
   label: string;
   count: number;
@@ -111,7 +111,7 @@ export type OpsParksCard = CommandEvent[];
 /** Command's own flow-ordered picture of the build lane (WI-355), replacing the "Why isn't
  *  this building?" diagnostic. Three stages, left to right in time: `preparing` (captured/
  *  routed, not yet queued), `queued` (dispatch pick order, existing why-not-picked reasons),
- *  `building` (in-flight workers — the same rows Conductor renders, reshaped). Parked items
+ *  `building` (in-flight workers — the same rows `inFlight` renders, reshaped). Parked items
  *  never appear here — they are plane-owned (ops) or operator-owned (decision), and already
  *  render on the Active ops-parks card / decision desk (ops parks are plane-owned — never a
  *  operator action target) — this pipeline would otherwise duplicate them. */
@@ -131,7 +131,9 @@ export type CommandData = {
   glanceAllClear: boolean;
   /** The compact "what's actually happening" teaser shown under the All-clear line. */
   glancePulse: GlancePulse;
-  conductor: { headline: string; state: OperationalState; workers: CommandEvent[] };
+  /** In-flight worker summary. Named `conductor` until the lane of that name was deleted
+   *  (ADR-013) — the field never had anything to do with routing or with that lane's code. */
+  inFlight: { headline: string; state: OperationalState; workers: CommandEvent[] };
   deliveryStream: CommandEvent[];
   decisionDesk: CommandEvent[];
   /** WI-128: shipped slices actually awaiting a works/found-a-problem verdict, oldest first —
@@ -251,13 +253,13 @@ function pulseRegion(pulse: GlancePulse): string {
  *  stage is non-empty (idle ⇒ the tile grid alone is the operating picture, nothing more to
  *  show underneath). Reuses the same flow-stage markup the old standalone Pipeline flow card
  *  rendered (stage title + live-patchable count + eventList), just nested under the unified
- *  widget instead of its own Card. The conductor sub-badge on Building is unchanged. */
-function inFlightRegion(flow: PipelineFlow, conductor: CommandData['conductor']): string {
+ *  widget instead of its own Card. The in-flight sub-badge on Building is unchanged. */
+function inFlightRegion(flow: PipelineFlow, inFlight: CommandData['inFlight']): string {
   const stages: Array<{ key: 'preparing' | 'queued' | 'building'; label: string; events: CommandEvent[]; empty: string; sub?: { state: OperationalState; label: string } }> = [
     { key: 'preparing', label: 'Preparing', events: flow.preparing, empty: 'Nothing captured yet.' },
     { key: 'queued', label: 'Queued', events: flow.queued, empty: 'Queue is clear.' },
-    // Conductor folded in here (WI-128) — its headline becomes this stage's sub-badge.
-    { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: conductor.state, label: conductor.headline } },
+    // The in-flight summary folded in here (WI-128) — its headline becomes this stage's sub-badge.
+    { key: 'building', label: 'Building', events: flow.building, empty: 'No workers running.', sub: { state: inFlight.state, label: inFlight.headline } },
   ];
   if (stages.every((s) => s.events.length === 0)) return '';
   const body = stages
@@ -289,12 +291,12 @@ function inFlightRegion(flow: PipelineFlow, conductor: CommandData['conductor'])
  *  but left in place as-is, not deleted, since removing an exported region is out of this
  *  slice's scope). */
 function operatingPictureRegion(
-  d: Pick<CommandData, 'glance' | 'opsHealth' | 'pipelineFlow' | 'conductor'>,
+  d: Pick<CommandData, 'glance' | 'opsHealth' | 'pipelineFlow' | 'inFlight'>,
   activeWindow: GlanceWindow,
 ): string {
   const body =
     `<div class="opsui-glancegrid">${d.glance.map((m) => MetricTile(m)).join('')}</div>` +
-    inFlightRegion(d.pipelineFlow, d.conductor);
+    inFlightRegion(d.pipelineFlow, d.inFlight);
   return Card({
     id: 'opsui-glance-card',
     variant: 'glance',
@@ -447,7 +449,7 @@ function conversationsLinkRegion(threads: ThreadCard[], threadsPage?: number): s
   const href = threadsPage && threadsPage > 1 ? `/threads?page=${threadsPage}` : '/threads';
   return Card({
     title: 'Conversations',
-    subtitle: 'Founder conversations with the conductor',
+    subtitle: 'Founder conversations with the router',
     headerAside: badge,
     body: `<p class="opsui-empty"><a href="${esc(href)}">View all conversations →</a></p>`,
   });

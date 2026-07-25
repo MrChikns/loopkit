@@ -305,7 +305,7 @@ test('config: partial judge block merges with defaults', () => {
 test('fold: review.verdict stored as judgeVerdict without state change (queued)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'build X' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'build X', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'build X', touches: 'src/' }),
     makeEvent('dispatch', 'WI-001', 'review.verdict', {
       verdict: 'pass',
       confidence: 0.9,
@@ -329,7 +329,7 @@ test('fold: review.verdict stored as judgeVerdict without state change (queued)'
 test('fold: review.verdict stores latest (second wins) without state change', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'fix Y' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', { spec: 'fix Y', touches: 'src/' }),
+    makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'fix Y', touches: 'src/' }),
     makeEvent('dispatch', 'WI-002', 'review.verdict', {
       verdict: 'fail', confidence: 0.3, specSatisfied: 'partial',
       scopeCreep: 'minor', testTheatre: 'none', reasons: [], model: 'sonnet', judge: 'merge-review',
@@ -348,7 +348,7 @@ test('fold: review.verdict stores latest (second wins) without state change', ()
 test('fold: review.verdict on merged item stored, state stays merged', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-003', 'item.captured', { source: 'cli', text: 'feat Z' }),
-    makeEvent('conductor', 'WI-003', 'item.queued', { spec: 'feat Z', touches: 'src/' }),
+    makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'feat Z', touches: 'src/' }),
     makeEvent('dispatch', 'WI-003', 'build.dispatched', { attempt: 1, pid: 1 }),
     makeEvent('dispatch', 'WI-003', 'item.merged', { commit: 'abc', deployed: false }),
     makeEvent('dispatch', 'WI-003', 'review.verdict', {
@@ -370,7 +370,7 @@ test('fold: review.verdict on merged item stored, state stays merged', () => {
 test('dispatch: gate-green + judge enabled appends review.verdict + cost.usage{loop:judge}', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', {
+    makeEvent('reactor', 'WI-001', 'item.queued', {
       spec: 'add feature to src/feature.ts',
       touches: 'src/',
     }),
@@ -435,7 +435,7 @@ test('dispatch: merge outcome IDENTICAL with judge enabled vs disabled (same non
   // Run dispatch ENABLED
   const { repoRoot: r1, ledgerDir: l1, cleanup: c1 } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'add feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'add feature', touches: 'src/' }),
   ]);
   const judgeResults = new Map<string, { ok: boolean; text: string }>();
   judgeResults.set('WI-001', { ok: true, text: HAPPY_JUDGE_OUTPUT });
@@ -454,7 +454,7 @@ test('dispatch: merge outcome IDENTICAL with judge enabled vs disabled (same non
   // Run dispatch DISABLED
   const { repoRoot: r2, ledgerDir: l2, cleanup: c2 } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'add feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'add feature', touches: 'src/' }),
   ]);
   await runDispatch({
     repoRoot: r2, ledgerDir: l2, autonomy: 'on',
@@ -493,7 +493,7 @@ test('dispatch: merge outcome IDENTICAL with judge enabled vs disabled (same non
 test('dispatch: judge provider failure → merge proceeds, records review.verdict:unavailable (no silent loss)', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-010', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-010', 'item.queued', { spec: 'build thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-010', 'item.queued', { spec: 'build thing', touches: 'src/' }),
   ]);
 
   // Inject a failing judge result
@@ -554,7 +554,7 @@ test('dispatch: judge provider failure → merge proceeds, records review.verdic
 test('dispatch: unparseable judge output → verdict event with verdict:unparseable, merge proceeds', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-020', 'item.captured', { source: 'cli', text: 'add widget' }),
-    makeEvent('conductor', 'WI-020', 'item.queued', { spec: 'add widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-020', 'item.queued', { spec: 'add widget', touches: 'src/' }),
   ]);
 
   const judgeResults = new Map<string, { ok: boolean; text: string }>();
@@ -595,7 +595,7 @@ test('dispatch: unparseable judge output → verdict event with verdict:unparsea
 test('dispatch: judge disabled via judgeEnabled:false → no verdict event, merge proceeds', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-030', 'item.captured', { source: 'cli', text: 'task' }),
-    makeEvent('conductor', 'WI-030', 'item.queued', { spec: 'task', touches: 'src/' }),
+    makeEvent('reactor', 'WI-030', 'item.queued', { spec: 'task', touches: 'src/' }),
   ]);
 
   try {

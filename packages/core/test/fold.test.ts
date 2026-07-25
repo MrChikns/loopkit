@@ -176,7 +176,7 @@ test('narrowQueuedTouches: leaves touches unchanged when spec is undefined', () 
 });
 
 test('narrowQueuedTouches: narrows each prefix independently in a multi-prefix list', () => {
-  const spec = 'Update packages/engine/src/beats/dispatch.ts and .ai/loops/prompts/conductor.md.';
+  const spec = 'Update packages/engine/src/beats/dispatch.ts and .ai/loops/prompts/router.md.';
   assert.equal(
     narrowQueuedTouches('packages/engine/src,.ai/loops', spec),
     'packages/engine/src/beats,.ai/loops',
@@ -212,7 +212,7 @@ test('fold: item.queued leaves an already-scoped Touches prefix untouched', () =
 test('fold: full lifecycle captured → queued → building → merged', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'build X' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 12345 }, '2026-01-01T00:02:00Z'),
     makeEvent('builder', 'WI-001', 'build.finished', { commit: 'abc123' }, '2026-01-01T00:10:00Z'),
     makeEvent('builder', 'WI-001', 'item.merged', { commit: 'abc123', deployed: true }, '2026-01-01T00:11:00Z'),
@@ -230,7 +230,7 @@ test('fold: full lifecycle captured → queued → building → merged', () => {
 test('fold: build.crashed requeues and records crash', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-002', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-002', 'build.dispatched', { attempt: 1, pid: 99 }, '2026-01-01T00:02:00Z'),
     makeEvent('doctor', 'WI-002', 'build.crashed', { reason: 'orphan-detected', stderrTail: 'error' }, '2026-01-01T00:20:00Z'),
   ];
@@ -246,7 +246,7 @@ test('fold: build.crashed requeues and records crash', () => {
 test('fold: item.parked then item.unparked transitions back to queued', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-003', 'item.captured', { source: 'cli', text: 'test' }),
-    makeEvent('conductor', 'WI-003', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'spec' }),
     makeEvent('dispatch', 'WI-003', 'build.dispatched', { attempt: 1, pid: 1 }),
     makeEvent('gate', 'WI-003', 'gate.failed', { reason: 'tests-red' }),
     makeEvent('operator', 'WI-003', 'item.unparked', {}),
@@ -261,7 +261,7 @@ test('fold: item.parked then item.unparked transitions back to queued', () => {
 test('fold: item.parked with legacy parkReason key (no reason field) still surfaces the reason (backward-compat)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-283', 'item.captured', { source: 'cli', text: 'test' }),
-    makeEvent('conductor', 'WI-283', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-283', 'item.queued', { spec: 'spec' }),
     // Old ledger events stored the park reason under `parkReason`, not `reason` — the
     // ledger is append-only so this shape survives forever.
     {
@@ -288,8 +288,8 @@ test('fold: multiple items tracked independently', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'item 1' }),
     makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'item 2' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'spec 1' }),
-    makeEvent('conductor', 'WI-002', 'item.merged', { commit: 'abc' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'spec 1' }),
+    makeEvent('reactor', 'WI-002', 'item.merged', { commit: 'abc' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-001')?.state, 'queued');
@@ -329,7 +329,7 @@ test('fold: msg events accumulate in messages array', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'hi' }),
     makeEvent('operator', 'WI-001', 'msg.in', { text: 'question' }),
-    makeEvent('conductor', 'WI-001', 'msg.out', { text: 'answer' }),
+    makeEvent('reactor', 'WI-001', 'msg.out', { text: 'answer' }),
   ];
   const result = fold(events);
   const item = result.items.get('WI-001');
@@ -342,7 +342,7 @@ test('fold: msg events accumulate in messages array', () => {
 test('fold: merge.transient-fail keeps state approved and accumulates transientFailCount', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-010', 'item.captured', { source: 'cli', text: 'fix X' }),
-    makeEvent('conductor', 'WI-010', 'item.queued', { spec: 'fix X' }),
+    makeEvent('reactor', 'WI-010', 'item.queued', { spec: 'fix X' }),
     makeEvent('dispatch', 'WI-010', 'build.dispatched', { attempt: 1, pid: 1 }),
     makeEvent('dispatch', 'WI-010', 'build.finished', { commit: 'abc' }),
     makeEvent('operator', 'WI-010', 'item.approved', { by: 'operator' }),
@@ -376,7 +376,7 @@ test('fold: merge.transient-fail keeps state approved and accumulates transientF
 test('fold: route=answer transitions to answered (terminal route)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-020', 'item.captured', { source: 'cli', text: 'what is X?' }),
-    makeEvent('conductor', 'WI-020', 'item.routed', { route: 'answer', reply: 'X is Y.' }),
+    makeEvent('reactor', 'WI-020', 'item.routed', { route: 'answer', reply: 'X is Y.' }),
   ];
   const result = fold(events);
   const item = result.items.get('WI-020');
@@ -389,7 +389,7 @@ test('fold: route=answer transitions to answered (terminal route)', () => {
 test('fold: route=question transitions to answered (terminal route)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-021', 'item.captured', { source: 'cli', text: 'clarify?' }),
-    makeEvent('conductor', 'WI-021', 'item.routed', { route: 'question', reply: 'please clarify' }),
+    makeEvent('reactor', 'WI-021', 'item.routed', { route: 'question', reply: 'please clarify' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-021')?.state, 'answered');
@@ -398,7 +398,7 @@ test('fold: route=question transitions to answered (terminal route)', () => {
 test('fold: route=duplicate transitions to answered (terminal route)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-022', 'item.captured', { source: 'cli', text: 'dup' }),
-    makeEvent('conductor', 'WI-022', 'item.routed', { route: 'duplicate', reply: 'see WI-001' }),
+    makeEvent('reactor', 'WI-022', 'item.routed', { route: 'duplicate', reply: 'see WI-001' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-022')?.state, 'answered');
@@ -407,7 +407,7 @@ test('fold: route=duplicate transitions to answered (terminal route)', () => {
 test('fold: route=merged transitions to answered (terminal route)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-023', 'item.captured', { source: 'cli', text: 'merged elsewhere' }),
-    makeEvent('conductor', 'WI-023', 'item.routed', { route: 'merged', reply: 'already merged' }),
+    makeEvent('reactor', 'WI-023', 'item.routed', { route: 'merged', reply: 'already merged' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-023')?.state, 'answered');
@@ -416,7 +416,7 @@ test('fold: route=merged transitions to answered (terminal route)', () => {
 test('fold: route=conductor transitions to routed (non-terminal)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-024', 'item.captured', { source: 'cli', text: 'build Y' }),
-    makeEvent('conductor', 'WI-024', 'item.routed', { route: 'conductor', reply: 'queueing' }),
+    makeEvent('reactor', 'WI-024', 'item.routed', { route: 'conductor', reply: 'queueing' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-024')?.state, 'routed');
@@ -425,7 +425,7 @@ test('fold: route=conductor transitions to routed (non-terminal)', () => {
 test('fold: route=build transitions to routed (non-terminal)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-025', 'item.captured', { source: 'cli', text: 'build Z' }),
-    makeEvent('conductor', 'WI-025', 'item.routed', { route: 'build', reply: 'queuing build' }),
+    makeEvent('reactor', 'WI-025', 'item.routed', { route: 'build', reply: 'queuing build' }),
   ];
   const result = fold(events);
   assert.equal(result.items.get('WI-025')?.state, 'routed');
@@ -437,17 +437,17 @@ test('fold: regression — 19 conductor + 7 build items land in routed, terminal
   for (let i = 1; i <= 19; i++) {
     const id = `WI-${String(i).padStart(3, '0')}`;
     events.push(makeEvent('operator', id, 'item.captured', { source: 'cli', text: `item ${i}` }));
-    events.push(makeEvent('conductor', id, 'item.routed', { route: 'conductor', reply: 'queueing' }));
+    events.push(makeEvent('reactor', id, 'item.routed', { route: 'conductor', reply: 'queueing' }));
   }
   for (let i = 20; i <= 26; i++) {
     const id = `WI-${String(i).padStart(3, '0')}`;
     events.push(makeEvent('operator', id, 'item.captured', { source: 'cli', text: `item ${i}` }));
-    events.push(makeEvent('conductor', id, 'item.routed', { route: 'build', reply: 'building' }));
+    events.push(makeEvent('reactor', id, 'item.routed', { route: 'build', reply: 'building' }));
   }
   for (let i = 27; i <= 30; i++) {
     const id = `WI-${String(i).padStart(3, '0')}`;
     events.push(makeEvent('operator', id, 'item.captured', { source: 'cli', text: `q ${i}?` }));
-    events.push(makeEvent('conductor', id, 'item.routed', { route: 'answer', reply: 'X is Y.' }));
+    events.push(makeEvent('reactor', id, 'item.routed', { route: 'answer', reply: 'X is Y.' }));
   }
 
   const result = fold(events);
@@ -464,9 +464,9 @@ test('fold: regression — 19 conductor + 7 build items land in routed, terminal
 test('board: answered items appear in the Answered section, not with live-work routed items', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-040', 'item.captured', { source: 'cli', text: 'build feature A' }),
-    makeEvent('conductor', 'WI-040', 'item.routed', { route: 'conductor', reply: 'queueing' }),
+    makeEvent('reactor', 'WI-040', 'item.routed', { route: 'conductor', reply: 'queueing' }),
     makeEvent('operator', 'WI-041', 'item.captured', { source: 'cli', text: 'what is the status?' }),
-    makeEvent('conductor', 'WI-041', 'item.routed', { route: 'answer', reply: 'All good.' }),
+    makeEvent('reactor', 'WI-041', 'item.routed', { route: 'answer', reply: 'All good.' }),
   ];
   const result = fold(events);
   const board = renderBoard(result, { now: new Date('2026-01-01T12:00:00Z') });
@@ -521,7 +521,7 @@ test('fold: non-WI item ids (ops events like loop.beat keyed "system") never mat
 test('fold: merged is terminal — late item.approved does NOT regress state', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-001' }, '2026-01-01T00:02:00Z'),
     makeEvent('reactor', 'WI-001', 'item.merged', { commit: 'abc', deployed: false }, '2026-01-01T00:10:00Z'),
     // A duplicate operator approval arrives AFTER the merge (a real observed race).
@@ -622,7 +622,7 @@ test('fold: deploy.succeeded after item.accepted still flips deployed=true', () 
 function makeLifecycleEvents(wiId: string, mergedAt: string): LedgerEvent[] {
   return [
     makeEvent('operator', wiId, 'item.captured', { source: 'cli', text: 'build X' }, mergedAt),
-    makeEvent('conductor', wiId, 'item.queued', { spec: 'spec' }, mergedAt),
+    makeEvent('reactor', wiId, 'item.queued', { spec: 'spec' }, mergedAt),
     makeEvent('dispatch', wiId, 'build.dispatched', { attempt: 1, pid: 1 }, mergedAt),
     makeEvent('builder', wiId, 'build.finished', { commit: 'abc' }, mergedAt),
     makeEvent('reactor', wiId, 'item.merged', { commit: 'abc' }, mergedAt),
@@ -686,7 +686,7 @@ test('computeAcceptanceDebt: oldest is the max age across multiple merged items'
 test('fold: build.cancelled on a building item archives the build and parks hold', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-001-a1' }, '2026-01-01T00:02:00Z'),
     makeEvent('cli', 'WI-001', 'build.cancel-requested', { attempt: 1, by: 'operator' }, '2026-01-01T00:03:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.cancelled', { attempt: 1, by: 'operator' }, '2026-01-01T00:04:00Z'),
@@ -703,7 +703,7 @@ test('fold: build.cancelled on a building item archives the build and parks hold
 test('fold: build.cancelled is a no-op on a non-building state (late-event no-op, e.g. already merged)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-001-a1' }, '2026-01-01T00:02:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.finished', { commit: 'abc' }, '2026-01-01T00:03:00Z'),
     makeEvent('reactor', 'WI-001', 'item.merged', { commit: 'abc', deployed: false }, '2026-01-01T00:04:00Z'),
@@ -719,7 +719,7 @@ test('fold: build.cancelled is a no-op on a non-building state (late-event no-op
 test('fold: build.cancelled is a no-op when its attempt does not match currentBuild.attempt (attempt-matching race)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     // Attempt 1 dispatched, crashes, requeues.
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-001-a1' }, '2026-01-01T00:02:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.crashed', { reason: 'infra: x' }, '2026-01-01T00:03:00Z'),
@@ -747,7 +747,7 @@ test('fold: build.cancelled with no attempt field (backward-compat) still requir
 test('fold: build.cancel-requested alone never changes item state (pure ledger write)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-001', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-001-a1' }, '2026-01-01T00:02:00Z'),
     makeEvent('cli', 'WI-001', 'build.cancel-requested', { attempt: 1, by: 'operator' }, '2026-01-01T00:03:00Z'),
   ];
@@ -780,7 +780,7 @@ test('fold: msg.in/msg.out on CONV accumulate in messages array', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'CONV-001', 'conv.started', { source: 'console', title: 'discussion' }),
     makeEvent('operator', 'CONV-001', 'msg.in', { text: 'what is X?' }),
-    makeEvent('conductor', 'CONV-001', 'msg.out', { text: 'X is ...' }),
+    makeEvent('reactor', 'CONV-001', 'msg.out', { text: 'X is ...' }),
     makeEvent('operator', 'CONV-001', 'msg.in', { text: 'follow-up' }),
   ];
   const result = fold(events);
@@ -796,7 +796,7 @@ test('fold: msg.in/msg.out on CONV accumulate in messages array', () => {
 test('fold: conv.promoted tracks spawned items', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'CONV-001', 'conv.started', { source: 'console', title: 'planning' }),
-    makeEvent('conductor', 'CONV-001', 'conv.promoted', { items: ['WI-001', 'WI-002'] }),
+    makeEvent('reactor', 'CONV-001', 'conv.promoted', { items: ['WI-001', 'WI-002'] }),
   ];
   const result = fold(events);
   const conv = result.conversations.get('CONV-001');
@@ -807,7 +807,7 @@ test('fold: conv.promoted tracks spawned items', () => {
 test('fold: conv.closed sets state and closedAt', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'CONV-001', 'conv.started', { source: 'cli' }),
-    makeEvent('conductor', 'CONV-001', 'conv.closed', { reason: 'idle' }, '2026-01-01T01:00:00Z'),
+    makeEvent('reactor', 'CONV-001', 'conv.closed', { reason: 'idle' }, '2026-01-01T01:00:00Z'),
   ];
   const result = fold(events);
   const conv = result.conversations.get('CONV-001')!;
@@ -853,7 +853,7 @@ test('fold: non-WI/CONV events are skipped silently (no phantom records)', () =>
 test('fold: item.captured with convRef carries the conversation reference', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'CONV-001', 'conv.started', { source: 'cli', title: 'chat' }),
-    makeEvent('conductor', 'WI-001', 'item.captured', { source: 'cli', text: 'task from chat', convRef: 'CONV-001' }),
+    makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'task from chat', convRef: 'CONV-001' }),
   ];
   const result = fold(events);
   const item = result.items.get('WI-001');

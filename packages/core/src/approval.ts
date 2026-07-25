@@ -104,7 +104,7 @@ export function parseSpineReason(reason: string): { files: string[] } | null {
 
 /**
  * Parse a "depends on WI-NNN" / "blocked on WI-NNN" reference out of a park reason.
- * Transcribe-not-transform: this only EXTRACTS an id the conductor already wrote in
+ * Transcribe-not-transform: this only EXTRACTS an id the router already wrote in
  * plain English at park time — it never infers or guesses one. Returns null when the reason
  * doesn't name a dependency this way; the caller must then fall back to the LLM routing path.
  */
@@ -210,7 +210,7 @@ function hitsEscalation(files: string[], patterns: string[]): string | null {
 
 /**
  * The plane's own prompt/config files under `.ai/loops/**` (e.g.
- * `.ai/loops/prompts/conductor.md`, `.ai/loops/config.env`) are REVERSIBLE plane-spine
+ * `.ai/loops/prompts/router.md`, `.ai/loops/config.env`) are REVERSIBLE plane-spine
  * companions, not operator-decision surfaces — a worker touching them should be able to
  * auto-approve (with a visible trail), unlike the rest of `.ai/**`. Matches both the
  * repo-root prefix and the "anywhere in path" shape, mirroring the existing `.ai/` idiom.

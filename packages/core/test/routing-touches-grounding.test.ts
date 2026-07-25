@@ -96,7 +96,7 @@ test('reactor routing: a target item\'s fictional Touches prefix is dropped and 
     const targetRoot = join(base, 'notes');
     const ledgerDir = join(base, 'ledger');
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
     makeTargetRepo(targetRoot);
 
     const manifest = readTargetManifest(targetRoot);
@@ -142,7 +142,7 @@ test('reactor routing: a target item whose target is unregistered parks for ops 
     const repoRoot = join(base, 'plane');
     const ledgerDir = join(base, 'ledger');
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
 
     // No target.registered event for 'ghost' — the item is target-stamped but unresolved.
     await appendEvents(ledgerDir, [
@@ -192,7 +192,7 @@ test('reactor routing: an untargeted item\'s Touches pass through ungrounded', a
     const repoRoot = join(base, 'plane');
     const ledgerDir = join(base, 'ledger');
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
 
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-301', 'item.captured', { source: 'cli', text: 'fix things' }, '2026-01-01T00:01:00Z'),

@@ -117,7 +117,7 @@ test('schema: item.briefed is a known event type (isKnownType)', () => {
 test('fold: item.briefed stores brief on a queued item, state unchanged', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'build X' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'build X', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'build X', touches: 'src/' }),
     makeEvent('dispatch', 'WI-001', 'item.briefed', {
       brief: 'BRIEF:\nFiles: src/app.ts — entry',
       model: 'haiku',
@@ -134,7 +134,7 @@ test('fold: item.briefed stores brief on a queued item, state unchanged', () => 
 test('fold: item.briefed on merged item stores brief, state stays merged', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'fix Y' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', { spec: 'fix Y' }),
+    makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'fix Y' }),
     makeEvent('dispatch', 'WI-002', 'build.dispatched', { attempt: 1, pid: 1 }),
     makeEvent('dispatch', 'WI-002', 'item.merged', { commit: 'abc', deployed: false }),
     // brief arrives AFTER merge — must store without regressing state
@@ -154,7 +154,7 @@ test('fold: item.briefed on merged item stores brief, state stays merged', () =>
 test('fold: later item.briefed overwrites earlier brief (latest wins)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-003', 'item.captured', { source: 'cli', text: 'fix Z' }),
-    makeEvent('conductor', 'WI-003', 'item.queued', { spec: 'fix Z' }),
+    makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'fix Z' }),
     makeEvent('dispatch', 'WI-003', 'item.briefed', { brief: 'first brief', model: 'haiku' }),
     makeEvent('dispatch', 'WI-003', 'item.briefed', { brief: 'second brief', model: 'haiku' }),
   ];
@@ -198,7 +198,7 @@ test('parseBrief: empty text returns empty string', () => {
 test('dispatch: scout invoked for a briefless item; item.briefed + cost.usage{loop:scout} appended', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', {
+    makeEvent('reactor', 'WI-001', 'item.queued', {
       spec: 'add feature to src/app.ts',
       touches: 'src/',
     }),
@@ -275,7 +275,7 @@ test('dispatch: scout invoked for a briefless item; item.briefed + cost.usage{lo
 test('dispatch: build prompt contains CONTEXT PACK section when brief exists', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-010', 'item.captured', { source: 'cli', text: 'build something' }),
-    makeEvent('conductor', 'WI-010', 'item.queued', { spec: 'build something', touches: 'src/' }),
+    makeEvent('reactor', 'WI-010', 'item.queued', { spec: 'build something', touches: 'src/' }),
   ]);
 
   try {
@@ -336,7 +336,7 @@ test('dispatch: build prompt contains CONTEXT PACK section when brief exists', a
 test('dispatch: item with existing rec.brief skips scout call', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-020', 'item.captured', { source: 'cli', text: 'fix bug' }),
-    makeEvent('conductor', 'WI-020', 'item.queued', { spec: 'fix bug', touches: 'src/' }),
+    makeEvent('reactor', 'WI-020', 'item.queued', { spec: 'fix bug', touches: 'src/' }),
     // Pre-existing brief from a previous beat
     makeEvent('dispatch', 'WI-020', 'item.briefed', {
       brief: 'BRIEF:\nFiles: src/bug.ts — pre-existing brief',
@@ -387,7 +387,7 @@ test('dispatch: item with existing rec.brief skips scout call', async () => {
 test('dispatch: scout failure proceeds with build cold, no park, build.dispatched emitted', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-030', 'item.captured', { source: 'cli', text: 'add widget' }),
-    makeEvent('conductor', 'WI-030', 'item.queued', { spec: 'add widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-030', 'item.queued', { spec: 'add widget', touches: 'src/' }),
   ]);
 
   try {
@@ -448,7 +448,7 @@ test('dispatch: scout failure proceeds with build cold, no park, build.dispatche
 test('dispatch: scout disabled via config → no scout call, build proceeds normally', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-040', 'item.captured', { source: 'cli', text: 'task' }),
-    makeEvent('conductor', 'WI-040', 'item.queued', { spec: 'task', touches: 'src/' }),
+    makeEvent('reactor', 'WI-040', 'item.queued', { spec: 'task', touches: 'src/' }),
   ]);
 
   try {

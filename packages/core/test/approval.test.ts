@@ -279,7 +279,7 @@ test('governance: guard is class-independent — an acceptance.ts overstep also 
 // --- Plane-owned doc (.ai/loops/**) auto-approve --------------------------
 
 test('isPlaneOwnedDoc: true for .ai/loops/** paths, false for other .ai/** and docs/decisions/**', () => {
-  assert.equal(isPlaneOwnedDoc('.ai/loops/prompts/conductor.md'), true);
+  assert.equal(isPlaneOwnedDoc('.ai/loops/prompts/router.md'), true);
   assert.equal(isPlaneOwnedDoc('.ai/loops/config.env'), true);
   assert.equal(isPlaneOwnedDoc('some/prefix/.ai/loops/config.env'), true);
   assert.equal(isPlaneOwnedDoc('.ai/notes.md'), false);
@@ -289,14 +289,14 @@ test('isPlaneOwnedDoc: true for .ai/loops/** paths, false for other .ai/** and d
 test('touches-overstep: .ai/loops/** prompt/config overstep → auto-approves with the plane-owned trail', () => {
   const item = {
     parkClass: 'touches-overstep',
-    parkReason: overstep('packages/engine/src/', ['.ai/loops/prompts/conductor.md', '.ai/loops/config.env']),
+    parkReason: overstep('packages/engine/src/', ['.ai/loops/prompts/router.md', '.ai/loops/config.env']),
   };
   const d = classifyParkForAutoApprove(item, CFG);
   assert.equal(d.autoApprove, true);
   assert.equal(d.parkClass, 'touches-overstep');
   assert.match(d.reason, /plane-owned prompt\/config/);
   assert.match(d.reason, /plane-owned/);
-  assert.match(d.reason, /\.ai\/loops\/prompts\/conductor\.md/);
+  assert.match(d.reason, /\.ai\/loops\/prompts\/router\.md/);
 });
 
 test('touches-overstep: .ai/loops/** mixed with a non-plane-owned doc → still auto-approves via the narrative-doc reason (not the plane-owned one)', () => {

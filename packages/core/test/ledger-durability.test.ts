@@ -365,7 +365,7 @@ test('runDispatch: a detected ledger regression halts before any item is picked'
 
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'x' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'x' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'x' }),
     ]);
 
     const result = await runDispatch({

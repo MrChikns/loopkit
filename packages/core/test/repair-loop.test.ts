@@ -205,7 +205,7 @@ test('assembleRepairEvidence: truncates oversize diff with marker', () => {
 test('dispatch: gate-red path writes .gate.log and .diff with correct names', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', {
+    makeEvent('reactor', 'WI-001', 'item.queued', {
       spec: 'add feature to src/feature.ts',
       touches: 'src/',
     }),
@@ -248,7 +248,7 @@ test('dispatch: gate-red path writes .gate.log and .diff with correct names', as
 test('dispatch: gate-red path gate.log truncated at ~6000 chars with oversize output', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', {
+    makeEvent('reactor', 'WI-002', 'item.queued', {
       spec: 'add feature',
       touches: 'src/',
     }),
@@ -287,13 +287,13 @@ test('dispatch: re-dispatched item with artifacts gets REPAIR EVIDENCE after CON
   // Use 'src/bug-fix.ts' — NOT src/app.ts which matches the default spineRegex.
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-030', 'item.captured', { source: 'cli', text: 'fix bug' }),
-    makeEvent('conductor', 'WI-030', 'item.queued', { spec: 'fix the bug in src/bug-fix.ts', touches: 'src/' }),
+    makeEvent('reactor', 'WI-030', 'item.queued', { spec: 'fix the bug in src/bug-fix.ts', touches: 'src/' }),
     // Prior attempt: dispatch → gate failed → parked → unparked
     makeEvent('dispatch', 'WI-030', 'build.dispatched', { attempt: 1, branch: 'wi-030-a1', pid: 999 }),
     makeEvent('dispatch', 'WI-030', 'gate.failed', { reason: 'tests-red: prior failure' }),
     makeEvent('dispatch', 'WI-030', 'item.parked', { reason: 'tests-red: prior failure' }),
     makeEvent('operator', 'WI-030', 'item.unparked', {}),
-    makeEvent('conductor', 'WI-030', 'item.queued', { spec: 'fix the bug in src/bug-fix.ts', touches: 'src/' }),
+    makeEvent('reactor', 'WI-030', 'item.queued', { spec: 'fix the bug in src/bug-fix.ts', touches: 'src/' }),
     // Scout brief (for CONTEXT PACK ordering test) — memoized so scout is skipped on dispatch
     makeEvent('dispatch', 'WI-030', 'item.briefed', { brief: 'BRIEF:\nFiles: src/bug-fix.ts — must change', model: 'haiku' }),
   ]);
@@ -373,13 +373,13 @@ test('dispatch: re-dispatched item with artifacts gets REPAIR EVIDENCE after CON
 test('dispatch: missing artifacts → prompt built without REPAIR EVIDENCE, no crash', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-040', 'item.captured', { source: 'cli', text: 'fix thing' }),
-    makeEvent('conductor', 'WI-040', 'item.queued', { spec: 'fix the thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-040', 'item.queued', { spec: 'fix the thing', touches: 'src/' }),
     // attempts=1 via a prior dispatched→parked cycle
     makeEvent('dispatch', 'WI-040', 'build.dispatched', { attempt: 1, branch: 'wi-040-a1', pid: 999 }),
     makeEvent('dispatch', 'WI-040', 'gate.failed', { reason: 'tests-red: prior failure' }),
     makeEvent('dispatch', 'WI-040', 'item.parked', { reason: 'tests-red: prior failure' }),
     makeEvent('operator', 'WI-040', 'item.unparked', {}),
-    makeEvent('conductor', 'WI-040', 'item.queued', { spec: 'fix the thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-040', 'item.queued', { spec: 'fix the thing', touches: 'src/' }),
   ]);
 
   // artifactDir is empty — no artifacts on disk
@@ -438,7 +438,7 @@ test('dispatch: artifact write failure does not affect park flow', async () => {
   // the exhausted breaker parks (the flow this test guards), rather than auto-requeuing.
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-050', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-050', 'item.queued', { spec: 'build thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-050', 'item.queued', { spec: 'build thing', touches: 'src/' }),
     makeEvent('dispatch', 'WI-050', 'build.dispatched', { attempt: 1, branch: 'wi-050-a1', pid: 1 }),
     makeEvent('dispatch', 'WI-050', 'build.finished', { commit: 'a1' }),
     makeEvent('dispatch', 'WI-050', 'item.queued', { spec: 'build thing', touches: 'src/', repairContext: 'first fail' }),

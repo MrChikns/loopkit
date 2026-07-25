@@ -142,7 +142,7 @@ details.opsui-threads__card { padding: 0; display: block; }
   padding: 7px 10px;
   background: var(--surface-2);
 }
-.opsui-threads__msg--conductor .opsui-threads__msg-text {
+.opsui-threads__msg--router .opsui-threads__msg-text {
   background: var(--info-bg);
   color: var(--info-fg);
 }

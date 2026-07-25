@@ -335,7 +335,7 @@ test('renderItemTimeline: event-family colour mapping — captures/routing neutr
     makeEvent('reactor', 'WI-700', 'item.merged', { commit: 'abc1234' }, '2026-07-01T09:07:00.000Z'),
     makeEvent('reactor', 'WI-700', 'deploy.succeeded', { commit: 'abc1234' }, '2026-07-01T09:08:00.000Z'),
     makeEvent('reactor', 'WI-700', 'deploy.failed', { reason: 'rollback' }, '2026-07-01T09:09:00.000Z'),
-    makeEvent('conductor', 'WI-700', 'item.parked', { reason: 'ambiguous scope', parkKind: 'decision' }, '2026-07-01T09:10:00.000Z'),
+    makeEvent('reactor', 'WI-700', 'item.parked', { reason: 'ambiguous scope', parkKind: 'decision' }, '2026-07-01T09:10:00.000Z'),
   ];
   const result = fold(events);
   const html = renderItemTimeline('WI-700', result.items.get('WI-700'), events);

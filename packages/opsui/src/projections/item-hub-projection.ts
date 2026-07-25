@@ -82,7 +82,7 @@ function conversationRegion(thread: ItemHubData['thread']): string {
   if (!thread) {
     return Card({
       title: 'Conversation',
-      subtitle: 'Founder ↔ conductor messages for this item',
+      subtitle: 'Founder ↔ router messages for this item',
       body: `<p class="opsui-empty">This item has no conversation thread — it was captured without a founder message, or the thread is not yet synced.</p>`,
     });
   }
