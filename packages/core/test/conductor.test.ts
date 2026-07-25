@@ -272,6 +272,71 @@ test('E2E conduct: two claimed items build sequentially in ONE worktree, gate ru
   }
 });
 
+test('WI-183: a targeted cluster branches from the manifest default branch, not the target checkout\'s ambient HEAD', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'conduct-wi183-'));
+  try {
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const runDir = join(base, 'runs');
+    const gateLog = join(base, 'gate-runs.log');
+    makeTargetRepo(targetRoot, gateLog);
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    // The target checkout is left on an UNRELATED branch carrying an unrelated commit — the
+    // conductor does not own this checkout, and an operator/another agent can park it anywhere.
+    // The cluster still merges into manifest.defaultBranch ('main').
+    git(targetRoot, ['checkout', '-b', 'someone-elses-work']);
+    writeFileSync(join(targetRoot, 'src', 'stowaway.js'), 'export const stowaway = true;\n', 'utf8');
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'unrelated: STOWAWAY commit that must never ride into a merge']);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }),
+      makeEvent('cli', 'WI-030', 'item.captured', { source: 'cli', text: 'one', target: 'notes' }),
+      makeEvent('cli', 'WI-030', 'item.queued', { spec: 'add src/one.js', touches: 'src/' }),
+      makeEvent('cli', SES, 'session.started', { sessionId: SES }),
+      makeEvent('cli', 'WI-030', 'item.claimed', { sessionId: SES, ttlMinutes: 60 }),
+    ]);
+
+    const provider: LlmProvider = {
+      name: 'fake',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        if (!req.cwd) {
+          return { ok: true, text: 'VERDICT: pass\nCONFIDENCE: 0.9\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- stub' };
+        }
+        const cwd = req.cwd;
+        // DECISIVE (build-time): the cluster worktree must be based on main, so the stowaway
+        // file the ambient HEAD carries must NOT be present in it.
+        assert.ok(!existsSync(join(cwd, 'src', 'stowaway.js')),
+          'the cluster worktree must branch from the manifest default branch — the ambient HEAD\'s commit must not be in it');
+        writeFileSync(join(cwd, 'src', 'one.js'), "export const marker = 'one';\n", 'utf8');
+        spawnSync('git', ['add', 'src/one.js'], { cwd, stdio: 'pipe' });
+        spawnSync('git', ['commit', '-m', 'feat: add one.js'], { cwd, stdio: 'pipe' });
+        return { ok: true, text: 'done' };
+      },
+    };
+
+    const result = await runConduct({
+      ledgerDir, runDir, repoRoot: base, sessionId: SES, provider, config: testConfig(),
+    });
+    assert.equal(result.clusters[0]?.outcome, 'merged', result.clusters[0]?.detail ?? 'cluster must merge');
+
+    // DECISIVE (merge-time): main got the build's commit and NOTHING else. Before the fix the
+    // stowaway rode in — and both the Touches-overstep check and the judge's diff, which measure
+    // from the build's base, reported the merge clean and in-scope.
+    const mainLog = git(targetRoot, ['log', '--oneline', 'main']).stdout.toString();
+    assert.match(mainLog, /add one\.js/, 'the built commit must be on main');
+    assert.doesNotMatch(mainLog, /STOWAWAY/, 'the ambient HEAD\'s unrelated commit must NOT have ridden into the merge');
+    assert.equal(git(targetRoot, ['cat-file', '-e', 'main:src/stowaway.js']).status !== 0, true,
+      'the unrelated file must not exist on main');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('ADR-010 stage-2 fix: a conductor cluster records review.verdict + cost.usage for every built item (was stderr-only)', async () => {
   const base = mkdtempSync(join(tmpdir(), 'conduct-judge-'));
   try {

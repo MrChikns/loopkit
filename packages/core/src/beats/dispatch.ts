@@ -800,16 +800,28 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
  * for a co-located group, a conductor park returns an `outcome:'error'` cluster result, a
  * target-lane park never cleans up the worktree it just made on a deps failure while the batch
  * lane does) — none of that belongs in a shared helper, so it stays at the call site.
+ *
+ * WI-183 — `baseRef` is REQUIRED and must be the SAME ref the caller will later merge INTO.
+ * This used to be a hardcoded 'HEAD'. Two lanes (dispatch's target lane, conductor's targeted
+ * clusters) branch in a repo whose checkout they do not control and then merge into a
+ * MANIFEST-DECLARED default branch. When that checkout's HEAD was not the default branch, every
+ * commit already on HEAD rode into the merge — while the Touches-overstep check and the judge's
+ * diff evidence only ever inspect what the BUILD added on top of its base. Unrelated work could
+ * therefore land inside a merge that every guard reported clean and in-scope. Branching from the
+ * merge destination makes base-the-guards-measure-against identical to base-the-merge-uses, and
+ * fails closed (worktree-add error → the caller's ordinary park) when that ref does not exist
+ * locally, rather than silently falling back to whatever HEAD happens to be.
  */
 export function openBuildWorktree(
   repoRoot: string,
   wtPath: string,
   branch: string,
   depsWorkdirs: string[],
+  baseRef: string,
 ): { ok: true } | { ok: false; stage: 'worktree-add'; reason: string } | { ok: false; stage: 'deps'; reason: string } {
   removeWorktree(repoRoot, wtPath);
   spawnSync('git', ['branch', '-D', branch], { cwd: repoRoot, stdio: 'pipe' });
-  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: repoRoot, stdio: 'pipe' });
+  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, baseRef], { cwd: repoRoot, stdio: 'pipe' });
   if (wtAdd.status !== 0) {
     return { ok: false, stage: 'worktree-add', reason: wtAdd.stderr?.toString().trim() ?? '' };
   }
@@ -2347,7 +2359,13 @@ async function finalizeTargetBuild(
   await appendEvents(opts.ledgerDir, [
     makeEvent('dispatch', rec.id, 'gate.passed', { tests: gate.reason }),
     makeEvent('dispatch', rec.id, 'build.finished', { commit: mergeCommit }),
-    makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: !!manifest.deployCommand, ...targetEvidence }),
+    // WI-176: `deployed: false` at merge, on EVERY lane. This used to be
+    // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED —
+    // asserted before anything was observed, and contradicting the engineering/batch lanes'
+    // `false` on the same board. The deploy fired just above is detached and self-reporting:
+    // `deploy.succeeded` / `deploy.failed` (folded in fold.ts) are the sole authority for this
+    // flag, with the `deployBehindHours` SLO probe as the backstop for a script that never reports.
+    makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
   ]);
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
@@ -2526,7 +2544,14 @@ export async function runTargetLane(
     // here deliberately does NOT clean up the worktree (unchanged from before the extraction) —
     // the batch lane's copy of this sequence does clean up on the same failure; that is a real,
     // pre-existing difference between the two call sites, left at the call site on purpose.
-    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs);
+    // WI-183: branch from the MERGE DESTINATION (manifest.defaultBranch), not the target
+    // checkout's ambient HEAD. This lane does not own that checkout — an operator (or another
+    // agent) can leave it on any branch, and the closeMergedCluster tail below merges into
+    // manifest.defaultBranch regardless. Basing on HEAD let that branch's extra commits ride
+    // into the merge invisibly: the Touches-overstep check and the judge's diff both measure
+    // from the build's base, so they saw nothing. Fails closed — an absent/unresolvable
+    // defaultBranch is a worktree-add failure, parked below, never a silent HEAD fallback.
+    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs, manifest.defaultBranch);
     if (!opened.ok) {
       const reason = opened.stage === 'worktree-add'
         ? `infra: target worktree add failed: ${opened.reason}`
@@ -2868,10 +2893,29 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // keeps the picker reading a fold taken AFTER collection as the plane evolves.
     foldResult = fold(await loadAllEventsWithQuarantine(opts.ledgerDir));
 
+    // ── In-flight TARGETED detached builds (WI-178) ───────────────────────────
+    // A targeted item's detached build is deliberately EXCLUDED from collectDetachedBuilds
+    // (that pass gates/merges against the PLANE repo; a targeted build must merge into its
+    // target repo — see the `if (rec.target) continue;` guard there). Its terminal is owned by
+    // runTargetLane's own collection scan. So a detached targeted build contributes NOTHING to
+    // `collectedWorkers`, and — having already left the queue — nothing to `queued` either.
+    // Computed HERE, above the spawn gates, because every one of them (budget, quota,
+    // empty-queue, all-conflicting) used to return before the target lane was ever reached:
+    // a LONE targeted detached build therefore sat in 'building' forever — no gate, no merge,
+    // no park. Each gate below now falls through for it exactly as it does for collectedWorkers.
+    // This is a REACHABILITY fix, deliberately NOT a dwell timeout — the doctor already owns
+    // every 'building' ceiling, and the audit of which in-flight states may legitimately wait
+    // forever lives in doctor.ts ("IN-FLIGHT DWELL AUDIT (WI-178)").
+    const hasDetachedTargetBuild = !opts.dryRun && [...foldResult.items.values()].some(
+      r => r.state === 'building' && !!r.target && r.currentBuild?.pgid != null,
+    );
+
     // ADR-008 §3: SPAWN gates below (budget/quota/empty-queue) must never strand an
     // already-admitted, finished detached build. When collection found completed work,
     // each gate below skips picking NEW work (skipNewPicks) but falls through instead of
     // returning, so Phase 2 still drains collectedWorkers via the ordinary terminal loop.
+    // Same contract for `hasDetachedTargetBuild`, whose terminal is the target lane's own
+    // collection scan rather than the Phase-2 loop.
     let skipNewPicks = false;
     let skipNewPicksDetail: string | undefined;
 
@@ -2885,7 +2929,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       if (todaySpend >= dailyCeiling) {
         const detail = `daily budget reached: $${todaySpend.toFixed(4)} / $${dailyCeiling.toFixed(4)}`;
         process.stderr.write(`[dispatch] ${detail} — skipping picks\n`);
-        if (collectedWorkers.length === 0) {
+        if (collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
           return { dryRun: opts.dryRun ?? false, dispatched: [], totalEventsWritten: 0, detail };
         }
         skipNewPicks = true;
@@ -2908,7 +2952,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           ? `quota pressure: ${quotaPressure.breaches.map(b => `${b.provider}:${b.window}=${b.usedPct.toFixed(1)}%`).join(', ')} >= ${cfg.quotaPressure?.thresholdPct}% — skipping picks`
           : 'quota pressure: degraded (test probe) — skipping picks';
         process.stderr.write(`[dispatch] ${detail}\n`);
-        if (collectedWorkers.length === 0) {
+        if (collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
           return { dryRun: opts.dryRun ?? false, dispatched: [], totalEventsWritten: 0, detail };
         }
         skipNewPicks = true;
@@ -2963,7 +3007,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
     }
 
-    if (queued.length === 0 && collectedWorkers.length === 0) {
+    if (queued.length === 0 && collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
       return {
         dryRun: opts.dryRun ?? false,
         dispatched: results,
@@ -3038,7 +3082,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       groups.push([rec]);
     }
 
-    if (groups.length === 0 && planningQueued.length === 0 && targetedQueued.length === 0 && collectedWorkers.length === 0) {
+    if (groups.length === 0 && planningQueued.length === 0 && targetedQueued.length === 0 && collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
       return {
         dryRun: opts.dryRun ?? false,
         dispatched: [],
@@ -3150,10 +3194,10 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // Empty when no target is registered — legacy dispatch runs exactly as before.
     // Also run the lane when a prior beat left a DETACHED targeted build in flight (ADR-008 §3):
     // it is 'building' with a pgid but no fresh queued item, so targetedQueued would be empty — the
-    // lane's own collection scan drains it against its target repo.
-    const hasDetachedTargetBuild = !opts.dryRun && [...foldResult.items.values()].some(
-      r => r.state === 'building' && !!r.target && r.currentBuild?.pgid != null,
-    );
+    // lane's own collection scan drains it against its target repo. `hasDetachedTargetBuild` is
+    // computed WAY above (right after the collection re-fold) precisely so the spawn gates between
+    // there and here fall through for it instead of returning (WI-178) — moving it back down here
+    // would restore the stranding bug.
     if (targetedQueued.length > 0 || hasDetachedTargetBuild) {
       results.push(...await runTargetLane(opts, cfg, provider, foldResult, targetedQueued, runDir, registry));
     }
@@ -3344,7 +3388,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // covers every deps workdir, since the gate may run suites in more than one package; a
       // file:-dep build that exits non-zero means the gate would run against stale dist and
       // silently green, so park immediately rather than lie).
-      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
+      // WI-183: 'HEAD' here is deliberate and stays — the batch lane merges into the primary
+      // tree's CURRENT branch and refuses to merge at all unless that branch is 'master' (the
+      // `curBranch !== 'master'` deferral in Phase 2). Base and merge destination therefore
+      // cannot diverge on this lane, which is why it was never exposed to the WI-183 defect.
+      // Passed explicitly rather than defaulted so the choice is visible, not inherited.
+      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir], 'HEAD');
       if (!opened.ok) {
         const reason = opened.stage === 'worktree-add'
           ? `infra: worktree add failed: ${opened.reason}`
@@ -3864,7 +3913,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             const short = shipped.slice(0, 8);
             return [
               makeEvent('dispatch', id, 'gate.passed', { tests: 'green', reason: `already shipped at ${short} — no-commit is a stale requeue; retiring instead of re-parking` }),
-              makeEvent('dispatch', id, 'item.merged', { commit: short, deployed: true, attribution: 'commit-subject' }),
+              // WI-176: `deployed: false` — this retirement observes only that the WI's code is
+              // already on master, never that it reached a deploy target. It used to claim `true`,
+              // the opposite assertion from the very batch lane whose merges it retires. Nothing
+              // fires a deploy here, so no deploy.* event will ever contradict it; "not observed
+              // deployed" is the honest reading and the deploy-age SLO stays the real backstop.
+              makeEvent('dispatch', id, 'item.merged', { commit: short, deployed: false, attribution: 'commit-subject' }),
             ];
           }
           return [

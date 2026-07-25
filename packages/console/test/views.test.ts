@@ -590,6 +590,23 @@ test('renderItemTimeline: the deploy receipt reports "deployed <sha>" from a dep
   assert.match(html, /<span class="evidence__key">Deploy<\/span><span class="evidence__val">deployed deadbee1<\/span>/);
 });
 
+test('WI-176: item.merged{deployed:false} reads "not deployed", never "deploy failed"', () => {
+  // Every lane now writes `deployed: false` at merge time — it means "no deploy observed yet",
+  // not "the deploy failed". The fallback used to read that flag as a failure, which would brand
+  // literally every merge on the board as a failed deploy. A real failure arrives as a
+  // deploy.failed event (covered by the test below) and still renders as one.
+  const events = [
+    ...sampleLedger(),
+    makeEvent('dispatch', 'WI-777', 'item.captured', { source: 'cli', text: 'x' }, '2026-07-01T12:00:00.000Z'),
+    makeEvent('dispatch', 'WI-777', 'item.queued', { spec: 'x' }, '2026-07-01T12:01:00.000Z'),
+    makeEvent('dispatch', 'WI-777', 'item.merged', { commit: 'cafe1234', deployed: false }, '2026-07-01T12:20:00.000Z'),
+  ];
+  const result = fold(events);
+  const html = renderItemTimeline('WI-777', result.items.get('WI-777'), events, NOW);
+  assert.match(html, /<span class="evidence__key">Deploy<\/span><span class="evidence__val">not deployed<\/span>/);
+  assert.doesNotMatch(html, /deploy failed/);
+});
+
 test('renderItemTimeline: a later deploy.failed supersedes an earlier deploy.succeeded — latest wins', () => {
   const events = [
     ...sampleLedger(),

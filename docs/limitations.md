@@ -47,7 +47,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:989`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1003`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -69,26 +69,27 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4118`<!--cite:postIntegrationRegate-->). Neither the target build
+  (`packages/core/src/beats/dispatch.ts:4172`<!--cite:postIntegrationRegate-->). Neither the target build
   lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
   merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
   merging. *Matters when:* the destination branch advances during the build — the merged result is
   then a combination nothing ever tested. Porting the engineering lane's terminal to these two lanes
   is the fix.
 
-- **All three build lanes open their worktree from ambient `HEAD`, not a declared default branch**
-  (`packages/core/src/beats/dispatch.ts:812`<!--cite:openBuildWorktreeHead-->; the conductor's call at
-  `packages/core/src/conductor.ts:428`<!--cite:conductorWorktreeHead-->). The engineering lane makes this
-  safe by pulling first and re-gating after; the other two do not. *Bounded:* a plane host normally
-  sits on the default branch, so ambient `HEAD` usually *is* it. *Matters when:* it isn't — commits
-  already sitting on a non-default `HEAD` ride into the merge, while `Touches`-overstep and the judge
-  only ever inspect the diff *after* that ambient base. The extra commits are invisible to every guard
-  and visible in the merge.
+- **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
+  lane passes an explicit base ref to `openBuildWorktree`
+  (`packages/core/src/beats/dispatch.ts:824`<!--cite:openBuildWorktreeHead-->; the conductor's call at
+  `packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->), so the base the guards
+  measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
+  commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
+  ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
+  guard that defers when the checkout is not on `master` — and now passes it explicitly rather than
+  by omission.
 
 - **Claim-before-pick is narrower than it looks in the target lane.** The engineering lane closes the
   read-to-spawn race properly: re-fold under the ledger lock, drop what a foreign session took, claim
   every survivor in the same locked append. The shared pick list only *defers* to an already-active
-  claim (`packages/core/src/beats/dispatch.ts:2926`<!--cite:queuedClaimDeference-->), which is a read, not
+  claim (`packages/core/src/beats/dispatch.ts:2970`<!--cite:queuedClaimDeference-->), which is a read, not
   a reservation — and the target lane never appends a claim of its own. The conductor does claim, under
   the same lock (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). *Bounded:* single
   host, one dispatch beat, so the racing writer has to be an attended session starting in a
@@ -106,7 +107,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4304`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4358`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -114,22 +115,21 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 ## Deploy signalling
 
-- **The `deployed` flag means different things in different lanes, and nothing verifies the deploy
-  script ever reports.** The result events exist and are folded
-  (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->) — but they are appended by **your**
-  deploy script, which the plane spawns detached, stdio ignored, unreferenced, with no timeout and
-  nothing awaiting it (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). On
-  top of that the flag on `item.merged` is not written consistently: the engineering lane writes
-  `false` and fires the deploy afterwards
-  (`packages/core/src/beats/dispatch.ts:4490`<!--cite:batchDeployedFlag-->), while the target lane writes
-  `!!manifest.deployCommand` (`packages/core/src/beats/dispatch.ts:2350`<!--cite:targetDeployedFlag-->) —
-  true because a deploy command is *configured*, before anything has been observed. *Bounded:* deploy
-  is off by default (empty `deployCommand`), merge correctness never depends on it, and a
-  deploy-freshness SLO probe (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) notices a deployed
-  checkout that falls behind master. *Matters when:* a deploy hook exits silently without appending
-  either event — at the item level that is indistinguishable from success, the SLO row is the only
-  thing that would ever say otherwise, and it notifies rather than parking. Normalising the flag to one
-  meaning, and treating "merged but never reported" as a state, closes it.
+- **Nothing verifies that a deploy script ever reports** (WI-176 closed the older, worse half of
+  this). `item.merged.deployed` is now uniformly `false` on every lane — a merge observes that code
+  landed, never that it deployed — and `deploy.succeeded` / `deploy.failed`, appended by the
+  detached deploy script itself (it receives `DEPLOY_WI_IDS`), are the sole authority
+  (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->). The plane spawns that script
+  detached, stdio ignored, unreferenced, with no timeout and nothing awaiting it
+  (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). What is *still*
+  missing is a liveness contract on it: a deploy hook that dies before appending either event leaves
+  the item reading "not deployed" forever, which is honest but indistinguishable from "deploy not
+  configured". *Bounded:* deploy is off by default (empty `deployCommand`), merge correctness does not
+  depend on deploy, and the deploy-freshness SLO probe
+  (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) catches a plane-repo deploy that has
+  genuinely stopped shipping. *Matters when:* a per-TARGET deploy hook fails silently — the probe only
+  watches `LOOPKIT_DEPLOY_ROOT`, not each target's own deploy. There is also no rollback path for a
+  `deploy.failed`.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all

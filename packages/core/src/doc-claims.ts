@@ -379,14 +379,13 @@ export interface CitationClaim {
 
 export const CITATION_CLAIMS: CitationClaim[] = [
   // dispatch
-  { id: 'earlyReturnBeforeTargetLane', file: 'dispatch', mustContain: 'if (queued.length === 0 && collectedWorkers.length === 0)' },
   { id: 'detachedTargetGuard', file: 'dispatch', mustContain: 'const hasDetachedTargetBuild' },
   { id: 'collectorSkipsTargets', file: 'dispatch', mustContain: 'if (rec.target) continue;' },
   { id: 'claimArbitration', file: 'dispatch', mustContain: 'decideClaimArbitration(candidateIds' },
   { id: 'batchColocation', file: 'dispatch', mustContain: 'if (batchMax > 1 && isBatchEligible(rec))' },
   { id: 'quotaDegraded', file: 'dispatch', mustContain: 'if (quotaPressure.degraded)' },
   { id: 'providerFallback', file: 'dispatch', mustContain: "registry.markUnhealthy(provider!.name, r.error ?? 'auth failure')" },
-  { id: 'openBuildWorktreeHead', file: 'dispatch', mustContain: "'worktree', 'add', '-b', branch, wtPath, 'HEAD'" },
+  { id: 'openBuildWorktreeHead', file: 'dispatch', mustContain: "'worktree', 'add', '-b', branch, wtPath, baseRef" },
   { id: 'planScopedCommit', file: 'dispatch', mustContain: 'export function planScopedCommit(' },
   { id: 'checkTouchesOverstep', file: 'dispatch', mustContain: 'function checkTouchesOverstep(' },
   { id: 'checkSpine', file: 'dispatch', mustContain: 'function checkSpine(' },
@@ -396,8 +395,6 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'queuedClaimDeference', file: 'dispatch', mustContain: '!isClaimActive(r, foldResult.sessions, Date.now())' },
   { id: 'runPlanningLane', file: 'dispatch', mustContain: 'export async function runPlanningLane(' },
   { id: 'runTargetLane', file: 'dispatch', mustContain: 'export async function runTargetLane(' },
-  { id: 'targetDeployedFlag', file: 'dispatch', mustContain: 'deployed: !!manifest.deployCommand' },
-  { id: 'batchDeployedFlag', file: 'dispatch', mustContain: 'if (anyMerged && !opts.dryRun) fireDeployOnMerge(' },
   { id: 'salvageOnCrash', file: 'dispatch', mustContain: "salvageFn(w.wtPath, rec.id, w.attempt, artifactDir, 'crash'" },
 
   // reactor

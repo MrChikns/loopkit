@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ import { makeEvent } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { fold } from '../src/fold.js';
 import { runDispatch } from '../src/beats/dispatch.js';
+import { writeExitFile, usageJsonPath } from '../src/exitfile.js';
 import { manifestHash, readTargetManifest } from '../src/target.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
@@ -333,6 +334,244 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
 
     const gate = spawnSync('sh', ['-c', 'npm test'], { cwd: targetRoot, stdio: 'pipe' });
     assert.equal(gate.status, 0, 'the merged target repo main must be gate-green');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-176: a target merge records deployed:false even when the manifest CONFIGURES a deployCommand', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-wi176-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    // Give the target a real (harmless, non-reporting) deployCommand. This is the whole point:
+    // `deployed` used to be `!!manifest.deployCommand`, so merely CONFIGURING a deploy made the
+    // ledger claim the item was deployed — before the detached script had done anything at all,
+    // and in direct contradiction of the `deployed: false` the engineering lane writes on the
+    // same board for the same kind of event.
+    const manifestPath = join(targetRoot, 'loopkit.target.json');
+    const rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    rawManifest['deployCommand'] = 'true';
+    writeFileSync(manifestPath, JSON.stringify(rawManifest, null, 2), 'utf8');
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'chore: configure a deploy command']);
+
+    const manifest = readTargetManifest(targetRoot);
+    assert.equal(manifest.deployCommand, 'true', 'the manifest really does configure a deploy');
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-032', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-032', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 12;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 12); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-032',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-032): add extra marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-032');
+    assert.ok(merged, 'the targeted item must merge');
+    // ONE semantic across every lane: a merge observes that code landed, never that it deployed.
+    // deploy.succeeded / deploy.failed (appended by the detached script itself) are the sole
+    // authority for this flag.
+    assert.equal((merged!.data as { deployed?: boolean }).deployed, false,
+      'a configured deployCommand is not an observed deploy — item.merged.deployed must be false on every lane');
+    assert.equal(fold(events).items.get('WI-032')?.deployed, false, 'the fold agrees — nothing has reported a deploy yet');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-183: the target lane branches from the manifest default branch, not the target checkout\'s ambient HEAD', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-wi183-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    // The target checkout is parked on an UNRELATED branch with an unrelated commit. The target
+    // lane does not own this checkout, but it merges into manifest.defaultBranch ('main')
+    // regardless — so basing the build on HEAD used to smuggle that commit into the merge.
+    git(targetRoot, ['checkout', '-b', 'someone-elses-work']);
+    writeFileSync(join(targetRoot, 'src', 'stowaway.js'), 'export const stowaway = true;\n', 'utf8');
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'unrelated: STOWAWAY commit that must never ride into a merge']);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-031', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-031', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      assertRequest: (req) => {
+        // DECISIVE (build-time): the build worktree must be based on main, so the ambient
+        // branch's file must not be visible in it.
+        assert.ok(!existsSync(join(req.cwd!, 'src', 'stowaway.js')),
+          'the build worktree must branch from the manifest default branch — the ambient HEAD\'s commit must not be in it');
+      },
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 11;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 11); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-031',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-031): add extra marker',
+      },
+    });
+
+    const result = await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const folded = fold(await loadAllEvents(ledgerDir));
+    assert.equal(folded.items.get('WI-031')?.state, 'merged', `WI-031 must merge; result: ${JSON.stringify(result.dispatched)}`);
+
+    // DECISIVE (merge-time): main got the build's commit and NOTHING else. Before the fix the
+    // stowaway rode in, invisible to the Touches-overstep check and the judge's diff (both
+    // measure from the build's base, which WAS the ambient HEAD).
+    const mainLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(mainLog, /add extra marker/, 'the built commit must be on main');
+    assert.doesNotMatch(mainLog, /STOWAWAY/, 'the ambient HEAD\'s unrelated commit must NOT have ridden into the merge');
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', 'main:src/stowaway.js'], { cwd: targetRoot, stdio: 'pipe' }).status, 0,
+      'the unrelated file must not exist on main');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-178: a LONE detached targeted build with an EMPTY queue is still collected (was stranded in building forever)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-lone-detached-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const runsDir = join(base, 'runs');
+    mkdirSync(runsDir, { recursive: true });
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    // The worktree + branch a PRIOR beat's detached spawn would have left behind, carrying a real
+    // commit — the collection terminal needs something to gate/merge from.
+    const branch = 'wi-020-a1';
+    const wtPath = join(targetRoot, '..', `notes-wt-${branch}`);
+    git(targetRoot, ['worktree', 'add', '-b', branch, wtPath, 'main']);
+    writeFileSync(join(wtPath, 'src', 'extra.js'), 'export const marker = 7;\n', 'utf8');
+    writeFileSync(join(wtPath, 'test', 'extra.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 7); });\n",
+      'utf8');
+    git(wtPath, ['add', '-A']);
+    git(wtPath, ['commit', '-m', 'feat(WI-020): lone detached marker']);
+
+    // Ledger: the item is 'building' with a pgid (detached) and NOTHING is queued. This is the
+    // exact shape that used to strand: the plane's collectDetachedBuilds skips targeted items on
+    // purpose (they must merge into the TARGET repo), so collectedWorkers stays empty too — and
+    // every spawn gate above the target lane returned before the lane's own collection scan could
+    // run. hasDetachedTargetBuild (dispatch.ts) is what keeps them falling through now.
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-020', 'item.captured', { source: 'cli', text: 'lone detached', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-020', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+      makeEvent('dispatch', 'WI-020', 'build.dispatched', {
+        attempt: 1, worktree: wtPath, branch, pgid: 778001, provider: 'claude-cli',
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    // GREEN exit sentinel under the artifact dir the target lane's collection scan reads.
+    const usagePath = usageJsonPath(runsDir, 'WI-020', 1);
+    writeFileSync(usagePath, JSON.stringify({ result: 'done', usage: { input_tokens: 10, output_tokens: 5 } }), 'utf8');
+    writeExitFile(runsDir, 'WI-020', 1, { exitCode: 0, usageJsonPath: usagePath });
+
+    // Pre-state: building, and the queue really is empty.
+    const before = fold(await loadAllEvents(ledgerDir));
+    assert.equal(before.items.get('WI-020')?.state, 'building');
+    assert.equal([...before.items.values()].filter(r => r.state === 'queued').length, 0, 'no queued item — this is the lone-in-flight case');
+
+    // A build run() would mean the lane re-dispatched instead of collecting: fail loudly.
+    // The judge call (no cwd) is answered with real verdict grammar so it stays advisory.
+    const provider: LlmProvider = {
+      name: 'claude-cli',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        if (req.cwd) throw new Error('provider.run must not be called — the build already finished; this beat must COLLECT it');
+        return { ok: true, text: 'VERDICT: pass\nCONFIDENCE: 0.9\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- collected' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      artifactRunsDir: runsDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-020')?.state, 'merged',
+      `the lone detached targeted build must reach a terminal state, not sit in 'building'; result: ${JSON.stringify(result.dispatched)}`);
+
+    // DECISIVE: it merged into the TARGET repo's main, i.e. through the target lane's own
+    // collection terminal — never the plane's.
+    const targetLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(targetLog, /lone detached marker/, 'the collected work must land on the target repo main');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

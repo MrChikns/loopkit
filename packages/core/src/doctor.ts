@@ -19,6 +19,63 @@
  *
  * This is a pure function — it reads fold state (+ injected probes) and returns proposals;
  * the caller decides whether to actually apply them (and kills the live pid for stalls).
+ *
+ * ---------------------------------------------------------------------------
+ * IN-FLIGHT DWELL AUDIT (WI-178) — which states get a ceiling, and which must NOT
+ * ---------------------------------------------------------------------------
+ * WI-178 (a lone detached TARGETED build stranded in 'building' forever) raised the obvious
+ * question: should every in-flight state get a universal dwell timeout? The answer is NO — a
+ * blanket ceiling would park work that is waiting BY DESIGN. Each non-terminal ItemState
+ * (fold.ts) is classified below as BOUNDED (must have a ceiling + a named park reason) or
+ * LEGITIMATELY UNBOUNDED (waiting is the correct behaviour; only reporting is warranted).
+ * Add a new ceiling only where this audit says BOUNDED and none exists yet.
+ *
+ *   captured   BOUNDED-by-sweep. The reactor's routing step routes every beat; nothing waits on
+ *              a clock. No timer: an item stuck here means the BEAT is down, which the
+ *              loop-reactor SLO already catches — a per-item park would mis-attribute an
+ *              outage to the item. Reported: slo.ts 'unrouted' (unroutedMaxMin, default 15m).
+ *   routed     BOUNDED-by-sweep. Transient within the same routing step (routed→queued in one
+ *              append). Same reasoning as 'captured'; no timer.
+ *   answered   LEGITIMATELY UNBOUNDED. A question item that has been answered is at rest; it is
+ *              terminal in all but name. A timeout would be meaningless.
+ *   queued     LEGITIMATELY UNBOUNDED. Touches-serialisation, an in-flight conflict, or an
+ *              exhausted breaker awaiting a fresh unpark can all legitimately hold an item in
+ *              the queue indefinitely. A ceiling here would park work whose only fault is
+ *              waiting its turn. Reported: slo.ts 'queue-stall' (consecutive stalled beats).
+ *   building   BOUNDED — and this is the ONE state with real ceilings, all in this file:
+ *              dead pid (legacy sync) ⇒ immediate orphan; dead pgid + no exit file past
+ *              collectionCycleMs ⇒ orphan; exit file present + worktree gone past limboMaxMs
+ *              ⇒ post-collection-limbo reap; alive but no progress for stalledBuildMinutes ⇒
+ *              stall reap. Each ends in requeue (attempts < breakerN) or item.parked with a
+ *              named reason ('breaker' / thrashing). WI-178's stranding was NOT a missing
+ *              ceiling: the exit-file inversion above deliberately defers a build with a
+ *              readable exit file as "awaiting collection", which is only sound while
+ *              collection is REACHABLE. It wasn't, for a lone targeted detached build (see
+ *              dispatch.ts `hasDetachedTargetBuild`). The fix restored reachability; adding a
+ *              timer instead would have reaped a build that was about to merge.
+ *   gated      BOUNDED-by-construction. Dispatch's picker only re-scans 'queued', so a
+ *              dispatch-lane item that lands in 'gated' without merging is ALWAYS paired with
+ *              an explicit item.queued (see dispatch.ts merge.transient-fail handling; fold.ts
+ *              documents the same invariant). That pairing — not a timer — is what keeps
+ *              'gated' from becoming a dwell state; never emit a bare merge.transient-fail on
+ *              the dispatch lane.
+ *   parked     SPLIT BY parkKind. 'ops' ⇒ BOUNDED: bounded auto-requeue under breakerN, then
+ *              it rests as a genuine operator item. 'decision'/'hold' ⇒ LEGITIMATELY
+ *              UNBOUNDED: the whole point is that a human decides, and auto-resolving it is
+ *              exactly the failure mode parking exists to prevent. Reported: slo.ts
+ *              'decisions' (decisionMaxHours, default 72h).
+ *   approved   BOUNDED-by-sweep. The reactor merges approved branches every beat; a merge that
+ *              cannot proceed parks with a reason rather than dwelling. No timer.
+ *   merged     BOUNDED for acceptance tiers auto/optional/review (autoAfterHours 2 /
+ *              optionalAfterHours 48 / reviewAfterHours 168, acceptance.ts + config.ts);
+ *              LEGITIMATELY UNBOUNDED for tier 'must' — judge-failed or risk-flagged work is
+ *              operator-only by design. Reported: slo.ts 'acceptance' (acceptanceMaxHours,
+ *              default 48h). Deploy truth is a SEPARATE axis on the same state: item.merged
+ *              never asserts it (WI-176), deploy.succeeded/deploy.failed do, and slo.ts
+ *              'deploy' (deployBehindHours, default 1h) is the backstop for a script that
+ *              never reports.
+ *
+ * Terminal states (accepted / rejected / done) are out of scope by definition.
  */
 
 import { FoldResult, ItemRecord, SessionRecord, computeErrorFingerprint, isClaimActive } from './fold.js';
