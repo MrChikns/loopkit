@@ -16,3 +16,4 @@ the console) is a different thing: that is the plane asking its operator about
 - [ADR-008](ADR-008-detached-dispatch-staging.md) — detached dispatch lands staged behind a default-off flag; an unset flag is byte-for-byte today's behaviour
 - [ADR-009](ADR-009-portability-completion.md) — the portability nudge gets a real completion path; an operator reply appends an event instead of sitting unparsed
 - [ADR-010](ADR-010-one-lane.md) — one parameterised build lane; lane is configuration, not a forked code path, and the plane must get smaller
+- [ADR-011](ADR-011-lane-collapse-measurement.md) — amends ADR-010's measurement clause (it was satisfiable by moving code sideways); refuses the batch-lane migration; a subsystem that runs without recording is worse than one that is off
