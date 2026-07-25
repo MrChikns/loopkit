@@ -5,6 +5,8 @@
 path (its Consequences "After the release" item, and clause 5's "two triggers") — the collapse never
 happens because there is nothing left to collapse. [ADR-010](ADR-010-one-lane.md)'s point 4 ("the
 attended coordinator routes through the conductor") is withdrawn for the same reason.
+**Amended:** 2026-07-25 — the Context section's co-location claim was overstated; see the inline
+amendment below (WI-199). The Decision is unchanged.
 
 ## Context
 
@@ -29,12 +31,25 @@ appends `item.merged` itself. That path claims through the same lease kernel
 
 **Its one good idea is already implemented, in the path that actually runs.** Clustering
 `Touches`-overlapping items into one worktree, one prompt, one gate and one merge exists in the
-dispatch beat as **batch co-location** — `isBatchEligible` (`packages/core/src/beats/dispatch.ts:591`)
-picks the members, `cfg.batchMaxItems` (`packages/core/src/config.ts:827`) bounds the group. The
+dispatch beat as **batch co-location** — `isBatchEligible` (`packages/core/src/beats/dispatch.ts:594`)
+picks the members, `cfg.batchMaxItems` (`packages/core/src/config.ts:832`) bounds the group. The
 conductor is a second implementation of that same capability with two differences: the eligibility
 filter removed, and the group size effectively unbounded rather than the shipped default of `1`
 (co-location off). **Deleting it therefore loses no capability.** The capability was never in the
 conductor; the conductor was a second copy of it with the knob pre-turned.
+
+> **Amendment (2026-07-25):** the paragraph above overstates where co-location reaches. It is real,
+> but only for **untargeted** items — `runDispatch` (`packages/core/src/beats/dispatch.ts`) splits
+> queued items into `targetedQueued` and `engineeringQueued` *before* grouping; only
+> `engineeringQueued` ever reaches the `isBatchEligible`/`batchMaxItems` check. Targeted items are
+> built by `runTargetLane`, whose own build loop is a bare serial `for (const rec of items)` with no
+> batching call at all — its comments say so explicitly. A ledger measurement the same day found 173
+> of 180 `item.queued` events in a six-day window were targeted (96%); the 7 untargeted belonged to 3
+> items, two of them planning-lane (also never batched). **Zero builds in that window could have
+> entered the co-location path.** This does not reopen the decision below — the conductor still
+> never ran, and the tax of a third path is unaffected — but the honest version of the claim is: *the
+> capability already has a home, currently reachable only for untargeted items; extending it to the
+> target lane is open work.* See WI-199.
 
 **Keeping it costs a permanent tax, and the tax is already being paid badly.** Every invariant the
 plane gains has to be ported to a third path, and silently is not. WI-176 — "one `deployed` semantic
