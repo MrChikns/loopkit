@@ -44,17 +44,17 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
   target: {
     touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
-    gateWrapper: 'runGate', commitSide: 'dispatch',
+    gateWrapper: 'runGate', commitSide: 'dispatch (declared)',
   },
   batch: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: true, push: true,
     alreadyShippedCommit: true, denialNote: true,
-    gateWrapper: 'runLaneGate', commitSide: 'dispatch',
+    gateWrapper: 'runLaneGate', commitSide: 'dispatch (declared)',
   },
   conductor: {
     touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
-    gateWrapper: 'runClusterGate (local fork)', commitSide: 'worker',
+    gateWrapper: 'runGate', commitSide: 'worker (declared)',
   },
 };
 

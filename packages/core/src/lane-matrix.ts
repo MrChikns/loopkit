@@ -287,11 +287,32 @@ const BOOLEAN_MARKERS: Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, Re
   denialNote: /\bdenialNote\b/,
 };
 
-/** Which gate wrapper a span calls: the lane-aware dispatcher, the plain one, or a local fork. */
-function detectGateWrapper(span: string, fileIsConductor: boolean): string {
-  if (/\brunLaneGate\s*\(/.test(span)) return 'runLaneGate';
-  if (/\brunClusterGate\s*\(/.test(span)) return 'runClusterGate (local fork)';
-  if (/\brunGate\s*\(/.test(span)) return fileIsConductor ? 'runGate (local fork)' : 'runGate';
+/**
+ * Which gate wrapper a span calls: the lane-aware dispatcher, the shared plain one, or a fork
+ * local to the lane's own file.
+ *
+ * "Local fork" is decided by whether the lane's FILE defines the function itself versus importing
+ * it — never by which file we happen to be looking at. An earlier version keyed this off "is this
+ * the conductor", which was true only until the conductor's forked helpers were deleted and it
+ * began calling the beat's exported `runGate`: the cell then read "local fork" for a call that had
+ * just been de-duplicated, i.e. it reported the opposite of what had been fixed. A cell that lies
+ * is worse than a missing cell, so the signal has to come from the source, not the filename.
+ */
+function detectGateWrapper(span: string, fileSource: string): string {
+  // A FORK is a gate helper a lane's own file defines when the canonical implementation lives
+  // elsewhere — i.e. defined here AND imported nowhere. dispatch.ts is the canonical home of
+  // runGate/runLaneGate, so its own definitions are not forks; annotating them as such is how an
+  // earlier version of this column labelled `runGate`'s own home a fork of itself.
+  const isCanonicalHome = /^\s*export\s+(?:async\s+)?function\s+runGate\b/m.test(fileSource)
+    || /^\s*export\s+(?:async\s+)?function\s+runLaneGate\b/m.test(fileSource);
+  const definedLocally = (name: string): boolean =>
+    new RegExp(`(?:function|const|let)\\s+${name}\\b`).test(fileSource);
+  const label = (name: string): string =>
+    !isCanonicalHome && definedLocally(name) ? `${name} (local fork)` : name;
+
+  if (/\brunLaneGate\s*\(/.test(span)) return label('runLaneGate');
+  if (/\brunClusterGate\s*\(/.test(span)) return label('runClusterGate');
+  if (/\brunGate\s*\(/.test(span)) return label('runGate');
   return 'none';
 }
 
@@ -304,11 +325,39 @@ function detectGateWrapper(span: string, fileIsConductor: boolean): string {
  * only in-scope files and run `git commit` from dispatch's own code, never the worker's tool
  * grant. A lane with NEITHER marker present has no code-diff commit step at all (planning).
  */
-function detectCommitSide(span: string): string {
+function detectCommitSide(span: string, fileSource: string): string {
   const hasSharedScopedCommit = /attemptScopedCommit\s*\(/.test(span);
   const hasInlineScopedCommit = /planScopedCommit\s*\(/.test(span)
     && /spawnSync\(\s*['"]git['"]\s*,\s*\[\s*['"]commit['"]/.test(span);
   const dispatchCommits = hasSharedScopedCommit || hasInlineScopedCommit;
+
+  // Prefer the DECLARED contract over inferred tool literals. Since the commitMode slice, a lane
+  // states its contract explicitly (`commitMode: 'worker' | 'dispatch'`, or a constant passed to
+  // `toolsForCommitMode`), and reading that declaration is both more accurate and more durable
+  // than grepping for a `BUILDER_TOOLS` identifier that de-duplication is actively removing.
+  // (Detecting the literal is what made this column report "no code diff" for the conductor the
+  // moment its hand-picked toolset became `toolsForCommitMode(CONDUCT_COMMIT_MODE)` — the column
+  // degraded precisely because the code improved.) The literal markers remain as a fallback for
+  // lanes that have not yet been migrated.
+  const allDeclaredIn = (text: string): string[] => {
+    const found = new Set<string>();
+    for (const re of [/\bcommitMode\s*:\s*'(worker|dispatch)'/g, /CommitMode\s*=\s*'(worker|dispatch)'/g]) {
+      for (const m of text.matchAll(re)) found.add(m[1]);
+    }
+    return [...found];
+  };
+  // Span first: a declaration inside the lane's own body is unambiguously that lane's contract.
+  const inSpan = allDeclaredIn(span);
+  if (inSpan.length === 1) return `${inSpan[0]} (declared)`;
+  // File scope only when UNAMBIGUOUS. A single-lane file (conductor.ts) declares its contract as a
+  // module-scope constant, which we should read. A multi-lane file (dispatch.ts houses planning,
+  // target and batch, plus both branches of toolsForCommitMode) contains every mode, so a
+  // file-scope match says nothing about WHICH lane owns it — reading one anyway reported the
+  // planning lane as 'worker' when it has no commit step at all. Ambiguous ⇒ fall through to the
+  // marker-based inference below rather than guess.
+  const inFile = allDeclaredIn(fileSource);
+  const declared = inFile.length === 1 ? { 1: inFile[0] } as unknown as RegExpExecArray : null;
+  if (declared) return `${inFile[0]} (declared)`;
   const grantsCommitTool = /(?<!DISPATCH_)\bBUILDER_TOOLS\b/.test(span);
   if (dispatchCommits && !grantsCommitTool) return 'dispatch';
   if (grantsCommitTool && !dispatchCommits) return 'worker';
@@ -351,14 +400,15 @@ function buildRow(spec: LaneSpanSpec, sources: Record<keyof typeof LANE_SOURCE_F
   // argument, e.g. `'push'`) so a marker can only fire on REAL code, never on prose that merely
   // names a guard (comments in this codebase narrate guard behaviour constantly).
   const combined = stripComments(spans.join('\n'));
-  const fileIsConductor = spec.file === 'conductor';
 
   const cells = {} as Record<GuardId, Cell>;
   for (const id of Object.keys(BOOLEAN_MARKERS) as (keyof typeof BOOLEAN_MARKERS)[]) {
     cells[id] = BOOLEAN_MARKERS[id].test(combined);
   }
-  cells.gateWrapper = detectGateWrapper(combined, fileIsConductor);
-  cells.commitSide = detectCommitSide(combined);
+  // Whole-file source (comments stripped) so "local fork" is decided by whether this lane's file
+  // DEFINES the gate helper or imports it — see detectGateWrapper.
+  cells.gateWrapper = detectGateWrapper(combined, stripComments(src));
+  cells.commitSide = detectCommitSide(combined, stripComments(src));
 
   return { lane: spec.lane, functionNames: spec.functionNames, cells };
 }
