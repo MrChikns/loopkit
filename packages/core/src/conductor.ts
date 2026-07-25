@@ -421,11 +421,19 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
   const branch = dirName;
   const wtPath = join(plan.repoPath, '..', dirName);
 
-  // One worktree per cluster, branched from the repo's current HEAD (WI-172: shared git
-  // sequence with the dispatch beat's own worktree-creation call sites — node_modules
-  // provisioning uses the same rule as the dispatch target lane: without it, any gate needing
-  // a local toolchain exits 127 in a fresh worktree; a failed file: dep build is a real red).
-  const opened = openBuildWorktree(plan.repoPath, wtPath, branch, plan.depsWorkdirs);
+  // One worktree per cluster, branched from the cluster's MERGE DESTINATION — plan.defaultBranch,
+  // the same ref closeMergedCluster merges into below (WI-172: shared git sequence with the
+  // dispatch beat's own worktree-creation call sites — node_modules provisioning uses the same
+  // rule as the dispatch target lane: without it, any gate needing a local toolchain exits 127 in
+  // a fresh worktree; a failed file: dep build is a real red).
+  //
+  // WI-183: this used to branch from the repo's ambient HEAD. For an UNTARGETED cluster that was
+  // harmless — plan.defaultBranch is itself currentBranch(repoRoot), so base and destination were
+  // the same ref by construction. For a TARGETED cluster it was not: plan.defaultBranch comes from
+  // the target's MANIFEST, and the target checkout's HEAD is not this lane's to control, so any
+  // commit sitting on that HEAD rode into the merge while the Touches-overstep check and the
+  // judge's diff — both measured from the build's base — reported clean.
+  const opened = openBuildWorktree(plan.repoPath, wtPath, branch, plan.depsWorkdirs, plan.defaultBranch);
   if (!opened.ok) {
     const detail = opened.stage === 'worktree-add'
       ? `worktree add failed: ${opened.reason}`

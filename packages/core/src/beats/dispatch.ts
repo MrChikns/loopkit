@@ -800,16 +800,28 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
  * for a co-located group, a conductor park returns an `outcome:'error'` cluster result, a
  * target-lane park never cleans up the worktree it just made on a deps failure while the batch
  * lane does) — none of that belongs in a shared helper, so it stays at the call site.
+ *
+ * WI-183 — `baseRef` is REQUIRED and must be the SAME ref the caller will later merge INTO.
+ * This used to be a hardcoded 'HEAD'. Two lanes (dispatch's target lane, conductor's targeted
+ * clusters) branch in a repo whose checkout they do not control and then merge into a
+ * MANIFEST-DECLARED default branch. When that checkout's HEAD was not the default branch, every
+ * commit already on HEAD rode into the merge — while the Touches-overstep check and the judge's
+ * diff evidence only ever inspect what the BUILD added on top of its base. Unrelated work could
+ * therefore land inside a merge that every guard reported clean and in-scope. Branching from the
+ * merge destination makes base-the-guards-measure-against identical to base-the-merge-uses, and
+ * fails closed (worktree-add error → the caller's ordinary park) when that ref does not exist
+ * locally, rather than silently falling back to whatever HEAD happens to be.
  */
 export function openBuildWorktree(
   repoRoot: string,
   wtPath: string,
   branch: string,
   depsWorkdirs: string[],
+  baseRef: string,
 ): { ok: true } | { ok: false; stage: 'worktree-add'; reason: string } | { ok: false; stage: 'deps'; reason: string } {
   removeWorktree(repoRoot, wtPath);
   spawnSync('git', ['branch', '-D', branch], { cwd: repoRoot, stdio: 'pipe' });
-  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: repoRoot, stdio: 'pipe' });
+  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, baseRef], { cwd: repoRoot, stdio: 'pipe' });
   if (wtAdd.status !== 0) {
     return { ok: false, stage: 'worktree-add', reason: wtAdd.stderr?.toString().trim() ?? '' };
   }
@@ -2526,7 +2538,14 @@ export async function runTargetLane(
     // here deliberately does NOT clean up the worktree (unchanged from before the extraction) —
     // the batch lane's copy of this sequence does clean up on the same failure; that is a real,
     // pre-existing difference between the two call sites, left at the call site on purpose.
-    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs);
+    // WI-183: branch from the MERGE DESTINATION (manifest.defaultBranch), not the target
+    // checkout's ambient HEAD. This lane does not own that checkout — an operator (or another
+    // agent) can leave it on any branch, and the closeMergedCluster tail below merges into
+    // manifest.defaultBranch regardless. Basing on HEAD let that branch's extra commits ride
+    // into the merge invisibly: the Touches-overstep check and the judge's diff both measure
+    // from the build's base, so they saw nothing. Fails closed — an absent/unresolvable
+    // defaultBranch is a worktree-add failure, parked below, never a silent HEAD fallback.
+    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs, manifest.defaultBranch);
     if (!opened.ok) {
       const reason = opened.stage === 'worktree-add'
         ? `infra: target worktree add failed: ${opened.reason}`
@@ -3363,7 +3382,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // covers every deps workdir, since the gate may run suites in more than one package; a
       // file:-dep build that exits non-zero means the gate would run against stale dist and
       // silently green, so park immediately rather than lie).
-      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
+      // WI-183: 'HEAD' here is deliberate and stays — the batch lane merges into the primary
+      // tree's CURRENT branch and refuses to merge at all unless that branch is 'master' (the
+      // `curBranch !== 'master'` deferral in Phase 2). Base and merge destination therefore
+      // cannot diverge on this lane, which is why it was never exposed to the WI-183 defect.
+      // Passed explicitly rather than defaulted so the choice is visible, not inherited.
+      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir], 'HEAD');
       if (!opened.ok) {
         const reason = opened.stage === 'worktree-add'
           ? `infra: worktree add failed: ${opened.reason}`

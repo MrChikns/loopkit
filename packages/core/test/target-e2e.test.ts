@@ -339,6 +339,84 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
   }
 });
 
+test('WI-183: the target lane branches from the manifest default branch, not the target checkout\'s ambient HEAD', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-wi183-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    // The target checkout is parked on an UNRELATED branch with an unrelated commit. The target
+    // lane does not own this checkout, but it merges into manifest.defaultBranch ('main')
+    // regardless — so basing the build on HEAD used to smuggle that commit into the merge.
+    git(targetRoot, ['checkout', '-b', 'someone-elses-work']);
+    writeFileSync(join(targetRoot, 'src', 'stowaway.js'), 'export const stowaway = true;\n', 'utf8');
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'unrelated: STOWAWAY commit that must never ride into a merge']);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-031', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-031', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      assertRequest: (req) => {
+        // DECISIVE (build-time): the build worktree must be based on main, so the ambient
+        // branch's file must not be visible in it.
+        assert.ok(!existsSync(join(req.cwd!, 'src', 'stowaway.js')),
+          'the build worktree must branch from the manifest default branch — the ambient HEAD\'s commit must not be in it');
+      },
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 11;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 11); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-031',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-031): add extra marker',
+      },
+    });
+
+    const result = await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const folded = fold(await loadAllEvents(ledgerDir));
+    assert.equal(folded.items.get('WI-031')?.state, 'merged', `WI-031 must merge; result: ${JSON.stringify(result.dispatched)}`);
+
+    // DECISIVE (merge-time): main got the build's commit and NOTHING else. Before the fix the
+    // stowaway rode in, invisible to the Touches-overstep check and the judge's diff (both
+    // measure from the build's base, which WAS the ambient HEAD).
+    const mainLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(mainLog, /add extra marker/, 'the built commit must be on main');
+    assert.doesNotMatch(mainLog, /STOWAWAY/, 'the ambient HEAD\'s unrelated commit must NOT have ridden into the merge');
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', 'main:src/stowaway.js'], { cwd: targetRoot, stdio: 'pipe' }).status, 0,
+      'the unrelated file must not exist on main');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('WI-178: a LONE detached targeted build with an EMPTY queue is still collected (was stranded in building forever)', async () => {
   const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-lone-detached-'));
   try {
