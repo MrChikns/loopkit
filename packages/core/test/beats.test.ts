@@ -901,7 +901,7 @@ test('reactor: doctor requeues a crashed orphan (attempt < N)', async () => {
       makeEvent('cli', 'WI-001', 'item.captured', {
         source: 'test', text: 'build something',
       }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'build something',
       }, '2026-01-01T00:01:00Z'),
       makeEvent('dispatch', 'WI-001', 'build.dispatched', {
@@ -935,7 +935,10 @@ test('reactor: doctor requeues a crashed orphan (attempt < N)', async () => {
     // Verify ledger has build.crashed and item.queued events
     const events = await loadAllEvents(ledgerDir);
     const crashed = events.filter(e => e.type === 'build.crashed' && e.item === 'WI-001');
-    const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-001' && e.actor === 'reactor');
+    // Discriminate the doctor's requeue from the SEEDED item.queued by timestamp, not by
+    // actor — both are the reactor's. (The seed used to claim a `conductor` actor that no
+    // beat has ever written, which made an actor filter look meaningful when it was not.)
+    const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-001' && e.ts !== '2026-01-01T00:01:00Z');
     assert.equal(crashed.length, 1, 'should have one build.crashed event');
     assert.equal(requeued.length, 1, 'should have one requeue event');
 
@@ -959,7 +962,7 @@ test('reactor: doctor trips breaker on 3rd attempt', async () => {
     // Seed: 2 prior crashes, now on 3rd dispatch with dead pid
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-002', 'item.captured', { source: 'test', text: 'test' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-002', 'item.queued', { spec: 'test' }, '2026-01-01T00:01:00Z'),
+      makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'test' }, '2026-01-01T00:01:00Z'),
       // Attempt 1
       makeEvent('dispatch', 'WI-002', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
       makeEvent('doctor', 'WI-002', 'build.crashed', { reason: 'orphan-detected' }, '2026-01-01T00:03:00Z'),
@@ -1017,7 +1020,7 @@ test('reactor: approved item merges independently (no dispatch needed)', async (
     // or notes the branch is missing (branch doesn't exist in this temp dir).
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-003', 'item.captured', { source: 'test', text: 'build X' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-003', 'item.queued', { spec: 'build X' }, '2026-01-01T00:01:00Z'),
+      makeEvent('reactor', 'WI-003', 'item.queued', { spec: 'build X' }, '2026-01-01T00:01:00Z'),
       makeEvent('dispatch', 'WI-003', 'build.dispatched', {
         attempt: 1, pid: 1, branch: 'wi-003', worktree: '/tmp/wi-003',
       }, '2026-01-01T00:02:00Z'),
@@ -1069,7 +1072,7 @@ test('reactor: approved item with prior merge.transient-fail is re-selected by a
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-050', 'item.captured', { source: 'test', text: 'fix Y' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-050', 'item.queued', { spec: 'fix Y' }, '2026-01-01T00:01:00Z'),
+      makeEvent('reactor', 'WI-050', 'item.queued', { spec: 'fix Y' }, '2026-01-01T00:01:00Z'),
       makeEvent('dispatch', 'WI-050', 'build.dispatched', {
         attempt: 1, pid: 1, branch: 'wi-050',
       }, '2026-01-01T00:02:00Z'),
@@ -1324,7 +1327,7 @@ test('dispatch: LOOPKIT_AUTONOMY=off is a no-op beat', async () => {
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'build X' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'build X' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'build X' }),
     ]);
 
     const result = await runDispatch({
@@ -1358,7 +1361,7 @@ test('dispatch: LOOPKIT_AUTONOMY unset → fail-safe OFF (no-op, stderr message)
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'build X' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'build X' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'build X' }),
     ]);
 
     // opts.autonomy is NOT passed — relies on env fallback
@@ -1389,7 +1392,7 @@ test('dispatch: dry-run writes nothing', async () => {
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'build X' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'build X' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'build X' }),
     ]);
 
     const result = await runDispatch({
@@ -1553,9 +1556,9 @@ test('picker does not over-serialize packages/ui vs packages/ui-kit', async () =
     // Sibling prefixes that share a string prefix but NOT a path segment must run in parallel.
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'A' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'A', touches: 'packages/ui/' }, '2026-01-01T00:01:00Z'),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'A', touches: 'packages/ui/' }, '2026-01-01T00:01:00Z'),
       makeEvent('cli', 'WI-002', 'item.captured', { source: 'test', text: 'B' }, '2026-01-01T00:02:00Z'),
-      makeEvent('conductor', 'WI-002', 'item.queued', { spec: 'B', touches: 'packages/ui-kit/' }, '2026-01-01T00:03:00Z'),
+      makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'B', touches: 'packages/ui-kit/' }, '2026-01-01T00:03:00Z'),
     ]);
 
     const result = await runDispatch({
@@ -1712,7 +1715,7 @@ test('dispatch: wedged-lock recovery threshold derives from buildTimeoutMinutes'
     try {
       await seedLedger(ledgerDir, [
         makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'x' }),
-        makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'x' }),
+        makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'x' }),
       ]);
       mkLock(repoRoot, ageMinutes);
       const result = await runDispatch({
@@ -1751,7 +1754,7 @@ test('dispatch: a FRESH lock owned by a DEAD pid is reclaimed immediately (no 55
     try {
       await seedLedger(ledgerDir, [
         makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'x' }),
-        makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'x' }),
+        makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'x' }),
       ]);
       const result = await runDispatch({
         repoRoot, ledgerDir, dryRun: true, autonomy: 'on',
@@ -1783,11 +1786,11 @@ test('dispatch: refuses to dispatch overlapping Touches', async () => {
     // Two items with overlapping Touches — only the first should be picked
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task A' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task A', touches: 'apps/example/src/routes',
       }, '2026-01-01T00:01:00Z'),
       makeEvent('cli', 'WI-002', 'item.captured', { source: 'test', text: 'task B' }, '2026-01-01T00:02:00Z'),
-      makeEvent('conductor', 'WI-002', 'item.queued', {
+      makeEvent('reactor', 'WI-002', 'item.queued', {
         spec: 'task B', touches: 'apps/example/src/routes/board.ts',
       }, '2026-01-01T00:03:00Z'),
     ]);
@@ -1823,7 +1826,7 @@ test('dispatch: skips item with attempts >= BUILDER_BREAKER_N (no unpark)', asyn
     // Build 5 crash cycles so attempts = 5, item lands back in queued state.
     const events: LedgerEvent[] = [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task', touches: 'apps/example/src',
       }, '2026-01-01T00:01:00Z'),
     ];
@@ -1862,7 +1865,7 @@ test('dispatch: allows item with attempts >= BUILDER_BREAKER_N after explicit op
     // 5 crashes → parked → then operator explicitly unparks
     const events: LedgerEvent[] = [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task', touches: 'apps/example/src',
       }, '2026-01-01T00:01:00Z'),
     ];
@@ -1928,11 +1931,11 @@ test('dispatch: batchMaxItems>1 co-locates overlapping small items into one work
     // Two SMALL items with overlapping Touches — with batching on they share one worker run.
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task A' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task A', touches: 'apps/example/src/routes', model: 'sonnet', priority: 'medium',
       }, '2026-01-01T00:01:00Z'),
       makeEvent('cli', 'WI-002', 'item.captured', { source: 'test', text: 'task B' }, '2026-01-01T00:02:00Z'),
-      makeEvent('conductor', 'WI-002', 'item.queued', {
+      makeEvent('reactor', 'WI-002', 'item.queued', {
         spec: 'task B', touches: 'apps/example/src/routes/board.ts', model: 'sonnet', priority: 'medium',
       }, '2026-01-01T00:03:00Z'),
     ]);
@@ -2179,11 +2182,11 @@ test('dispatch: batchMaxItems=1 (default) keeps overlapping items on separate be
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'A' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'A', touches: 'src/', model: 'sonnet', priority: 'medium',
       }, '2026-01-01T00:01:00Z'),
       makeEvent('cli', 'WI-002', 'item.captured', { source: 'test', text: 'B' }, '2026-01-01T00:02:00Z'),
-      makeEvent('conductor', 'WI-002', 'item.queued', {
+      makeEvent('reactor', 'WI-002', 'item.queued', {
         spec: 'B', touches: 'src/x.ts', model: 'sonnet', priority: 'medium',
       }, '2026-01-01T00:03:00Z'),
     ]);
@@ -2588,7 +2591,7 @@ test('dispatch: branch names increment per attempt (wi-NNN-aN suffix)', async ()
     try {
       await seedLedger(ledgerDir, [
         makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'task' }, '2026-01-01T00:00:00Z'),
-        makeEvent('conductor', 'WI-001', 'item.queued', {
+        makeEvent('reactor', 'WI-001', 'item.queued', {
           spec: 'task', touches: 'src/',
         }, '2026-01-01T00:01:00Z'),
       ]);
@@ -2610,7 +2613,7 @@ test('dispatch: branch names increment per attempt (wi-NNN-aN suffix)', async ()
     try {
       await seedLedger(ledgerDir, [
         makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'task' }, '2026-01-01T00:00:00Z'),
-        makeEvent('conductor', 'WI-001', 'item.queued', {
+        makeEvent('reactor', 'WI-001', 'item.queued', {
           spec: 'task', touches: 'src/',
         }, '2026-01-01T00:01:00Z'),
         makeEvent('dispatch', 'WI-001', 'build.dispatched', {
@@ -2658,7 +2661,7 @@ test('dispatch: re-dispatch does not delete a parked review branch', async () =>
     // Seed: item was dispatched at attempt 1, spine-parked, then operator unparked
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'task' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task', touches: 'src/',
       }, '2026-01-01T00:01:00Z'),
       makeEvent('dispatch', 'WI-001', 'build.dispatched', {
@@ -2731,7 +2734,7 @@ test('dispatch: guard is a no-op when no parked event exists (stale branch clean
     // Fresh item — no prior builds, no parkClass
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'task' }, '2026-01-01T00:00:00Z'),
-      makeEvent('conductor', 'WI-001', 'item.queued', {
+      makeEvent('reactor', 'WI-001', 'item.queued', {
         spec: 'task', touches: 'src/',
       }, '2026-01-01T00:01:00Z'),
     ]);
@@ -4522,7 +4525,7 @@ test('reactor: bounded auto-requeue leaves a no-commit ops-park parked once the 
 });
 
 // ---------------------------------------------------------------------------
-// Conductor park emits parkKind:'decision', decisionCount excludes 'hold' parks
+// Router park emits parkKind:'decision', decisionCount excludes 'hold' parks
 // ---------------------------------------------------------------------------
 
 test('router park route emits item.parked with parkKind:decision', async () => {
@@ -4777,7 +4780,7 @@ test('needs-test notify: merged item touching a risk path (must tier) fires exac
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-500', 'item.captured', { source: 'test', text: 'touch billing code' }),
-      makeEvent('conductor', 'WI-500', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
+      makeEvent('reactor', 'WI-500', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
       makeEvent('dispatch', 'WI-500', 'item.merged', { commit: 'abc500', deployed: false }),
     ]);
 
@@ -4816,7 +4819,7 @@ test('needs-test notify: merged item with only plane files (auto tier) does not 
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-501', 'item.captured', { source: 'test', text: 'tidy plane script' }),
-      makeEvent('conductor', 'WI-501', 'item.queued', { spec: 'tidy plane script', touches: '.loopkit/scripts/tidy.ts' }),
+      makeEvent('reactor', 'WI-501', 'item.queued', { spec: 'tidy plane script', touches: '.loopkit/scripts/tidy.ts' }),
       makeEvent('dispatch', 'WI-501', 'item.merged', { commit: 'abc501', deployed: false }),
     ]);
 
@@ -4846,7 +4849,7 @@ test('needs-test notify: merged item with non-surface, non-plane files (optional
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-502', 'item.captured', { source: 'test', text: 'refactor a helper' }),
-      makeEvent('conductor', 'WI-502', 'item.queued', { spec: 'refactor a helper', touches: 'apps/example/src/lib/helper.ts' }),
+      makeEvent('reactor', 'WI-502', 'item.queued', { spec: 'refactor a helper', touches: 'apps/example/src/lib/helper.ts' }),
       makeEvent('dispatch', 'WI-502', 'item.merged', { commit: 'abc502', deployed: false }),
     ]);
 
@@ -4876,7 +4879,7 @@ test('needs-test notify: merged item touching a declared surface (review tier) f
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-503', 'item.captured', { source: 'test', text: 'new screen' }),
-      makeEvent('conductor', 'WI-503', 'item.queued', { spec: 'new screen', touches: 'apps/example/src/public/board.ts' }),
+      makeEvent('reactor', 'WI-503', 'item.queued', { spec: 'new screen', touches: 'apps/example/src/public/board.ts' }),
       makeEvent('dispatch', 'WI-503', 'item.merged', { commit: 'abc503', deployed: false }),
     ]);
 
@@ -4916,7 +4919,7 @@ test('needs-test notify: empty notifyHook is a no-op (no hook file, no injected 
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-504', 'item.captured', { source: 'test', text: 'touch billing code' }),
-      makeEvent('conductor', 'WI-504', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
+      makeEvent('reactor', 'WI-504', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
       makeEvent('dispatch', 'WI-504', 'item.merged', { commit: 'abc504', deployed: false }),
     ]);
 
@@ -4948,7 +4951,7 @@ test('needs-test notify: a throwing notify hook does not fail the beat', async (
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-505', 'item.captured', { source: 'test', text: 'touch billing code' }),
-      makeEvent('conductor', 'WI-505', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
+      makeEvent('reactor', 'WI-505', 'item.queued', { spec: 'touch billing code', touches: 'apps/example/src/billing/plan.ts' }),
       makeEvent('dispatch', 'WI-505', 'item.merged', { commit: 'abc505', deployed: false }),
     ]);
 
@@ -5204,7 +5207,7 @@ test('dispatch: budget ceiling reached skips picks (watchdog still runs)', async
     const today = new Date().toISOString().slice(0, 10);
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
       // Already spent 0.05 today
       makeEvent('dispatch', 'system', 'cost.usage', {
         provider: 'claude-cli', loop: 'dispatch', tokens: 5000, usd: 0.05,
@@ -5254,7 +5257,7 @@ test('dispatch: no budget config = no ceiling (default behaviour unchanged)', as
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
     ]);
 
     // No budget in config — dispatch proceeds normally (dry-run to avoid real git ops)
@@ -5282,7 +5285,7 @@ test('dispatch: quota pressure at/above threshold skips picks (reactor unaffecte
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
       makeEvent('claude-quota-collector', 'claude', 'quota.snapshot', { provider: 'claude', window: 'five_hour', usedPct: 85 }),
     ]);
 
@@ -5315,7 +5318,7 @@ test('dispatch: quota pressure below threshold dispatches normally', async () =>
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
       makeEvent('claude-quota-collector', 'claude', 'quota.snapshot', { provider: 'claude', window: 'five_hour', usedPct: 40 }),
     ]);
 
@@ -5343,7 +5346,7 @@ test('dispatch: window reset (high stale reading, low latest reading) must not f
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
       makeEvent('claude-quota-collector', 'claude', 'quota.snapshot', { provider: 'claude', window: 'seven_day', usedPct: 95 }, '2026-07-18T09:00:00.000Z'),
       makeEvent('claude-quota-collector', 'claude', 'quota.snapshot', { provider: 'claude', window: 'seven_day', usedPct: 10 }, '2026-07-19T09:00:00.000Z'),
     ]);
@@ -5372,7 +5375,7 @@ test('dispatch: quotaPressureProbe injection simulates degraded mode without quo
   try {
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'test', text: 'task' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'task', touches: 'src/' }),
     ]);
 
     const result = await runDispatch({

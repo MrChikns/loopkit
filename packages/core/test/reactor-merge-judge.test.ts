@@ -94,8 +94,8 @@ REASONS:
 function mergedPlaneItem(id: string, baseSha: string, headSha: string, mergedAtIso: string): LedgerEvent[] {
   return [
     makeEvent('operator', id, 'item.captured', { source: 'cli', text: `build ${id}` }),
-    makeEvent('conductor', id, 'item.queued', { spec: 'add feature to src/feature.ts', touches: 'src/' }),
-    makeEvent('conductor', id, 'item.merged', {
+    makeEvent('reactor', id, 'item.queued', { spec: 'add feature to src/feature.ts', touches: 'src/' }),
+    makeEvent('reactor', id, 'item.merged', {
       commit: headSha, sessionId: 'ses-attended',
       baseSha, headSha, changedFiles: ['src/feature.ts'], gateCommand: 'exit 0',
     }, mergedAtIso),
@@ -202,8 +202,8 @@ test('reactor: a registered-target merge is skipped by the backstop (range not l
     // targetId on capture → the item belongs to a registered target; its merge landed in the
     // target's repo, not the plane repo, so its commit range is not locally reachable here.
     makeEvent('operator', 'WI-502', 'item.captured', { source: 'cli', text: 'target build', target: 'acme', targetId: 'tgt-abc' }),
-    makeEvent('conductor', 'WI-502', 'item.queued', { spec: 'x', touches: 'src/' }),
-    makeEvent('conductor', 'WI-502', 'item.merged', {
+    makeEvent('reactor', 'WI-502', 'item.queued', { spec: 'x', touches: 'src/' }),
+    makeEvent('reactor', 'WI-502', 'item.merged', {
       commit: headSha, sessionId: 'ses-attended',
       baseSha, headSha, changedFiles: ['src/feature.ts'], gateCommand: 'exit 0',
     }),

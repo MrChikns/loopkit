@@ -94,7 +94,7 @@ test('parseManifest: no certification field at all still parses the rest of the 
 test('fold back-compat: item.merged with no certification field folds exactly as before', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-810', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-810', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-810', 'item.queued', { spec: 'spec' }),
     makeEvent('dispatch', 'WI-810', 'item.merged', { commit: 'abc123', deployed: false }),
   ];
   const result = fold(events);
@@ -108,7 +108,7 @@ test('fold back-compat: item.merged with no certification field folds exactly as
 test('fold: a well-formed certification payload folds onto the record as mergeCertification', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-811', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-811', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-811', 'item.queued', { spec: 'spec' }),
     makeEvent('dispatch', 'WI-811', 'item.merged', { commit: 'abc123', deployed: false, certification: CERT }),
   ];
   const result = fold(events);
@@ -120,7 +120,7 @@ test('fold: a well-formed certification payload folds onto the record as mergeCe
 test('fold: a malformed (partial) certification payload folds to undefined, never half-populated', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-812', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-812', 'item.queued', { spec: 'spec' }),
+    makeEvent('reactor', 'WI-812', 'item.queued', { spec: 'spec' }),
     {
       id: 'ev-01TESTCERTIFICATIONPARTIAL',
       ts: '2026-07-20T12:00:00.000Z',

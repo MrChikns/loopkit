@@ -159,7 +159,7 @@ test('provider types: ProviderSuccess usage turns/durationMs are optional (absen
 test('dispatch: cost.usage{loop:dispatch} carries turns and durationMs when provider returns them', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', {
+    makeEvent('reactor', 'WI-001', 'item.queued', {
       spec: 'add feature to src/feature.ts',
       touches: 'src/',
     }),
@@ -199,7 +199,7 @@ test('dispatch: cost.usage{loop:dispatch} carries turns and durationMs when prov
 test('dispatch: cost.usage{loop:dispatch} omits turns/durationMs when provider does not return them', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'build thing' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', {
+    makeEvent('reactor', 'WI-002', 'item.queued', {
       spec: 'add thing to src/thing.ts',
       touches: 'src/',
     }),
@@ -1089,7 +1089,7 @@ test('summary --json: active item carries briefed=true and judgeVerdict when pre
   const events: LedgerEvent[] = [
     // item captured and queued
     makeEvent('cli', 'WI-200', 'item.captured', { source: 'cli', text: 'build the thing' }),
-    makeEvent('conductor', 'WI-200', 'item.queued', { spec: 'build thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-200', 'item.queued', { spec: 'build thing', touches: 'src/' }),
     // scout brief
     makeEvent('dispatch', 'WI-200', 'item.briefed', { brief: 'Files: src/thing.ts', model: 'haiku' }),
     // dispatched (so attempts > 0)
@@ -1133,7 +1133,7 @@ test('summary --json: active item carries briefed=true and judgeVerdict when pre
 test('summary --json: active item carries briefed=false and judgeVerdict=null when absent', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-201', 'item.captured', { source: 'cli', text: 'another task' }),
-    makeEvent('conductor', 'WI-201', 'item.queued', { spec: 'do something', touches: 'src/' }),
+    makeEvent('reactor', 'WI-201', 'item.queued', { spec: 'do something', touches: 'src/' }),
   ];
 
   const result = fold(events);
@@ -1156,7 +1156,7 @@ test('summary --json: active item carries briefed=false and judgeVerdict=null wh
 test('summary --json: merged item carries briefed + judgeVerdict in recentMerged', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-202', 'item.captured', { source: 'cli', text: 'merged with brief' }),
-    makeEvent('conductor', 'WI-202', 'item.queued', { spec: 'ship it', touches: 'src/' }),
+    makeEvent('reactor', 'WI-202', 'item.queued', { spec: 'ship it', touches: 'src/' }),
     makeEvent('dispatch', 'WI-202', 'item.briefed', { brief: 'Files: src/x.ts', model: 'haiku' }),
     makeEvent('dispatch', 'WI-202', 'build.dispatched', { attempt: 1, pid: 1 }),
     makeEvent('dispatch', 'WI-202', 'gate.passed', { tests: 'green' }),

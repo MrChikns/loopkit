@@ -97,7 +97,7 @@ async function makeDispatchEnv(ledgerEvents: LedgerEvent[]): Promise<{
 test('detached-dispatch: flag OFF — build.dispatched carries pid (no pgid), item reaches terminal state within the beat', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-501', 'item.captured', { source: 'cli', text: 'add acme-web feature' }),
-    makeEvent('conductor', 'WI-501', 'item.queued', { spec: 'add acme-web feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-501', 'item.queued', { spec: 'add acme-web feature', touches: 'src/' }),
   ]);
 
   try {
@@ -161,7 +161,7 @@ test('detached-dispatch: config default is detachedDispatch:false (loadConfig wi
 test('detached-dispatch: flag ON + eligible (single-item, claude-cli) — beat returns before completion; build.dispatched carries pgid, item stays building', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-502', 'item.captured', { source: 'cli', text: 'add acme-web widget' }),
-    makeEvent('conductor', 'WI-502', 'item.queued', { spec: 'add acme-web widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-502', 'item.queued', { spec: 'add acme-web widget', touches: 'src/' }),
   ]);
 
   try {
@@ -223,9 +223,9 @@ test('detached-dispatch: flag ON + eligible (single-item, claude-cli) — beat r
 test('detached-dispatch (phase B): flag ON + a co-located batch (group.length > 1) DETACHES as one group — every member carries the SAME group pgid, the beat returns before completion', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-503', 'item.captured', { source: 'cli', text: 'acme-web part 1' }),
-    makeEvent('conductor', 'WI-503', 'item.queued', { spec: 'acme-web part 1', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-503', 'item.queued', { spec: 'acme-web part 1', touches: 'src/shared/' }),
     makeEvent('cli', 'WI-504', 'item.captured', { source: 'cli', text: 'acme-web part 2' }),
-    makeEvent('conductor', 'WI-504', 'item.queued', { spec: 'acme-web part 2', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-504', 'item.queued', { spec: 'acme-web part 2', touches: 'src/shared/' }),
   ]);
 
   try {
@@ -295,7 +295,7 @@ test('detached-dispatch (phase B): flag ON + a co-located batch (group.length > 
 test('detached-dispatch: collection drains a GREEN exit file through the real gate → merge path', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-505', 'item.captured', { source: 'cli', text: 'acme-web collected feature' }),
-    makeEvent('conductor', 'WI-505', 'item.queued', { spec: 'acme-web collected feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-505', 'item.queued', { spec: 'acme-web collected feature', touches: 'src/' }),
   ]);
 
   try {
@@ -363,7 +363,7 @@ test('detached-dispatch: collection drains a GREEN exit file through the real ga
 test('detached-dispatch: collection drains a RED exit file through the existing no-commit/crash path (never a merge)', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-506', 'item.captured', { source: 'cli', text: 'acme-web red feature' }),
-    makeEvent('conductor', 'WI-506', 'item.queued', { spec: 'acme-web red feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-506', 'item.queued', { spec: 'acme-web red feature', touches: 'src/' }),
   ]);
 
   try {
@@ -424,7 +424,7 @@ test('detached-dispatch: collection drains a RED exit file through the existing 
 test('detached-dispatch: collection drains an AUTH exit file through the same auth-handling path as a sync build (never a generic crash)', async () => {
   const { repoRoot, ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-513', 'item.captured', { source: 'cli', text: 'acme-web auth-failed feature' }),
-    makeEvent('conductor', 'WI-513', 'item.queued', { spec: 'acme-web auth-failed feature', touches: 'src/' }),
+    makeEvent('reactor', 'WI-513', 'item.queued', { spec: 'acme-web auth-failed feature', touches: 'src/' }),
   ]);
 
   try {
@@ -493,7 +493,7 @@ test('collectDetachedBuilds: authFailure:true decodes to a resolved ProviderResu
   const PGID = 777003;
   const { ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-514', 'item.captured', { source: 'cli', text: 'auth-failed solo' }),
-    makeEvent('conductor', 'WI-514', 'item.queued', { spec: 'auth-failed solo', touches: 'src/' }),
+    makeEvent('reactor', 'WI-514', 'item.queued', { spec: 'auth-failed solo', touches: 'src/' }),
     makeEvent('dispatch', 'WI-514', 'build.dispatched', { attempt: 1, worktree: wtPath, branch, pgid: PGID, provider: 'claude-cli' }),
   ]);
 
@@ -518,7 +518,7 @@ test('collectDetachedBuilds: authFailure:true decodes to a resolved ProviderResu
 test('collectDetachedBuilds: ignores a legacy pid-only build (no pgid) — never collected here', async () => {
   const { ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-507', 'item.captured', { source: 'cli', text: 'legacy sync build' }),
-    makeEvent('conductor', 'WI-507', 'item.queued', { spec: 'legacy sync build', touches: 'src/' }),
+    makeEvent('reactor', 'WI-507', 'item.queued', { spec: 'legacy sync build', touches: 'src/' }),
     makeEvent('dispatch', 'WI-507', 'build.dispatched', { attempt: 1, worktree: '/tmp/wt', branch: 'wi-507-a1', pid: 12345 }),
   ]);
 
@@ -538,7 +538,7 @@ test('collectDetachedBuilds: ignores a legacy pid-only build (no pgid) — never
 test('collectDetachedBuilds: a pgid-bearing build with NO exit file yet is deferred (not collected)', async () => {
   const { ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-508', 'item.captured', { source: 'cli', text: 'still running' }),
-    makeEvent('conductor', 'WI-508', 'item.queued', { spec: 'still running', touches: 'src/' }),
+    makeEvent('reactor', 'WI-508', 'item.queued', { spec: 'still running', touches: 'src/' }),
     makeEvent('dispatch', 'WI-508', 'build.dispatched', { attempt: 1, worktree: '/tmp/wt', branch: 'wi-508-a1', pgid: 999 }),
   ]);
 
@@ -558,9 +558,9 @@ test('collectDetachedBuilds (phase B): a multi-item detached group collapses to 
   const PGID = 777001;
   const { ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-509', 'item.captured', { source: 'cli', text: 'carrier' }),
-    makeEvent('conductor', 'WI-509', 'item.queued', { spec: 'carrier', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-509', 'item.queued', { spec: 'carrier', touches: 'src/shared/' }),
     makeEvent('cli', 'WI-510', 'item.captured', { source: 'cli', text: 'companion' }),
-    makeEvent('conductor', 'WI-510', 'item.queued', { spec: 'companion', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-510', 'item.queued', { spec: 'companion', touches: 'src/shared/' }),
     // Both dispatched detached into the SAME worktree/branch/pgid (a co-located batch, phase B).
     makeEvent('dispatch', 'WI-509', 'build.dispatched', { attempt: 1, worktree: wtPath, branch, pgid: PGID, provider: 'claude-cli' }),
     makeEvent('dispatch', 'WI-510', 'build.dispatched', { attempt: 1, worktree: wtPath, branch, pgid: PGID, provider: 'claude-cli' }),
@@ -594,9 +594,9 @@ test('collectDetachedBuilds (phase B): a multi-item group with NO carrier exit f
   const PGID = 777002;
   const { ledgerDir, runsDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-511', 'item.captured', { source: 'cli', text: 'carrier' }),
-    makeEvent('conductor', 'WI-511', 'item.queued', { spec: 'carrier', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-511', 'item.queued', { spec: 'carrier', touches: 'src/shared/' }),
     makeEvent('cli', 'WI-512', 'item.captured', { source: 'cli', text: 'companion' }),
-    makeEvent('conductor', 'WI-512', 'item.queued', { spec: 'companion', touches: 'src/shared/' }),
+    makeEvent('reactor', 'WI-512', 'item.queued', { spec: 'companion', touches: 'src/shared/' }),
     makeEvent('dispatch', 'WI-511', 'build.dispatched', { attempt: 1, worktree: wtPath, branch, pgid: PGID, provider: 'claude-cli' }),
     makeEvent('dispatch', 'WI-512', 'build.dispatched', { attempt: 1, worktree: wtPath, branch, pgid: PGID, provider: 'claude-cli' }),
   ]);
@@ -658,7 +658,7 @@ test('detached-dispatch (target lane, WI-079): flag ON + a registered-target sin
       name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
     }),
     makeEvent('cli', 'WI-601', 'item.captured', { source: 'cli', text: 'add acme widget', target: 'acme' }),
-    makeEvent('conductor', 'WI-601', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-601', 'item.queued', { spec: 'add acme widget', touches: 'src/' }),
   ]);
 
   try {
@@ -734,7 +734,7 @@ test('detached-dispatch (target lane, WI-172): collection decodes an AUTH exit f
       name: 'acme', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
     }),
     makeEvent('cli', 'WI-602', 'item.captured', { source: 'cli', text: 'acme auth-failed widget', target: 'acme' }),
-    makeEvent('conductor', 'WI-602', 'item.queued', { spec: 'acme auth-failed widget', touches: 'src/' }),
+    makeEvent('reactor', 'WI-602', 'item.queued', { spec: 'acme auth-failed widget', touches: 'src/' }),
   ]);
 
   try {
@@ -788,7 +788,7 @@ test('detached-dispatch (target lane, WI-172): collection decodes an AUTH exit f
     }
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-603', 'item.captured', { source: 'cli', text: 'plane passthrough feature' }),
-      makeEvent('conductor', 'WI-603', 'item.queued', { spec: 'plane passthrough feature', touches: 'src/' }),
+      makeEvent('reactor', 'WI-603', 'item.queued', { spec: 'plane passthrough feature', touches: 'src/' }),
       makeEvent('dispatch', 'WI-603', 'build.dispatched', {
         attempt: 1, worktree: untargetedWt, branch: untargetedBranch, pgid: 606062, provider: 'claude-cli',
       }),

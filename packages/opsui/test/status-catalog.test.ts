@@ -159,7 +159,7 @@ test('a decision-parked item renders the IDENTICAL badge tone on Missions and th
         id: 'WI-952',
         state: 'parked',
         parkKind: 'decision',
-        parkReason: 'conductor: needs an operator decision on the boundary',
+        parkReason: 'router: needs an operator decision on the boundary',
         spec: 'A decision-parked item',
       },
     ],

@@ -155,7 +155,7 @@ async function runProvisionalAcceptOnly(
 
 /** A queued event declaring `touches` — the fold copies this verbatim to rec.touches. */
 function queuedEvent(wi: string, spec: string, touches: string, ts: string): LedgerEvent {
-  return makeEvent('conductor', wi, 'item.queued', { spec, touches }, ts);
+  return makeEvent('reactor', wi, 'item.queued', { spec, touches }, ts);
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +782,7 @@ test('fold: provisional item.accepted transitions merged→accepted', () => {
 test('fold: human item.accepted does NOT set provisionalAccept flag', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-201', 'item.captured', { source: 'cli', text: 'build x' }),
-    makeEvent('conductor', 'WI-201', 'item.queued', { spec: 'build x', touches: 'src/' }),
+    makeEvent('reactor', 'WI-201', 'item.queued', { spec: 'build x', touches: 'src/' }),
     makeEvent('dispatch', 'WI-201', 'item.merged', { commit: 'xyz', deployed: false }),
     makeEvent('operator', 'WI-201', 'item.accepted', { by: 'operator' }),
   ];
@@ -795,10 +795,10 @@ test('fold: human item.accepted does NOT set provisionalAccept flag', () => {
 test('fold: existing acceptance semantics preserved (merged is terminal; accepted is one legit transition)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-202', 'item.captured', { source: 'cli', text: 'build y' }),
-    makeEvent('conductor', 'WI-202', 'item.queued', { spec: 'build y', touches: 'src/' }),
+    makeEvent('reactor', 'WI-202', 'item.queued', { spec: 'build y', touches: 'src/' }),
     makeEvent('dispatch', 'WI-202', 'item.merged', { commit: 'zzz', deployed: false }),
     // Stray event that should be no-op on merged state
-    makeEvent('conductor', 'WI-202', 'item.parked', { reason: 'stray' }),
+    makeEvent('reactor', 'WI-202', 'item.parked', { reason: 'stray' }),
     // item.accepted is still the one legit transition
     makeEvent('operator', 'WI-202', 'item.accepted', { by: 'operator' }),
   ];

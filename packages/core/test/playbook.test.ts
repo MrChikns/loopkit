@@ -285,7 +285,7 @@ test('config: playbook.maxLines non-integer throws', () => {
 test('dispatch: build prompt includes REPO PLAYBOOK when playbook file exists', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', {
+    makeEvent('reactor', 'WI-001', 'item.queued', {
       spec: 'add feature to src/app.ts',
       touches: 'src/',
     }),
@@ -353,7 +353,7 @@ test('dispatch: build prompt includes REPO PLAYBOOK when playbook file exists', 
 test('dispatch: build prompt has no REPO PLAYBOOK when playbook disabled in config', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', {
+    makeEvent('reactor', 'WI-002', 'item.queued', {
       spec: 'add feature to src/app.ts',
       touches: 'src/',
     }),
@@ -408,7 +408,7 @@ test('dispatch: build prompt has no REPO PLAYBOOK when playbook disabled in conf
 test('dispatch: build proceeds cold when playbook file is absent (fail-open)', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-003', 'item.captured', { source: 'cli', text: 'build feature' }),
-    makeEvent('conductor', 'WI-003', 'item.queued', {
+    makeEvent('reactor', 'WI-003', 'item.queued', {
       spec: 'add feature to src/feature.ts',
       touches: 'src/',
     }),

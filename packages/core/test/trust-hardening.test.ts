@@ -121,7 +121,7 @@ function neutralClassifyConfig(overrides: Partial<AcceptanceTierClassifyConfig> 
 test('evidence: dispatch records base/head/changedFiles/gateCommand on item.merged', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build a thing' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'add a file', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'add a file', touches: 'src/' }),
   ]);
   try {
     await runDispatch({
@@ -152,7 +152,7 @@ test('evidence: dispatch records base/head/changedFiles/gateCommand on item.merg
 test('evidence: fold retains merge evidence on the item record', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-002', 'item.queued', { spec: 's', touches: 'src/' }),
+    makeEvent('reactor', 'WI-002', 'item.queued', { spec: 's', touches: 'src/' }),
     makeEvent('dispatch', 'WI-002', 'item.merged', {
       commit: 'abc1234', deployed: false,
       baseSha: 'base000', headSha: 'head111',
@@ -341,7 +341,7 @@ test('tier: an ABSENT-evidence approved merge (gate ran, no changedFiles, no tou
 test('fold: item.merged carrying changedFilesTruncated is retained on the record', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-050', 'item.captured', { source: 'cli', text: 'big change' }),
-    makeEvent('conductor', 'WI-050', 'item.queued', { spec: 's', touches: 'src/' }),
+    makeEvent('reactor', 'WI-050', 'item.queued', { spec: 's', touches: 'src/' }),
     makeEvent('reactor', 'WI-050', 'item.merged', {
       commit: 'abc1234', deployed: false,
       baseSha: 'base000', headSha: 'head111', gateCommand: 'npm test',
@@ -398,7 +398,7 @@ test('tier: judge-unavailable on a no-code item does NOT floor (nothing to revie
 test('fold: review.verdict:unavailable is retained as a judgeVerdict', () => {
   const events: LedgerEvent[] = [
     makeEvent('cli', 'WI-003', 'item.captured', { source: 'cli', text: 'x' }),
-    makeEvent('conductor', 'WI-003', 'item.queued', { spec: 's', touches: 'src/' }),
+    makeEvent('reactor', 'WI-003', 'item.queued', { spec: 's', touches: 'src/' }),
     makeEvent('dispatch', 'WI-003', 'review.verdict', {
       verdict: 'unavailable', confidence: 0, specSatisfied: 'unknown',
       scopeCreep: 'unknown', testTheatre: 'unknown', reasons: ['judge unavailable: timeout'],
@@ -475,7 +475,7 @@ test('sensitivity: dispatch parks a private item fail-closed when no provider is
   // allowlist (default), so the build parks fail-closed instead of routing to the internal chain.
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'secret work', sensitivity: 'private' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'do secret thing', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'do secret thing', touches: 'src/' }),
   ]);
   try {
     await runDispatch({
@@ -555,7 +555,7 @@ test('sensitivity(planning lane): a private item parks fail-closed, the claude p
     const spy = spyClaudeProvider();
     const privItem = fold([
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'secret plan', sensitivity: 'private' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'decompose secret', lane: 'planning' } as import('../src/schema.js').ItemQueuedData),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'decompose secret', lane: 'planning' } as import('../src/schema.js').ItemQueuedData),
     ]).items.get('WI-001')!;
 
     const results = await runPlanningLane(
@@ -593,7 +593,7 @@ test('sensitivity(target lane): a private targeted item parks fail-closed, the c
     const foldRes = fold([
       makeEvent('cli', 'tgt', 'target.registered', { name: 'tgt', repoPath: targetRoot, manifestHash: 'h', defaultBranch: 'main' }),
       makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'secret target work', sensitivity: 'private', target: 'tgt' }),
-      makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'do it', target: 'tgt' } as import('../src/schema.js').ItemQueuedData),
+      makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'do it', target: 'tgt' } as import('../src/schema.js').ItemQueuedData),
     ]);
     const item = foldRes.items.get('WI-001')!;
 
@@ -625,7 +625,7 @@ test('sensitivity(target lane): a private targeted item parks fail-closed, the c
 test('deploy: merge with empty deployCommand appends no deploy events', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'build' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: 'add file', touches: 'src/' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'add file', touches: 'src/' }),
   ]);
   try {
     // Framework default deployCommand is '' — assert that first (the "deploy off by default" claim).
@@ -655,7 +655,7 @@ test('deploy: merge with empty deployCommand appends no deploy events', async ()
 test('WI-176: the already-shipped retirement records deployed:false (it observes a merge, never a deploy)', async () => {
   const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
     makeEvent('cli', 'WI-600', 'item.captured', { source: 'cli', text: 'stale requeue' }),
-    makeEvent('conductor', 'WI-600', 'item.queued', { spec: 'already done', touches: 'src/' }),
+    makeEvent('reactor', 'WI-600', 'item.queued', { spec: 'already done', touches: 'src/' }),
   ]);
   try {
     // The WI's code is ALREADY on master under a non-ledger commit tagged `(WI-600)` — the exact

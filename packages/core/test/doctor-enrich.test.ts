@@ -224,7 +224,7 @@ test('doctor orphan path (via runReactor): build.crashed carries gitLogSince + s
     const deadPid = 99999997;
     await appendEvents(ledgerDir, [
       makeEvent('cli', 'WI-300', 'item.captured', { source: 'cli', text: 'orphan enrich test' }),
-      makeEvent('conductor', 'WI-300', 'item.queued', { spec: 'build it', touches: 'src/' }),
+      makeEvent('reactor', 'WI-300', 'item.queued', { spec: 'build it', touches: 'src/' }),
       makeEvent('dispatch', 'WI-300', 'build.dispatched', { attempt: 1, pid: deadPid }),
     ]);
 

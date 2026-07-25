@@ -26,7 +26,7 @@ const worktreeGone: WorktreeProbe = () => false;
 function buildDetachedEvents(item: string, pgid: number, dispatchedAt: string): LedgerEvent[] {
   return [
     makeEvent('operator', item, 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', item, 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', item, 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', item, 'build.dispatched', { attempt: 1, pgid }, dispatchedAt),
   ];
 }
@@ -34,7 +34,7 @@ function buildDetachedEvents(item: string, pgid: number, dispatchedAt: string): 
 function buildBldEvents(item: string, pid: number, extra?: LedgerEvent[]): LedgerEvent[] {
   return [
     makeEvent('operator', item, 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', item, 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', item, 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', item, 'build.dispatched', { attempt: 1, pid }, '2026-01-01T00:02:00Z'),
     ...(extra ?? []),
   ];
@@ -43,7 +43,7 @@ function buildBldEvents(item: string, pid: number, extra?: LedgerEvent[]): Ledge
 test('doctor: no orphans when no building items', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'test' }),
-    makeEvent('conductor', 'WI-001', 'item.queued', { spec: '' }),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: '' }),
   ];
   const result = fold(events);
   const dr = runDoctor(result, deadProbe);
@@ -84,7 +84,7 @@ test('doctor: breaker trips at N attempts', () => {
   // Simulate 3 previous builds (attempts exhausted)
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-004', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-004', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-004', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
     // Attempt 1 — crashed
     makeEvent('dispatch', 'WI-004', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
     makeEvent('doctor', 'WI-004', 'build.crashed', { reason: 'orphan' }, '2026-01-01T00:10:00Z'),
@@ -121,7 +121,7 @@ test('doctor: 3 consecutive dead-pid orphan reaps with the same (empty) stderr s
   // the ledger. breakerN is set well above 3 so a plain breaker trip could not explain the park.
   let events: LedgerEvent[] = [
     makeEvent('operator', 'WI-500', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-500', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-500', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
   ];
   for (let attempt = 1; attempt <= 3; attempt++) {
     events = [
@@ -149,7 +149,7 @@ test('doctor: 3 consecutive dead-pid orphan reaps with the same (empty) stderr s
 test('doctor: differing fingerprints never trigger thrashing (falls through to plain requeue)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-501', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-501', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-501', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-501', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
     makeEvent('doctor', 'WI-501', 'build.crashed', { reason: 'orphan-detected', stderrTail: 'TypeError: x is not a function' }, '2026-01-01T00:10:00Z'),
     makeEvent('dispatch', 'WI-501', 'build.dispatched', { attempt: 2, pid: 2 }, '2026-01-01T00:11:00Z'),
@@ -173,7 +173,7 @@ test('doctor: differing fingerprints never trigger thrashing (falls through to p
 test('doctor: an already-parked (thrashed) item is never re-parked on a later beat', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-502', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-502', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-502', 'item.queued', { spec: '' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-502', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-01-01T00:02:00Z'),
     makeEvent('doctor', 'WI-502', 'build.crashed', { reason: 'orphan-detected', stderrTail: '' }, '2026-01-01T00:10:00Z'),
     makeEvent('dispatch', 'WI-502', 'build.dispatched', { attempt: 2, pid: 2 }, '2026-01-01T00:11:00Z'),
@@ -194,7 +194,7 @@ test('doctor: an already-parked (thrashed) item is never re-parked on a later be
 test('doctor: item without pid is not checkable (not orphaned)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-005', 'item.captured', { source: 'cli', text: 'test' }),
-    makeEvent('conductor', 'WI-005', 'item.queued', { spec: '' }),
+    makeEvent('reactor', 'WI-005', 'item.queued', { spec: '' }),
     makeEvent('dispatch', 'WI-005', 'build.dispatched', { attempt: 1 }), // no pid
   ];
   const result = fold(events);
@@ -396,7 +396,7 @@ test('doctor: exit-file present + worktree gone + stale but NO clock is deferred
 test('doctor: post-collection-limbo respects the breaker (parks at the attempt limit)', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-408', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-408', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-408', 'item.queued', { spec: 'spec' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-408', 'build.dispatched', { attempt: 3, pgid: 60005 }, '2026-01-01T00:02:00Z'),
   ];
   const result = fold(events);
@@ -573,7 +573,7 @@ test('stall: null progress signal → do not reap (absence is not evidence)', ()
 test('stall: at the breaker limit, a stalled build parks instead of requeue', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-105', 'item.captured', { source: 'cli', text: 't' }, '2026-01-01T00:00:00Z'),
-    makeEvent('conductor', 'WI-105', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
+    makeEvent('reactor', 'WI-105', 'item.queued', { spec: 's' }, '2026-01-01T00:01:00Z'),
     makeEvent('dispatch', 'WI-105', 'build.dispatched', { attempt: 3, pid: 111 }, '2026-01-01T00:02:00Z'),
   ];
   const result = fold(events);
