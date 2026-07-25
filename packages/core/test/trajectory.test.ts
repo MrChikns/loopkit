@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { makeEvent, LedgerEvent } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { runDispatch } from '../src/beats/dispatch.js';
-import { projectTrajectory } from '../src/trajectory.js';
+import { projectTrajectory, classifyReason } from '../src/trajectory.js';
 import { fold } from '../src/fold.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { loadConfig, CONFIG_DEFAULTS, LoopkitConfig } from '../src/config.js';
@@ -257,6 +257,10 @@ function makeAttemptChain(opts: {
   costAt?: string;
   judgeVerdict?: 'pass' | 'fail' | 'unparseable';
   judgeAt?: string;
+  /** Override the terminal event's default `reason` (see the per-type defaults below). */
+  terminalReason?: string;
+  /** Set the terminal event's `parkKind` (only some item.parked-adjacent shapes carry this in production). */
+  terminalParkKind?: string;
 }): LedgerEvent[] {
   const evs: LedgerEvent[] = [];
 
@@ -293,9 +297,10 @@ function makeAttemptChain(opts: {
   evs.push(makeEvent('dispatch', opts.wi, opts.terminalType, {
     ...(opts.terminalType === 'item.merged' ? { commit: 'abc123', deployed: false } : {}),
     ...(opts.terminalType === 'gate.passed' ? { tests: 'green' } : {}),
-    ...(opts.terminalType === 'gate.failed' ? { reason: 'tests-red' } : {}),
-    ...(opts.terminalType === 'build.crashed' ? { reason: 'timeout' } : {}),
-    ...(opts.terminalType === 'gate.parked' ? { reason: 'spine' } : {}),
+    ...(opts.terminalType === 'gate.failed' ? { reason: opts.terminalReason ?? 'tests-red' } : {}),
+    ...(opts.terminalType === 'build.crashed' ? { reason: opts.terminalReason ?? 'timeout' } : {}),
+    ...(opts.terminalType === 'gate.parked' ? { reason: opts.terminalReason ?? 'spine' } : {}),
+    ...(opts.terminalParkKind !== undefined ? { parkKind: opts.terminalParkKind } : {}),
   } as Record<string, unknown>, opts.terminalAt));
 
   return evs;
@@ -409,6 +414,191 @@ test('trajectory: crash requeue → outcome=crashed, no merge', () => {
   assert.equal(a.outcome, 'crashed');
   assert.equal(result.aggregates.merges, 0);
   assert.equal(result.aggregates.firstPassMergeRate, 0);
+});
+
+// ---------------------------------------------------------------------------
+// WI-159: reason/parkKind carry-through + classifyReason() + parkRateByClass
+// ---------------------------------------------------------------------------
+
+test('classifyReason: no-commit prefix (real dispatch.ts shape) → no-commit class', () => {
+  // Real production string from dispatch.ts:3245 (log path suffix elided here — the
+  // classifier only needs the prefix).
+  assert.equal(
+    classifyReason('no-commit: agent produced no commit (log: .ai/runs/loopkit/WI-001-agent.err)'),
+    'no-commit',
+  );
+});
+
+test('classifyReason: gate.parked literals (touches-overstep, spine, batch-attribution)', () => {
+  assert.equal(classifyReason('touches-overstep'), 'touches-overstep');
+  assert.equal(classifyReason('spine'), 'spine');
+  assert.equal(classifyReason('batch-attribution'), 'batch-attribution');
+});
+
+test('classifyReason: breaker/infra/sensitivity prefixes and merge-conflict text', () => {
+  assert.equal(classifyReason('breaker: 5 attempts exhausted — tests-red'), 'breaker');
+  assert.equal(classifyReason("infra: planner prompt missing: .ai/loops/prompts/x.md"), 'infra');
+  assert.equal(
+    classifyReason('sensitivity(low): no allowed+healthy provider for planning — parked fail-closed'),
+    'sensitivity',
+  );
+  assert.equal(classifyReason("target merge conflict on 'master'"), 'merge-conflict');
+});
+
+test('classifyReason: unknown/unmatched reason string → other (never dropped, never guessed)', () => {
+  assert.equal(classifyReason('some brand new failure mode nobody has seen yet'), 'other');
+});
+
+test('classifyReason: undefined reason → other', () => {
+  assert.equal(classifyReason(undefined), 'other');
+});
+
+test('trajectory: gate.parked terminal (real touches-overstep shape) carries reason + reasonClass, no parkKind', () => {
+  // Mirrors the real dispatch.ts:3409 shape — gate.parked{reason:'touches-overstep'} with
+  // NO parkKind on this event (parkKind only appears on the companion item.parked event,
+  // which is not a TERMINAL_TYPES member and therefore not the one trajectory reads).
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-159a',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T10:00:00Z',
+      terminalType: 'gate.parked',
+      terminalAt: '2026-07-10T10:05:00Z',
+      terminalReason: 'touches-overstep',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  assert.equal(result.attempts.length, 1);
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'gate-parked', 'outcome union must be unchanged');
+  assert.equal(a.reason, 'touches-overstep');
+  assert.equal(a.parkKind, undefined, 'gate.parked in production carries no parkKind field');
+  assert.equal(a.reasonClass, 'touches-overstep');
+});
+
+test('trajectory: gate.failed terminal with parkKind present (item.parked-adjacent shape) carries both', () => {
+  // Some dispatch paths (e.g. no-commit, dirty-tree) pair gate.failed with a companion
+  // item.parked{parkKind:'ops'}; exercise a terminal event that itself carries parkKind
+  // to prove the field is read generically off terminalEv.data, not type-gated.
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-159b',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T09:00:00Z',
+      terminalType: 'gate.failed',
+      terminalAt: '2026-07-10T09:10:00Z',
+      terminalReason: 'no-commit: agent produced no commit (log: .ai/runs/loopkit/WI-159b-agent.err)',
+      terminalParkKind: 'ops',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'gate-failed');
+  assert.equal(a.reason, 'no-commit: agent produced no commit (log: .ai/runs/loopkit/WI-159b-agent.err)');
+  assert.equal(a.parkKind, 'ops');
+  assert.equal(a.reasonClass, 'no-commit');
+});
+
+test('trajectory: merged attempt has no reason/parkKind/reasonClass (nothing to classify)', () => {
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-159c',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T10:00:00Z',
+      terminalType: 'gate.passed',
+      terminalAt: '2026-07-10T10:10:00Z',
+    }),
+    makeEvent('dispatch', 'WI-159c', 'item.merged', { commit: 'abc', deployed: false }, '2026-07-10T10:10:30Z'),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'merged');
+  assert.equal(a.reason, undefined);
+  assert.equal(a.parkKind, undefined);
+  assert.equal(a.reasonClass, undefined);
+});
+
+test('trajectory: in-flight attempt (no terminal event) has no reason/reasonClass', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('dispatch', 'WI-159d', 'build.dispatched', { attempt: 1, pid: 1 }, '2026-07-10T10:00:00Z'),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.outcome, 'in-flight');
+  assert.equal(a.reason, undefined);
+  assert.equal(a.reasonClass, undefined);
+});
+
+test('trajectory: unknown reason string on a park lands in reasonClass=other, never dropped', () => {
+  const events: LedgerEvent[] = [
+    ...makeAttemptChain({
+      wi: 'WI-159e',
+      attempt: 1,
+      dispatchedAt: '2026-07-10T10:00:00Z',
+      terminalType: 'gate.parked',
+      terminalAt: '2026-07-10T10:05:00Z',
+      terminalReason: 'a brand new park reason nobody has classified yet',
+    }),
+  ];
+
+  const result = projectTrajectory(events, { now: '2026-07-11T00:00:00Z' });
+  const a = result.attempts[0]!;
+  assert.equal(a.reason, 'a brand new park reason nobody has classified yet', 'raw reason must be preserved verbatim');
+  assert.equal(a.reasonClass, 'other', 'unmatched reason must fall into the explicit other class');
+});
+
+test('trajectory: parkRateByClass aggregates across mixed reasonClasses, excluding merged/in-flight from the denominator', () => {
+  const now = '2026-07-11T00:00:00Z';
+  const events: LedgerEvent[] = [
+    // Two touches-overstep parks
+    ...makeAttemptChain({
+      wi: 'WI-159f', attempt: 1, dispatchedAt: '2026-07-10T08:00:00Z',
+      terminalType: 'gate.parked', terminalAt: '2026-07-10T08:05:00Z', terminalReason: 'touches-overstep',
+    }),
+    ...makeAttemptChain({
+      wi: 'WI-159g', attempt: 1, dispatchedAt: '2026-07-10T08:10:00Z',
+      terminalType: 'gate.parked', terminalAt: '2026-07-10T08:15:00Z', terminalReason: 'touches-overstep',
+    }),
+    // One no-commit gate.failed
+    ...makeAttemptChain({
+      wi: 'WI-159h', attempt: 1, dispatchedAt: '2026-07-10T08:20:00Z',
+      terminalType: 'gate.failed', terminalAt: '2026-07-10T08:25:00Z',
+      terminalReason: 'no-commit: agent produced no commit (log: x)',
+    }),
+    // One unknown reason → other
+    ...makeAttemptChain({
+      wi: 'WI-159i', attempt: 1, dispatchedAt: '2026-07-10T08:30:00Z',
+      terminalType: 'gate.parked', terminalAt: '2026-07-10T08:35:00Z', terminalReason: 'never seen before',
+    }),
+    // One merged attempt — carries no reason, must be excluded from the parkRateByClass denominator
+    ...makeAttemptChain({
+      wi: 'WI-159j', attempt: 1, dispatchedAt: '2026-07-10T08:40:00Z',
+      terminalType: 'gate.passed', terminalAt: '2026-07-10T08:45:00Z',
+    }),
+    makeEvent('dispatch', 'WI-159j', 'item.merged', { commit: 'zzz', deployed: false }, '2026-07-10T08:45:30Z'),
+  ];
+
+  const result = projectTrajectory(events, { now, days: 14 });
+  assert.equal(result.aggregates.attempts, 5);
+
+  // Denominator = 4 classified attempts (the merged one is excluded).
+  const rates = result.aggregates.parkRateByClass;
+  assert.ok(Math.abs((rates['touches-overstep'] ?? 0) - 2 / 4) < 1e-9, 'touches-overstep must be 2/4');
+  assert.ok(Math.abs((rates['no-commit'] ?? 0) - 1 / 4) < 1e-9, 'no-commit must be 1/4');
+  assert.ok(Math.abs((rates['other'] ?? 0) - 1 / 4) < 1e-9, 'other must be 1/4');
+  assert.equal(rates['spine'], undefined, 'classes with zero occurrences must be absent, not zero-valued');
+
+  const sum = Object.values(rates).reduce((s, v) => s + (v ?? 0), 0);
+  assert.ok(Math.abs(sum - 1) < 1e-9, 'rates over present classes must sum to 1');
+});
+
+test('trajectory: empty stream → parkRateByClass is an empty object', () => {
+  const result = projectTrajectory([], { now: '2026-07-11T00:00:00Z' });
+  assert.deepEqual(result.aggregates.parkRateByClass, {});
 });
 
 test('trajectory: briefed vs unbriefed attempts → scoutCoverage', () => {
