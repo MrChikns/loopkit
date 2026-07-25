@@ -166,7 +166,7 @@ test('classifyPathsPlaneOnly: all plane files → planeOnly=true, escalated=[]',
   const planePrefixes = ['packages/engine/', '.ai/'];
   const escalationPatterns = ['eventContracts', 'billing'];
   const result = classifyPathsPlaneOnly(
-    ['packages/engine/src/foo.ts', '.ai/loops/prompts/conductor.md'],
+    ['packages/engine/src/foo.ts', '.ai/loops/prompts/router.md'],
     planePrefixes,
     escalationPatterns,
   );

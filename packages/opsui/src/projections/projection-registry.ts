@@ -51,7 +51,7 @@ export const commandProjectionDefinition: ProjectionDefinition<CommandData> = {
   description: 'Glance, act and drill without leaving the operating picture',
   route: '/command',
   mobilePriority: 1,
-  commandKeywords: ['home', 'founder', 'pulse', 'conductor', 'threads', 'conversation', 'messages', 'chat'],
+  commandKeywords: ['home', 'founder', 'pulse', 'router', 'threads', 'conversation', 'messages', 'chat'],
   requiredCapabilities: ['ledger.read', 'intent.submit'],
   staleAfterSeconds: 45,
   // Nav IA rewire: Command now composes the threadCard
@@ -162,10 +162,10 @@ export const companyProjectionDefinition: ProjectionDefinition<CompanyData> = {
 export const threadsProjectionDefinition: ProjectionDefinition<ThreadsData> = {
   id: 'threads',
   title: 'Threads',
-  description: 'Founder conversations with the conductor — full message history',
+  description: 'Founder conversations with the router — full message history',
   route: '/threads',
   mobilePriority: null,
-  commandKeywords: ['threads', 'conversation', 'messages', 'chat', 'conductor', 'replies'],
+  commandKeywords: ['threads', 'conversation', 'messages', 'chat', 'router', 'replies'],
   requiredCapabilities: ['ledger.read', 'intent.submit'],
   staleAfterSeconds: 45,
   stylesheet: 'src/styles/projections/threads.css',

@@ -86,10 +86,10 @@ export function ThreadDetailProjection(data: ThreadDetailData): string {
       ? `<p class="opsui-empty">No replies yet.</p>`
       : messages
           .map((m) => {
-            const dir = m.direction === 'out' ? 'conductor' : 'founder';
+            const dir = m.direction === 'out' ? 'router' : 'founder';
             return (
               `<div class="opsui-threads__msg opsui-threads__msg--${dir}">` +
-              `<span class="opsui-threads__msg-dir" aria-hidden="true">${dir === 'conductor' ? '🤖' : '👤'}</span>` +
+              `<span class="opsui-threads__msg-dir" aria-hidden="true">${dir === 'router' ? '🤖' : '👤'}</span>` +
               `<div class="opsui-threads__msg-body">` +
               `<p class="opsui-threads__msg-text">${esc(m.text)}</p>` +
               `<time class="opsui-threads__msg-ts" datetime="${esc(m.ts)}">${esc(fmtTs(m.ts))}</time>` +

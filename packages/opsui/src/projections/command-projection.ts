@@ -447,7 +447,7 @@ function conversationsLinkRegion(threads: ThreadCard[], threadsPage?: number): s
   const href = threadsPage && threadsPage > 1 ? `/threads?page=${threadsPage}` : '/threads';
   return Card({
     title: 'Conversations',
-    subtitle: 'Founder conversations with the conductor',
+    subtitle: 'Founder conversations with the router',
     headerAside: badge,
     body: `<p class="opsui-empty"><a href="${esc(href)}">View all conversations →</a></p>`,
   });

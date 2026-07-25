@@ -197,10 +197,10 @@ export function criteriaGate(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * The criteria half of the routing output contract, appended to whatever conductor prompt a
+ * The criteria half of the routing output contract, appended to whatever router prompt a
  * target repo happens to ship.
  *
- * It is INJECTED rather than merely documented in `prompts/conductor.md` because that file
+ * It is INJECTED rather than merely documented in `prompts/router.md` because that file
  * is copied into each target repo and versions independently — a target running a
  * pre-criteria copy would otherwise never emit CRITERIA and every one of its build routes
  * would fail the gate. Injecting makes the contract a property of the code doing the

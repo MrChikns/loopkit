@@ -122,7 +122,7 @@ the cost of a durable orchestrator, recorded in [limitations](limitations.md).
 
 ```mermaid
 flowchart TD
-  C(["item.captured"]) --> CL["Classify<br/><small>conductor prompt</small>"]
+  C(["item.captured"]) --> CL["Classify<br/><small>router prompt</small>"]
   CL --> ROUTE{"route"}
   ROUTE -->|build| GT["Ground the footprint<br/><small>deterministic wall</small>"]
   GT --> Q["queued"]
@@ -153,7 +153,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1411`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -254,13 +254,13 @@ flowchart TD
 
 - **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
   it automatically the moment the blocker **merges**
-  (`packages/core/src/beats/reactor.ts:2150`<!--cite:blockedVictimRelease-->). The plane creates these
+  (`packages/core/src/beats/reactor.ts:2158`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
 - **A blocker that never merges does not strand the victim silently.** After
   **24**<!--pin:blockedWaitTimeoutHours--> hours parked, the victim is re-parked as a `decision` with
   the blocker's state attached, so it reaches your desk instead of waiting forever
-  (`packages/core/src/beats/reactor.ts:2174`<!--cite:blockedVictimTimeout-->).
+  (`packages/core/src/beats/reactor.ts:2182`<!--cite:blockedVictimTimeout-->).
 - A `Touches`-less item is a wildcard and serialises the whole lane. Declaring a footprint is what
   buys parallelism.
 - The attempt budget here is dispatch's pick guard of **5**<!--pin:BUILDER_BREAKER_N--> —
@@ -444,12 +444,12 @@ counter, so by the time a park happened the budget was already spent.
 
 - **The plane files its own bugs.** When the pathologist classifies a park as a plane infrastructure
   bug it allocates a new work item, queues it, and blocks the victim on it
-  (`packages/core/src/beats/reactor.ts:2396`<!--cite:repairItemCapture-->). That never reaches your desk
+  (`packages/core/src/beats/reactor.ts:2404`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every reactor beat: orphaned-build detection, crashed-worker reaping, stale
-  session-claim reaping (`packages/core/src/beats/reactor.ts:3529`<!--cite:staleClaimReap-->), and a
+  session-claim reaping (`packages/core/src/beats/reactor.ts:3537`<!--cite:staleClaimReap-->), and a
   leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
@@ -503,7 +503,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4020`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4028`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -514,7 +514,7 @@ how often you have found something wrong.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:3673`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:3681`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier is
   never withheld: there is nothing to test, so plane health protects nothing for it.
 - **Your unanswered reply.** An item with an open reply or an unresolved proposal is held rather than
@@ -573,7 +573,7 @@ flowchart TD
   merged item ids in the environment; **your** script is what appends `deploy.succeeded` or
   `deploy.failed`.
 - Those events do exactly one thing when they arrive: set the item's `deployed` flag
-  (`packages/core/src/fold.ts:1396`<!--cite:foldDeploySucceeded-->). Nothing branches on it.
+  (`packages/core/src/fold.ts:1397`<!--cite:foldDeploySucceeded-->). Nothing branches on it.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
   authority. It carried opposite meanings in two lanes until WI-176 — the target lane wrote

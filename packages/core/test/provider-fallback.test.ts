@@ -409,10 +409,10 @@ async function makeReactorEnv(ledgerEvents: LedgerEvent[]): Promise<{
   mkdirSync(join(repoRoot, '.ai', 'runs', 'reactor'), { recursive: true });
   mkdirSync(join(repoRoot, '.ai', 'runs', 'dispatch'), { recursive: true });
   mkdirSync(ledgerDir, { recursive: true });
-  // Write conductor prompt
+  // Write router prompt
   const promptsDir = join(repoRoot, '.ai', 'loops', 'prompts');
   mkdirSync(promptsDir, { recursive: true });
-  writeFileSync(join(promptsDir, 'conductor.md'), 'Route items. ROUTE: answer REPLY: ok', 'utf8');
+  writeFileSync(join(promptsDir, 'router.md'), 'Route items. ROUTE: answer REPLY: ok', 'utf8');
 
   if (ledgerEvents.length > 0) {
     await appendEvents(ledgerDir, ledgerEvents);

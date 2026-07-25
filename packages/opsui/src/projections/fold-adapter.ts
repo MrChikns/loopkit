@@ -433,7 +433,7 @@ function buildDecisionBlock(item: FoldActiveItem): DecisionBlock {
 }
 
 // ─── Park-kind routing (ops parks are plane-owned — never an operator action target) ──
-// A parked item is a *decision* the operator must call (conductor park, product-spine,
+// A parked item is a *decision* the operator must call (router park, product-spine,
 // touches-overstep) only when tagged parkKind:'decision'. Everything else parked
 // (no-commit, merge conflict, tests-red, infra:*, breaker) is an *ops* failure the plane
 // owns; it never reaches the needs-you desk, it surfaces on the health lane and

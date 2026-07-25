@@ -3,7 +3,7 @@
  *
  * Steps (all guarded — one failure never silently skips the rest):
  *   (a) importer sync: legacy markdown seams → ledger (tombstone — a no-op once no seams remain)
- *   (b) route NEW captured items via the conductor prompt + provider
+ *   (b) route NEW captured items via the router prompt + provider
  *         routing writes item.routed + msg.out events (the reply is durable in the
  *         ledger; the console renders it from the fold — no seam mirror)
  *   (c) apply operator verbs: approved items → run gate → merge if green
@@ -17,7 +17,7 @@
  *
  * Operational lessons encoded here:
  *   - The reactor NEVER takes the dispatch lock (approvals must not wait behind builds).
- *   - Conductor prompt is the routing prompt-of-record (.ai/loops/prompts/conductor.md).
+ *   - Router prompt is the routing prompt-of-record (.ai/loops/prompts/router.md).
  *   - False-green guard: if new items remain unrouted and nothing was written, exit nonzero.
  *   - Legacy markdown seams, if any ever existed, are retired; the ledger is the sole store.
  */
@@ -566,7 +566,7 @@ function persistMergeGateLog(
 // ---------------------------------------------------------------------------
 
 /**
- * The three route classes the conductor prompt emits and this beat can act on
+ * The three route classes the router prompt emits and this beat can act on
  * deterministically. Each maps to a real ledger transition (see parseRoutingDecision):
  *   build  → item.queued  (dispatch picks it up, Touches-disjoint)
  *   park   → item.parked  (needs-you board — costly-and-irreversible / needs an operator call)
@@ -616,7 +616,7 @@ const VALID_PRIORITY = new Set(['blocker', 'high', 'medium', 'low']);
 const VALID_LANES = new Set(['engineering', 'marketing']);
 
 /**
- * Parse the conductor prompt's structured routing block. Doctrine (transcribe, don't
+ * Parse the router prompt's structured routing block. Doctrine (transcribe, don't
  * transform): the LLM emits key:value lines, this deterministic wall parses + validates them
  * into canonical events — never trust free prose to carry routing state. Robust to sloppy
  * output: unknown ROUTE → 'answer' (never lose the item), invalid MODEL/EFFORT/PRIORITY
@@ -1305,7 +1305,7 @@ function reparkReasonTokens(reason: string): Set<string> {
 /**
  * True when a re-park reason introduces NO significant token the prior park reason didn't
  * already carry — i.e. it restates the same reason with no new evidence. This is the
- * deterministic wall behind the approve→re-park loop: the conductor prompt already TELLS the
+ * deterministic wall behind the approve→re-park loop: the router prompt already TELLS the
  * router never to re-park an approved item with the same bundled reason, but a prompt-level
  * instruction alone can't hold it (a grounding-confused router re-parks the identical reason),
  * so a re-park that adds nothing new is rejected rather than accepted verbatim. Fail-open: an
@@ -1344,7 +1344,7 @@ async function stepRoute(
     const toRoute: ItemRecord[] = [];
     for (const rec of foldResult.items.values()) {
       // Never route an item with no text — a phantom/malformed capture would send the
-      // conductor prompt with "(empty)" to the provider and hallucinate a reply.
+      // router prompt with "(empty)" to the provider and hallucinate a reply.
       if ((rec.sourceText ?? '').trim().length === 0) continue;
       const speclessQueued = rec.state === 'queued' && (rec.spec ?? '').trim().length === 0;
       if (rec.state === 'captured' || speclessQueued) toRoute.push(rec);
@@ -1365,20 +1365,28 @@ async function stepRoute(
       };
     }
 
-    // Load the conductor prompt-of-record
-    const promptPath = join(opts.repoRoot, cfg.promptsDir, 'conductor.md');
-    let conductorPrompt: string;
+    // Load the router prompt-of-record. `router.md` was named `conductor.md` before the
+    // rename; a target that still ships the old filename keeps routing (with a loud stderr
+    // deprecation) rather than wedging its whole queue on a missing file.
+    const promptPath = join(opts.repoRoot, cfg.promptsDir, 'router.md');
+    const legacyPromptPath = join(opts.repoRoot, cfg.promptsDir, 'conductor.md');
+    let routerPrompt: string;
     try {
-      conductorPrompt = readFileSync(promptPath, 'utf8');
+      routerPrompt = readFileSync(promptPath, 'utf8');
     } catch {
-      return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: `conductor prompt missing: ${promptPath}` };
+      try {
+        routerPrompt = readFileSync(legacyPromptPath, 'utf8');
+        process.stderr.write(`[reactor] ${legacyPromptPath} is deprecated — rename it to router.md\n`);
+      } catch {
+        return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: `router prompt missing: ${promptPath}` };
+      }
     }
 
     // In degraded mode (tool-less fallback), prepend the degradation note to every prompt.
     const promptPrefix = degraded ? `${DEGRADED_ROUTING_NOTE}\n\n` : '';
 
-    // ACCEPTANCE CRITERIA contract (WI-193), APPENDED to whatever conductor prompt this target
-    // ships. It is injected rather than merely documented in prompts/conductor.md because that
+    // ACCEPTANCE CRITERIA contract (WI-193), APPENDED to whatever router prompt this target
+    // ships. It is injected rather than merely documented in prompts/router.md because that
     // file is copied per target and versions independently: a target on a pre-criteria copy
     // would emit no CRITERIA, every build route would fail the gate below, and the queue would
     // wedge. Injecting binds the contract to the code that enforces it, so the two cannot drift.
@@ -1463,7 +1471,7 @@ async function stepRoute(
  • PURE MULTI-SLICE EPIC (only slicing/sequencing remains — NO unresolved choice) → ROUTE: park, and SPEC MUST begin with "needs planner decomposition: <one line why>". This routes to the planner and leaves the operator's desk.
  • A SPECIFIC unresolved choice the approval did NOT settle (an architecture/scope/design fork) → ROUTE: park, and SPEC MUST begin with "needs decision: <the ONE precise open question>". State that exact question only — do NOT restate the original bundled reason.`
         : '';
-      const itemPrompt = `${promptPrefix}${conductorPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
+      const itemPrompt = `${promptPrefix}${routerPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
 
       if (opts.dryRun) {
         out.push(makeEvent('reactor', rec.id, 'item.routed', {
@@ -1515,7 +1523,7 @@ async function stepRoute(
 
       const result = await itemProvider.run({
         prompt: itemPrompt,
-        model: cfg.models.conductor,
+        model: cfg.models.router,
         cwd: routingCwd,
         // Read-only tools — omitted in degraded mode (tool-less provider).
         // The reactor owns the ledger writes now (item.queued/parked/routed +
@@ -1608,8 +1616,8 @@ async function stepRoute(
         queuedData.lane = decision.lane;
         out.push(makeEvent('reactor', rec.id, 'item.queued', queuedData));
       } else if (decision.route === 'park') {
-        // The conductor prompt defines park = "needs an operator decision/steer" (costly-and-irreversible
-        // OR ambiguous). Every conductor park is a decision park, counted by the SLO probe.
+        // The router prompt defines park = "needs an operator decision/steer" (costly-and-irreversible
+        // OR ambiguous). Every router park is a decision park, counted by the SLO probe.
         //
         // Do NOT bounce an already-approved item back onto the operator's needs-you desk.
         // When the operator unparks (approves) an item and the classifier STILL can't build it, the
@@ -1676,7 +1684,7 @@ async function stepRoute(
         route: decision.route,
         reply: reply.slice(0, 2000),
         provider: itemProvider.name,
-        model: cfg.models.conductor,
+        model: cfg.models.router,
         // The lane rides item.routed for every route class (build/park/answer).
         lane: decision.lane,
         // Router-stamped short title, when the model gave one.
@@ -1861,7 +1869,7 @@ async function stepEngageReplies(
 
       const result = await replyProvider.run({
         prompt: itemPrompt,
-        model: cfg.models.conductor,
+        model: cfg.models.router,
         cwd: opts.repoRoot,
         tools: ['Read', 'Grep', 'Glob'],
         timeoutMs: 3 * 60 * 1000,
@@ -4580,7 +4588,7 @@ async function stepHeal(
 // Evaluate every armed predicate; on a false→true edge (dedup by a stable armed-id)
 // emit item.captured so the deferred step flows through normal routing/dispatch.
 // - Non-escalation payloads queue directly (the payload already carries the routing
-//   decision — spec/touches/priority — so the conductor is skipped; there is no operator
+//   decision — spec/touches/priority — so the router is skipped; there is no operator
 //   to reply to). Dispatch picks it up Touches-disjoint next beat.
 // - Escalation-class payloads (priority 'escalation') park for the operator.
 // Id allocation + append run under the ledger lock so an armed capture can't collide

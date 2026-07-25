@@ -49,7 +49,7 @@ function cfg(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
 function initRepo(repoRoot: string): void {
   mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
   mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
   writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'engagement.md'), 'stub engagement prompt', 'utf8');
   const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
   g(['init', '-b', 'master']);

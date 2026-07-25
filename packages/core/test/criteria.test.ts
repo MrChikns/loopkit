@@ -244,7 +244,7 @@ async function routeOnce(opts: { block: string; capturedAt: string; seen?: strin
   const repoRoot = join(base, 'plane');
   const ledgerDir = join(base, 'ledger');
   mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt', 'utf8');
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt', 'utf8');
   await appendEvents(ledgerDir, [
     makeEvent('cli', 'WI-800', 'item.captured', { source: 'cli', text: 'add a banner' }, opts.capturedAt),
   ]);
@@ -304,11 +304,11 @@ test('reactor: the criteria contract is INJECTED into every routing prompt, what
   const seen: string[] = [];
   await routeOnce({ block: BLOCK_WITH_CRITERIA, capturedAt: AFTER_CUTOFF, seen });
   assert.ok(seen.length > 0, 'sanity: a routing call happened');
-  // The fixture's own conductor.md is the string 'stub routing prompt' — it contains no
+  // The fixture's own router.md is the string 'stub routing prompt' — it contains no
   // criteria contract at all, which is exactly the pre-criteria target-prompt situation.
   assert.ok(seen[0].includes('stub routing prompt'), 'sanity: the target prompt is still used');
   assert.ok(
     seen[0].includes(CRITERIA_CONTRACT),
-    'a target running an older conductor.md must still be told the CRITERIA contract, or its queue wedges',
+    'a target running an older router.md must still be told the CRITERIA contract, or its queue wedges',
   );
 });

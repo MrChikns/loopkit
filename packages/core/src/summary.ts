@@ -108,7 +108,7 @@ export function buildSummary(
   const recentMerged30d: Array<Record<string, unknown>> = [];
   const recentRejected: Array<Record<string, unknown>> = [];
   const recentAnswered: Array<Record<string, unknown>> = [];
-  // Compact thread projection: every item that has ever received a conductor reply, keyed by
+  // Compact thread projection: every item that has ever received a router reply, keyed by
   // its addressable source id, with the timestamp of its latest out-message. The console chat
   // SSE watches this to push a reply into the live thread. Independent of the `active` filter
   // above — a routed-but-not-queued item still has a reply to deliver.
@@ -132,7 +132,7 @@ export function buildSummary(
 
     const outs = rec.messages.filter((m) => m.direction === 'out');
     // A thread is any source-originated item — the console renders it whether or not the
-    // conductor has replied yet, so a freshly-captured intent shows up immediately. Threads
+    // router has replied yet, so a freshly-captured intent shows up immediately. Threads
     // render from the fold; there is no external message-file seam.
     const externalRef = rec.externalRef ?? (rec.source?.startsWith('ext:') ? rec.source.slice(4) : undefined);
     const isThread = outs.length > 0 || !!externalRef;

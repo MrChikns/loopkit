@@ -172,7 +172,7 @@ function buildGlance(threads: ThreadCard[]): GlanceMetric[] {
     {
       label: 'With replies',
       value: withReplies,
-      footnote: withReplies ? 'conductor has responded' : 'awaiting first reply',
+      footnote: withReplies ? 'router has responded' : 'awaiting first reply',
       state: withReplies > 0 ? 'success' : 'neutral',
       open: { kind: 'evidence', id: 'thread-list' },
     },

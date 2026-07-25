@@ -249,7 +249,7 @@ export interface ItemRecord {
   parkReason?: string;
   /**
    * The park INTENT kind ('decision' | 'ops') from item.parked.parkKind.
-   * 'decision' = the operator must call it (conductor park, product-spine/overstep); it reaches
+   * 'decision' = the operator must call it (router park, product-spine/overstep); it reaches
    * the operator needs-you desk. 'ops' = a mechanical/infra failure the plane owns (no-commit,
    * merge conflict, tests-red, infra:*, breaker); it routes to the health lane, never the desk.
    */
@@ -600,7 +600,7 @@ function narrowOnePrefix(prefix: string, spec: string): string {
  * named in the item's spec text. See `narrowOnePrefix`. A no-op when `spec` is absent or a
  * prefix isn't a bare root — existing well-scoped Touches pass through untouched. Runs at
  * fold time (a pure read-model derivation, not a ledger mutation): the raw `item.queued`
- * event keeps whatever the conductor declared; only the projected `rec.touches` used for
+ * event keeps whatever the router declared; only the projected `rec.touches` used for
  * dispatch scheduling narrows. That also means already-logged choked items self-heal the
  * moment this ships — no backfill needed.
  */
@@ -1061,8 +1061,9 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           rec.answeredAt = ev.ts;
           rec.claim = undefined;   // terminal — any claim lease is consumed
         } else if (rec.state === 'captured') {
-          // Non-terminal route (conductor/build): only transition from captured to routed.
-          // Guard: reactor emits queued then routed for conductor-route items, so we must
+          // Non-terminal route ('build', or the archived 'conductor' route the lane
+          // ADR-013 deleted used to emit): only transition from captured to routed.
+          // Guard: reactor emits queued then routed for such items, so we must
           // not regress an already-queued item.
           transition(rec, 'routed', ev.ts);
         }

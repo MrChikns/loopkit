@@ -1,5 +1,5 @@
 // Threads projection — WI-154. The founder's conversation
-// history with the conductor: every thread from the fold with its message
+// history with the router: every thread from the fold with its message
 // bodies, sorted most-recent-reply first, each carrying an inline reply
 // composer that posts via the command dispatcher's `intent.submit` action
 // (server fallback: direct POST to /intent). Composed ONLY from
@@ -36,10 +36,10 @@ function formatTs(ts: string): string {
 function messageList(thread: ThreadCard): string {
   if (thread.messages.length === 0) return '';
   const items = thread.messages.map((m) => {
-    const dir = m.direction === 'out' ? 'conductor' : 'founder';
+    const dir = m.direction === 'out' ? 'router' : 'founder';
     return (
       `<div class="opsui-threads__msg opsui-threads__msg--${esc(dir)}">` +
-      `<span class="opsui-threads__msg-dir" aria-hidden="true">${dir === 'conductor' ? '🤖' : '👤'}</span>` +
+      `<span class="opsui-threads__msg-dir" aria-hidden="true">${dir === 'router' ? '🤖' : '👤'}</span>` +
       `<div class="opsui-threads__msg-body">` +
       `<p class="opsui-threads__msg-text">${esc(m.text)}</p>` +
       (m.ts ? `<time class="opsui-threads__msg-ts" datetime="${esc(m.ts)}">${esc(formatTs(m.ts))}</time>` : '') +
@@ -165,7 +165,7 @@ function glanceRegion(metrics: GlanceMetric[]): string {
   return Card({
     variant: 'glance',
     title: 'Threads',
-    subtitle: 'Founder conversations with the conductor',
+    subtitle: 'Founder conversations with the router',
     body: `<div class="opsui-glancegrid">${tiles}</div>`,
   });
 }
@@ -190,9 +190,9 @@ export function conversationsRegion(
   if (total === 0) {
     return Card({
       title: 'Conversations',
-      subtitle: 'Most recent reply first — reply inline or via the conductor',
+      subtitle: 'Most recent reply first — reply inline or via the router',
       headerAside,
-      body: `<p class="opsui-empty">No conversations yet — send a message from the conductor.</p>`,
+      body: `<p class="opsui-empty">No conversations yet — send a message from the router.</p>`,
     });
   }
 
@@ -211,7 +211,7 @@ export function conversationsRegion(
 
   return Card({
     title: 'Conversations',
-    subtitle: 'Most recent reply first — reply inline or via the conductor',
+    subtitle: 'Most recent reply first — reply inline or via the router',
     headerAside,
     body: pageItems.map(threadCard).join('') + pager,
   });

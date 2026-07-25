@@ -176,7 +176,7 @@ test('narrowQueuedTouches: leaves touches unchanged when spec is undefined', () 
 });
 
 test('narrowQueuedTouches: narrows each prefix independently in a multi-prefix list', () => {
-  const spec = 'Update packages/engine/src/beats/dispatch.ts and .ai/loops/prompts/conductor.md.';
+  const spec = 'Update packages/engine/src/beats/dispatch.ts and .ai/loops/prompts/router.md.';
   assert.equal(
     narrowQueuedTouches('packages/engine/src,.ai/loops', spec),
     'packages/engine/src/beats,.ai/loops',

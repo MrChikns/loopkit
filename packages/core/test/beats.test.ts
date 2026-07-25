@@ -219,7 +219,7 @@ test('reactor: dry-run writes nothing to ledger', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Routing decision parser — the deterministic wall the conductor prompt feeds
+// Routing decision parser — the deterministic wall the router prompt feeds
 // ---------------------------------------------------------------------------
 
 test('parseRoutingDecision: build block yields structured queue fields', () => {
@@ -334,10 +334,10 @@ test('reactor: route step parses a build reply into item.queued + queued state',
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
-    // The route step reads the conductor prompt-of-record from the repo; a stub suffices
+    // The route step reads the router prompt-of-record from the repo; a stub suffices
     // (the fake provider ignores it and returns a fixed structured block).
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-050', 'item.captured', { source: 'test', text: 'add a banner' }),
@@ -384,12 +384,12 @@ test('reactor: route step parses a build reply into item.queued + queued state',
   }
 });
 
-test('reactor: route step carries EFFORT from the conductor block onto item.queued', async () => {
+test('reactor: route step carries EFFORT from the router block onto item.queued', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-051', 'item.captured', { source: 'test', text: 'a hard refactor' }),
@@ -435,7 +435,7 @@ test('reactor: a fresh item.queued from stepRoute kicks dispatch immediately', a
   try {
     delete process.env['LOOPKIT_AUTONOMY'];
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-360', 'item.captured', { source: 'test', text: 'add a banner' }),
@@ -479,7 +479,7 @@ test('reactor: the default kickDispatch no-ops when dispatchKickLabel is unset (
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-361', 'item.captured', { source: 'test', text: 'add a banner' }),
@@ -518,7 +518,7 @@ test('reactor: re-routes a spec-less queued item (unparked decision-park) into i
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     // An item parked at routing time (decision, never a spec) then unparked by the operator:
     // fold state = 'queued' with NO spec. Before the fix, dispatch skips it forever and no beat
@@ -579,7 +579,7 @@ test('reactor: approved epic re-park is parkKind:decomposition, NOT decision (no
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     // An approved (unparked) spec-less item that the classifier judges a multi-slice epic.
     await seedLedger(ledgerDir, [
@@ -621,7 +621,7 @@ test('reactor: a decision-park unparked then FRESHLY reclassified as decompositi
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     // A decision park (NOT decomposition) that the operator approves — the classifier only
     // discovers it's a multi-slice epic THIS beat, inside stepRoute's isDecomp reclassify.
@@ -681,7 +681,7 @@ test('reactor: unparking a decomposition park deterministically queues a lane=pl
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     // A decomposition park that the operator then unparks — this step
     // closes: previously nothing acted on this, the item just orphaned in 'queued'.
@@ -735,7 +735,7 @@ test('reactor: a decomposition park referencing an already-captured child auto-c
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     // The epic rests parked (decomposition) referencing its already-spun-off planning child —
     // exactly the state stepDecompositionUnpark leaves behind, and exactly what previously sat
@@ -776,7 +776,7 @@ test('reactor: approved item with a remaining specific choice re-parks as decisi
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-300', 'item.captured', { source: 'test', text: 'set up off-host backups' }),
@@ -814,7 +814,7 @@ test('reactor: a fresh park whose reason names a dependency stores the operator\
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-360', 'item.captured', {
@@ -858,7 +858,7 @@ test('reactor: a park with no dependency phrasing in the reason never gets a sto
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-301', 'item.captured', { source: 'test', text: 'set up hosted Postgres' }),
@@ -1269,7 +1269,7 @@ test('reactor: opts.runDir redirects ALL run-state off repoRoot (plane-home mode
   const runDir = join(planeHome, 'runs', 'loopkit');
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
 
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-060', 'item.captured', { source: 'test', text: 'add a banner' }),
@@ -4525,12 +4525,12 @@ test('reactor: bounded auto-requeue leaves a no-commit ops-park parked once the 
 // Conductor park emits parkKind:'decision', decisionCount excludes 'hold' parks
 // ---------------------------------------------------------------------------
 
-test('conductor park route emits item.parked with parkKind:decision', async () => {
+test('router park route emits item.parked with parkKind:decision', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
     mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
 
     await seedLedger(ledgerDir, [
@@ -4555,7 +4555,7 @@ test('conductor park route emits item.parked with parkKind:decision', async () =
     const parked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-090');
     assert.equal(parked.length, 1, 'one item.parked event');
     const d = parked[0].data as { reason: string; parkKind?: string };
-    assert.equal(d.parkKind, 'decision', 'conductor park must carry parkKind:decision');
+    assert.equal(d.parkKind, 'decision', 'router park must carry parkKind:decision');
   } finally {
     cleanDir(ledgerDir);
     cleanDir(repoRoot);
@@ -5010,7 +5010,7 @@ test('stepRoute includes attachment paths in the routing prompt', async () => {
   const repoRoot = makeTempDir();
   try {
     mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
-    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'conductor.md'), 'stub routing prompt');
+    writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'router.md'), 'stub routing prompt');
     mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
 
     // Item with an attachment marker in its sourceText.

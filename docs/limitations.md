@@ -119,7 +119,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   this). `item.merged.deployed` is now uniformly `false` on every lane — a merge observes that code
   landed, never that it deployed — and `deploy.succeeded` / `deploy.failed`, appended by the
   detached deploy script itself (it receives `DEPLOY_WI_IDS`), are the sole authority
-  (`packages/core/src/fold.ts:1396`<!--cite:foldDeploySucceeded-->). The plane spawns that script
+  (`packages/core/src/fold.ts:1397`<!--cite:foldDeploySucceeded-->). The plane spawns that script
   detached, stdio ignored, unreferenced, with no timeout and nothing awaiting it
   (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). What is *still*
   missing is a liveness contract on it: a deploy hook that dies before appending either event leaves
@@ -228,7 +228,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
   page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
   `item.respec`, which amends the item's `spec` *and* its acceptance criteria
-  (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->) — the fields builders and the judge are
+  (`packages/core/src/fold.ts:1411`<!--cite:foldRespec-->) — the fields builders and the judge are
   given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
   rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
   does not linger. *What remains:* the original capture text is still on the trail and still the right
