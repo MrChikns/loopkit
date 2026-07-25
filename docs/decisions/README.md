@@ -17,3 +17,4 @@ the console) is a different thing: that is the plane asking its operator about
 - [ADR-009](ADR-009-portability-completion.md) — the portability nudge gets a real completion path; an operator reply appends an event instead of sitting unparsed
 - [ADR-010](ADR-010-one-lane.md) — one parameterised build lane; lane is configuration, not a forked code path, and the plane must get smaller
 - [ADR-011](ADR-011-lane-collapse-measurement.md) — amends ADR-010's measurement clause (it was satisfiable by moving code sideways); refuses the batch-lane migration; a subsystem that runs without recording is worse than one that is off
+- [ADR-012](ADR-012-no-lanes.md) — there are no lanes and no modes: one build path, differences derived per item, two triggers (beat or CLI drain); the collapse itself is where the deletion is
