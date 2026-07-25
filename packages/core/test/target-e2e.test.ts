@@ -20,6 +20,7 @@ import { makeEvent } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { fold } from '../src/fold.js';
 import { runDispatch } from '../src/beats/dispatch.js';
+import { writeExitFile, usageJsonPath } from '../src/exitfile.js';
 import { manifestHash, readTargetManifest } from '../src/target.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
@@ -333,6 +334,92 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
 
     const gate = spawnSync('sh', ['-c', 'npm test'], { cwd: targetRoot, stdio: 'pipe' });
     assert.equal(gate.status, 0, 'the merged target repo main must be gate-green');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-178: a LONE detached targeted build with an EMPTY queue is still collected (was stranded in building forever)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-lone-detached-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const runsDir = join(base, 'runs');
+    mkdirSync(runsDir, { recursive: true });
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    // The worktree + branch a PRIOR beat's detached spawn would have left behind, carrying a real
+    // commit — the collection terminal needs something to gate/merge from.
+    const branch = 'wi-020-a1';
+    const wtPath = join(targetRoot, '..', `notes-wt-${branch}`);
+    git(targetRoot, ['worktree', 'add', '-b', branch, wtPath, 'main']);
+    writeFileSync(join(wtPath, 'src', 'extra.js'), 'export const marker = 7;\n', 'utf8');
+    writeFileSync(join(wtPath, 'test', 'extra.test.js'),
+      "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 7); });\n",
+      'utf8');
+    git(wtPath, ['add', '-A']);
+    git(wtPath, ['commit', '-m', 'feat(WI-020): lone detached marker']);
+
+    // Ledger: the item is 'building' with a pgid (detached) and NOTHING is queued. This is the
+    // exact shape that used to strand: the plane's collectDetachedBuilds skips targeted items on
+    // purpose (they must merge into the TARGET repo), so collectedWorkers stays empty too — and
+    // every spawn gate above the target lane returned before the lane's own collection scan could
+    // run. hasDetachedTargetBuild (dispatch.ts) is what keeps them falling through now.
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-020', 'item.captured', { source: 'cli', text: 'lone detached', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-020', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+      makeEvent('dispatch', 'WI-020', 'build.dispatched', {
+        attempt: 1, worktree: wtPath, branch, pgid: 778001, provider: 'claude-cli',
+      }, '2026-01-01T00:03:00Z'),
+    ]);
+
+    // GREEN exit sentinel under the artifact dir the target lane's collection scan reads.
+    const usagePath = usageJsonPath(runsDir, 'WI-020', 1);
+    writeFileSync(usagePath, JSON.stringify({ result: 'done', usage: { input_tokens: 10, output_tokens: 5 } }), 'utf8');
+    writeExitFile(runsDir, 'WI-020', 1, { exitCode: 0, usageJsonPath: usagePath });
+
+    // Pre-state: building, and the queue really is empty.
+    const before = fold(await loadAllEvents(ledgerDir));
+    assert.equal(before.items.get('WI-020')?.state, 'building');
+    assert.equal([...before.items.values()].filter(r => r.state === 'queued').length, 0, 'no queued item — this is the lone-in-flight case');
+
+    // A build run() would mean the lane re-dispatched instead of collecting: fail loudly.
+    // The judge call (no cwd) is answered with real verdict grammar so it stays advisory.
+    const provider: LlmProvider = {
+      name: 'claude-cli',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        if (req.cwd) throw new Error('provider.run must not be called — the build already finished; this beat must COLLECT it');
+        return { ok: true, text: 'VERDICT: pass\nCONFIDENCE: 0.9\nSPEC_SATISFIED: yes\nSCOPE_CREEP: none\nTEST_THEATRE: none\nREASONS:\n- collected' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      artifactRunsDir: runsDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-020')?.state, 'merged',
+      `the lone detached targeted build must reach a terminal state, not sit in 'building'; result: ${JSON.stringify(result.dispatched)}`);
+
+    // DECISIVE: it merged into the TARGET repo's main, i.e. through the target lane's own
+    // collection terminal — never the plane's.
+    const targetLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(targetLog, /lone detached marker/, 'the collected work must land on the target repo main');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

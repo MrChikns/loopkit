@@ -2868,10 +2868,29 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // keeps the picker reading a fold taken AFTER collection as the plane evolves.
     foldResult = fold(await loadAllEventsWithQuarantine(opts.ledgerDir));
 
+    // ── In-flight TARGETED detached builds (WI-178) ───────────────────────────
+    // A targeted item's detached build is deliberately EXCLUDED from collectDetachedBuilds
+    // (that pass gates/merges against the PLANE repo; a targeted build must merge into its
+    // target repo — see the `if (rec.target) continue;` guard there). Its terminal is owned by
+    // runTargetLane's own collection scan. So a detached targeted build contributes NOTHING to
+    // `collectedWorkers`, and — having already left the queue — nothing to `queued` either.
+    // Computed HERE, above the spawn gates, because every one of them (budget, quota,
+    // empty-queue, all-conflicting) used to return before the target lane was ever reached:
+    // a LONE targeted detached build therefore sat in 'building' forever — no gate, no merge,
+    // no park. Each gate below now falls through for it exactly as it does for collectedWorkers.
+    // This is a REACHABILITY fix, deliberately NOT a dwell timeout — the doctor already owns
+    // every 'building' ceiling, and the audit of which in-flight states may legitimately wait
+    // forever lives in doctor.ts ("IN-FLIGHT DWELL AUDIT (WI-178)").
+    const hasDetachedTargetBuild = !opts.dryRun && [...foldResult.items.values()].some(
+      r => r.state === 'building' && !!r.target && r.currentBuild?.pgid != null,
+    );
+
     // ADR-008 §3: SPAWN gates below (budget/quota/empty-queue) must never strand an
     // already-admitted, finished detached build. When collection found completed work,
     // each gate below skips picking NEW work (skipNewPicks) but falls through instead of
     // returning, so Phase 2 still drains collectedWorkers via the ordinary terminal loop.
+    // Same contract for `hasDetachedTargetBuild`, whose terminal is the target lane's own
+    // collection scan rather than the Phase-2 loop.
     let skipNewPicks = false;
     let skipNewPicksDetail: string | undefined;
 
@@ -2885,7 +2904,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       if (todaySpend >= dailyCeiling) {
         const detail = `daily budget reached: $${todaySpend.toFixed(4)} / $${dailyCeiling.toFixed(4)}`;
         process.stderr.write(`[dispatch] ${detail} — skipping picks\n`);
-        if (collectedWorkers.length === 0) {
+        if (collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
           return { dryRun: opts.dryRun ?? false, dispatched: [], totalEventsWritten: 0, detail };
         }
         skipNewPicks = true;
@@ -2908,7 +2927,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           ? `quota pressure: ${quotaPressure.breaches.map(b => `${b.provider}:${b.window}=${b.usedPct.toFixed(1)}%`).join(', ')} >= ${cfg.quotaPressure?.thresholdPct}% — skipping picks`
           : 'quota pressure: degraded (test probe) — skipping picks';
         process.stderr.write(`[dispatch] ${detail}\n`);
-        if (collectedWorkers.length === 0) {
+        if (collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
           return { dryRun: opts.dryRun ?? false, dispatched: [], totalEventsWritten: 0, detail };
         }
         skipNewPicks = true;
@@ -2963,7 +2982,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       }
     }
 
-    if (queued.length === 0 && collectedWorkers.length === 0) {
+    if (queued.length === 0 && collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
       return {
         dryRun: opts.dryRun ?? false,
         dispatched: results,
@@ -3038,7 +3057,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       groups.push([rec]);
     }
 
-    if (groups.length === 0 && planningQueued.length === 0 && targetedQueued.length === 0 && collectedWorkers.length === 0) {
+    if (groups.length === 0 && planningQueued.length === 0 && targetedQueued.length === 0 && collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
       return {
         dryRun: opts.dryRun ?? false,
         dispatched: [],
@@ -3150,10 +3169,10 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // Empty when no target is registered — legacy dispatch runs exactly as before.
     // Also run the lane when a prior beat left a DETACHED targeted build in flight (ADR-008 §3):
     // it is 'building' with a pgid but no fresh queued item, so targetedQueued would be empty — the
-    // lane's own collection scan drains it against its target repo.
-    const hasDetachedTargetBuild = !opts.dryRun && [...foldResult.items.values()].some(
-      r => r.state === 'building' && !!r.target && r.currentBuild?.pgid != null,
-    );
+    // lane's own collection scan drains it against its target repo. `hasDetachedTargetBuild` is
+    // computed WAY above (right after the collection re-fold) precisely so the spawn gates between
+    // there and here fall through for it instead of returning (WI-178) — moving it back down here
+    // would restore the stranding bug.
     if (targetedQueued.length > 0 || hasDetachedTargetBuild) {
       results.push(...await runTargetLane(opts, cfg, provider, foldResult, targetedQueued, runDir, registry));
     }
