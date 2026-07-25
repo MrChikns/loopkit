@@ -29,7 +29,8 @@
     "build": "tsc --project tsconfig.json",
     "clean:test": "node -e \"require('node:fs').rmSync('dist-test',{recursive:true,force:true})\"",
     "build:test": "npm run clean:test && tsc --project tsconfig.test.json",
-    "test": "npm run build && npm run build:test && node --test dist-test/test/*.test.js"
+    "test": "npm run build && npm run build:test && node --test dist-test/test/*.test.js",
+    "lane-matrix": "npm run build && node dist/render-lane-matrix.js"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
