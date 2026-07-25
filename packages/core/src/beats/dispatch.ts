@@ -22,6 +22,11 @@
  *   - Breaker: N consecutive gate.failed/no-commit parks stop new dispatches.
  *   - Attempt-unique branches (wi-NNN-a<attempt>) so a re-dispatch never clobbers a
  *     prior attempt's operator-reviewable parked branch.
+ *   - The engineering (batch) lane's worker never commits (WI-161): dispatch stages + commits
+ *     the worker's in-scope output itself (DISPATCH_BUILDER_TOOLS grants no git add/commit),
+ *     so a compound-shell-denied commit command is no longer a failure class this lane can
+ *     reach. The target lane and conductor.ts's attended lane are unchanged — their workers
+ *     still commit their own output (BUILDER_TOOLS).
  */
 
 import { join, resolve, dirname } from 'node:path';
@@ -75,10 +80,13 @@ export const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
  * Builder worker allowed-tools list — passed as --allowedTools to every headless build spawn.
- * Shared by BOTH build lanes (the batch lane and the target lane). A spawn that omits it gets
- * permission-prompted on every file write, and a headless session has no approver — the worker
- * then honestly parks with "no commit" instead. Every lane that spawns a headless build must
- * pass this same list; a lane that forgets it silently starves.
+ * Used by the TARGET lane (runTargetLane/finalizeTargetBuild, this file) and by conductor.ts's
+ * attended session lane — neither has a dispatch-side commit fallback, so the worker is still
+ * the only thing that can commit its own output there and needs `git add`/`git commit`.
+ * A spawn that omits this list gets permission-prompted on every file write, and a headless
+ * session has no approver — the worker then honestly parks with "no commit" instead. Every
+ * lane that spawns a headless build must pass the list appropriate to it; a lane that forgets
+ * one silently starves.
  */
 export const BUILDER_TOOLS = [
   'Read', 'Grep', 'Glob', 'Edit', 'Write',
@@ -94,6 +102,18 @@ export const BUILDER_TOOLS = [
   // otherwise cannot land an executable script.
   'Bash(git update-index:*)',
 ];
+
+/**
+ * Builder worker allowed-tools list for the engineering (batch) lane ONLY (WI-161). Identical
+ * to {@link BUILDER_TOOLS} minus `git add`/`git commit`: this lane's dispatch-side scoped
+ * commit (see the "Dispatch-side scoped commit" block below) is now the PRIMARY commit path,
+ * so the worker is never granted a commit tool to race against or fall back from — a compound
+ * shell command silently denied by the allowlist is no longer a failure class this lane can
+ * even reach, because there is no worker-side commit attempt to deny.
+ */
+export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
+  t => t !== 'Bash(git add:*)' && t !== 'Bash(git commit:*)',
+);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -947,6 +967,10 @@ export interface WorkerManifest {
   /** Honest self-assessment [0, 1] that the spec is fully satisfied. Data only — not a gate. */
   confidence: number;
   notes: string;
+  /** Optional one-line commit subject the worker proposes (dispatch commits on the worker's
+   *  behalf — WI-161 — so this is the only lever a worker has left over commit-message
+   *  quality). Falls back to the dispatch-generated message when absent. */
+  subject?: string;
   /** Certify-don't-brief payload (see {@link WorkerCertification}). Optional — absent when the
    *  worker's manifest didn't supply all three fields. */
   certification?: WorkerCertification;
@@ -971,8 +995,12 @@ export function parseManifest(text: string): WorkerManifest | null {
     const rawConf = typeof raw.confidence === 'number' ? raw.confidence : 0;
     const confidence = Math.max(0, Math.min(1, rawConf));
     const notes = typeof raw.notes === 'string' ? raw.notes : '';
+    // Single-line only — a multi-line "subject" is almost certainly a full commit body pasted
+    // in by mistake; take the first line and drop the rest rather than passing it to `git commit -m`.
+    const rawSubject = typeof raw.subject === 'string' ? raw.subject.split('\n')[0].trim() : '';
+    const subject = rawSubject || undefined;
     const certification = parseWorkerCertification(raw.certification);
-    return { wi, filesTouched, testsAdded, confidence, notes, ...(certification ? { certification } : {}) };
+    return { wi, filesTouched, testsAdded, confidence, notes, ...(subject ? { subject } : {}), ...(certification ? { certification } : {}) };
   } catch {
     return null;
   }
@@ -1142,6 +1170,21 @@ function readManifestFilesTouched(wtPath: string, ids: string[]): string[] {
   return [...out];
 }
 
+/**
+ * Read the carrier item's own `MANIFEST-<id>.json` `subject` field, if present — the worker's
+ * proposed one-line commit subject (WI-161). Best-effort: a missing/malformed manifest or an
+ * absent `subject` field yields undefined, never a throw.
+ */
+function readManifestSubject(wtPath: string, id: string): string | undefined {
+  const mPath = join(wtPath, `MANIFEST-${id}.json`);
+  if (!existsSync(mPath)) return undefined;
+  try {
+    return parseManifest(readFileSync(mPath, 'utf8'))?.subject;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Scout prompt
 // ---------------------------------------------------------------------------
@@ -1188,7 +1231,7 @@ export function parseBrief(text: string): string {
  * Exported for testing. */
 export const MANIFEST_INSTRUCTION = `
 MANIFEST: Before finishing, write MANIFEST-<wi-id>.json at the WORKTREE ROOT (not committed) with:
-{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" } }
+{ "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line: anything the reviewer should know>", "subject": "<optional one-line commit subject — dispatch commits your work and uses this verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets this pattern generalizes to> | none" } }
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" honestly even when nothing looks risky (say so plainly, e.g. couldBreak: "nothing outside the touched files").
 PORTABILITY: name any OTHER registered targets this change's pattern applies to (or "none") — REQUIRED when the work is ADR-bearing or an incident-fix. The reactor files a sibling item on each named target.
 Do NOT commit this file. It is read by the dispatch gate for attribution and observability.`;
@@ -1207,7 +1250,7 @@ export function buildPrompt(
   const touchesSection = touches
     ? ` DECLARED FOOTPRINT: this item's declared Touches (the only files you are authorized to write) is: ${touches}. If the change genuinely requires writing outside this footprint, do NOT silently write there — escalate it in the manifest "notes" field using the INTENT/EVIDENCE/RISK/RECOMMENDATION format below instead, and make the smallest in-footprint change you safely can.`
     : '';
-  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change, committed to the current branch by explicit path (never git add -A). COMMIT MECHANICS (your session's tool allowlist only matches plain single commands — anything else is silently denied and your work is lost): stage and commit as TWO separate Bash calls, \`git add <paths>\` then \`git commit -m "<message>"\`; never chain with && or ;, never prefix with cd, never use \`git -C <path>\` (you are already in the right directory), never use $(...) or heredocs in the commit command; keep the -m message single-line quoted. If a git command is denied, retry it in that plain form — do NOT finish without committing. Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope.${touchesSection} If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into a commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
+  const base = `Implement this operator build/fix request as a SMALL, surgical, tested change. Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits your finished work on your behalf by explicit path, scoped to your declared footprint, then gates it. Leave your finished, tested change in the working tree uncommitted. If you want to influence the commit message, set the manifest's optional "subject" field to a single-line summary — dispatch uses it verbatim when present, else generates one. Follow the target repository's contributing/coding guidelines, if present; keep it minimal and in-scope.${touchesSection} If it genuinely needs the durable spine (event contracts / authorization / migrations / router / shared schema), still implement it but say so in your final summary. If the request is unclear or too big for one safe slice, make the smallest sensible change and note what you deferred. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of the request text below into the manifest's "subject" field — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one. ESCALATION FORMAT: if you defer something that needs an operator decision (rather than just noting it), never phrase it as a bare question — state it as an escalation with four parts: your INTENT (what you'd do), the EVIDENCE for it, the main RISK, and your RECOMMENDATION. Put that escalation in the manifest's "notes" field in that four-part form.`;
   const playbookSection = playbookContent
     ? `\n\nREPO PLAYBOOK (recurring lessons — keep these in mind throughout your implementation):\n${playbookContent}`
     : '';
@@ -1235,9 +1278,9 @@ export function buildPrompt(
 
 /**
  * Prompt for a co-located batch. One worktree, N specs sharing a code area.
- * The worker must make ONE commit per item, each subject prefixed with the item id, so
- * dispatch can derive per-item ledger events from the commits.
- * The worker also writes one MANIFEST-<WI-id>.json per item at the worktree root.
+ * The worker never commits (WI-161 — dispatch commits the group's in-scope diff as ONE
+ * commit); per-item attribution is derived from each item's manifest `filesTouched`
+ * intersecting the merged diff, so every item MUST write its own accurate manifest.
  * @internal exported for tests
  */
 export function buildBatchPrompt(items: { id: string; spec: string; brief?: string; repairEvidence?: string; touches?: string }[], playbookContent?: string): string {
@@ -1259,13 +1302,13 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
     })
     .join('\n\n');
   const batchManifestInstruction = `
-MANIFESTS: Before finishing, for EACH item write MANIFEST-<wi-id>.json at the WORKTREE ROOT (e.g. MANIFEST-${items[0].id}.json). Do NOT commit these files.
-Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" } }
+MANIFESTS: Before finishing, for EACH item write MANIFEST-<wi-id>.json at the WORKTREE ROOT (e.g. MANIFEST-${items[0].id}.json). Do NOT commit these files. Dispatch attributes each item's share of the merged diff from its manifest's "filesTouched" — an item with an incomplete or missing "filesTouched" list may not get credited even though its work shipped, so list every file that item actually changed.
+Format per file: { "wi": "<WI-NNN>", "filesTouched": ["<path>", ...], "testsAdded": ["<path>", ...], "confidence": <0.0-1.0 honest estimate spec is fully satisfied>, "notes": "<one line>", "subject": "<optional one-line commit subject for the WHOLE batch — dispatch uses the carrier item's subject verbatim when present, else generates one>", "certification": { "couldBreak": "<what could break>", "detection": "<the signal that would catch it>", "rollback": "<how to undo this if it breaks>", "portability": "applies to: <other registered targets> | none" } }
 CERTIFICATION: green tests alone are a brief, not a certification — fill in "certification" per item honestly even when nothing looks risky.
 PORTABILITY: per item, name any OTHER registered targets the pattern applies to (or "none") — REQUIRED for ADR-bearing / incident-fix work.`;
   return `Implement these ${items.length} operator build/fix requests in ONE worktree as SMALL, surgical, tested changes. They share a code area, so they are batched to share a single test run.
-Make ONE SEPARATE COMMIT PER ITEM, and start each commit subject with the item id in parentheses — e.g. "feat(${items[0].id}): ..." — so each change is attributable. Commit by explicit path (never git add -A). COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's commit subject or body — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
-Do NOT merge, push, or deploy — that is gated downstream by a script, not you. Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. Each item above may declare its own Touches footprint — the only files that item is authorized to write. If a change genuinely requires writing outside its declared footprint, do NOT silently write there — escalate it in that item's manifest "notes" field instead (see ESCALATION FORMAT below), and make the smallest in-footprint change you safely can. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, skip it (leave it uncommitted) and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.
+Do NOT commit, merge, push, or deploy — you do not hold a git-commit tool; dispatch commits the group's finished, in-scope work on your behalf as ONE commit, scoped to the union of the group's declared footprints, then gates it. Leave your finished, tested changes in the working tree uncommitted. COMMIT MESSAGE CONTENT: never copy an operator-private decision-log id (a bare \`D-NNN\` token) out of an item's spec text below into that item's manifest "subject" — describe the change/behavior instead, or cite the target repo's own local decision-log id (e.g. \`ADR-NNN\`) if it has one.
+Follow the target repository's contributing/coding guidelines, if present; keep each change minimal and in-scope. Each item above may declare its own Touches footprint — the only files that item is authorized to write. If a change genuinely requires writing outside its declared footprint, do NOT silently write there — escalate it in that item's manifest "notes" field instead (see ESCALATION FORMAT below), and make the smallest in-footprint change you safely can. If genuine spine work is needed (event contracts / authorization / migrations / router / shared schema), still implement it but say so. If an item is unclear or too big for one safe slice, make the smallest sensible change for it and note what you deferred; if you cannot safely do an item at all, leave its files unchanged and say which. ESCALATION FORMAT: if any item defers something that needs an operator decision, never phrase it as a bare question — state it as an escalation with four parts (INTENT / EVIDENCE / RISK / RECOMMENDATION) in that item's manifest "notes" field.
 
 ${playbookSection}${list}${batchManifestInstruction}`;
 }
@@ -2468,10 +2511,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       try { rmSync(flagPath, { force: true }); } catch { /* ignore */ }
     }
 
-    // Builder allowed tools — shared module constant (see BUILDER_TOOLS above): both the
-    // batch lane and the target lane MUST pass it, or a headless worker gets permission-
-    // prompted on every write and honestly parks with "no commit".
-    const builderTools = BUILDER_TOOLS;
+    // Builder allowed tools for THIS (batch/engineering) lane — DISPATCH_BUILDER_TOOLS (WI-161):
+    // no git add/commit, since this lane's dispatch-side scoped commit is the primary commit
+    // path (see below) and the worker is never meant to commit its own output here. Omitting
+    // the list entirely would still permission-prompt every write and honestly park with
+    // "no commit" — that part of the invariant is unchanged, only the git-verb subset shrank.
+    const builderTools = DISPATCH_BUILDER_TOOLS;
 
     // ── Build routing table once per beat ──────────────────────
     // Reuse the allEvents already loaded above; projectTrajectory is pure (no I/O).
@@ -3179,20 +3224,25 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
 
       let gateEvents: ReturnType<typeof makeEvent>[] = [];
 
-      // ── Deterministic manifest-scoped commit fallback ──────────────────────
-      // A worker's tool allowlist only prefix-matches PLAIN single commands, so any compound
-      // command shape (`a && b`, `cd wt && git …`, `git -C wt …`, heredoc/-$() commit messages)
-      // gets silently denied — the denial leaves a FINISHED, gate-ready tree uncommitted and the
-      // item parks. This wall ends that class: if the worker left changes, dispatch stages ONLY
-      // the files within scope — the group's declared Touches ∪ the workers' manifest
-      // filesTouched — and commits them, so the normal gate + Touches-overstep checks judge the
-      // result exactly as if the worker had committed. A blanket `git add -A` would sweep
-      // scratch/residue into the commit and then trip the Touches-overstep park; scoped staging
-      // avoids that by leaving residue uncommitted and surfacing it so the operator sees what the
-      // worker actually did. Manifests + node_modules stay unstaged. Skipped when tests inject a
-      // synthetic diff list. Runs whether or not the worker committed: residue left dirty AFTER a
-      // commit (e.g. an exec-bit repair step run separately) otherwise parks at
-      // verifyWorktreeState below.
+      // ── Dispatch-side scoped commit (PRIMARY path, WI-161) ─────────────────
+      // Dispatch commits the worker's output — the worker is never granted `git add`/`git
+      // commit` (BUILDER_TOOLS, this file) in the first place, so there is no worker-side
+      // commit path left to race or fall back from. This was originally a fallback for the
+      // class where a worker's tool allowlist only prefix-matched PLAIN single commands (any
+      // compound shape — `a && b`, `cd wt && git …`, `git -C wt …`, heredoc/-$() commit
+      // messages — was silently denied, leaving a FINISHED, gate-ready tree uncommitted and
+      // the item parked); promoting it to the ONLY path removes that failure class by
+      // construction instead of detecting-then-parking it. Dispatch stages ONLY the files
+      // within scope — the group's declared Touches ∪ the workers' manifest filesTouched —
+      // and commits them, so the normal gate + Touches-overstep checks judge the result
+      // exactly as if the worker had committed. A blanket `git add -A` would sweep
+      // scratch/residue into the commit and then trip the Touches-overstep park; scoped
+      // staging avoids that by leaving residue uncommitted and surfacing it so the operator
+      // sees what the worker actually did. Manifests + node_modules stay unstaged. Skipped
+      // when tests inject a synthetic diff list.
+      // Commit message: the carrier's manifest may supply a one-line `subject` (the worker's
+      // only remaining lever over message quality, since it never runs `git commit` itself);
+      // falls back to the dispatch-generated message when absent/empty.
       // residueNote is carried into the no-commit park reason / commit-fallback msg.out note.
       let headEffective = headBranch;
       let fallbackResidue: string[] = [];
@@ -3213,11 +3263,14 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
               { cwd: w.wtPath, stdio: 'pipe' });
             if (added.status === 0) {
               const kind = headBranch === branchBase
-                ? 'worker finished but its commit command was denied by the tool allowlist'
-                : 'residue the worker left uncommitted after its own commit';
-              const committed = spawnSync('git', ['commit', '-m',
-                `feat(${rec.id}): worker output, committed by dispatch (${kind})`,
-              ], { cwd: w.wtPath, stdio: 'pipe' });
+                ? 'worker finished — dispatch commits on its behalf (worker holds no git-commit tool)'
+                : 'residue the worker left uncommitted after a prior dispatch commit';
+              const workerSubject = readManifestSubject(w.wtPath, rec.id);
+              const commitMessage = workerSubject
+                ? workerSubject
+                : `feat(${rec.id}): worker output, committed by dispatch (${kind})`;
+              const committed = spawnSync('git', ['commit', '-m', commitMessage],
+                { cwd: w.wtPath, stdio: 'pipe' });
               if (committed.status === 0) {
                 headEffective = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: w.wtPath, stdio: 'pipe' })
                   .stdout.toString().trim();
