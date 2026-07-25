@@ -10,7 +10,8 @@ discovered in production.
 Each entry states *what's bounded* and *when it would actually matter*. Every `file.ts:NNN`
 citation on this page is checked against the code by
 [`doc-claims.test.ts`](../packages/core/test/doc-claims.test.ts) — an earlier version of this file
-cited three lines that had drifted, and one gap that had since been fixed.
+cited three lines that had drifted, and one gap that had since been fixed. Capabilities this page
+says exist are checked the same way, against the symbol that backs them.
 
 ## Ledger durability & concurrency
 
@@ -178,8 +179,8 @@ cited three lines that had drifted, and one gap that had since been fixed.
   wall or the operator may author it — a build actor's `criteria` field is ignored by the fold
   (`packages/core/src/criteria.ts:63`<!--cite:criteriaAuthors-->), which is what keeps the bar from
   being written by the thing it measures. Items captured before `CRITERIA_REQUIRED_FROM` queue without
-  criteria and fold with `criteriaExempt: true`. *Bounded:* the exempt set is finite and closed — it
-  cannot grow — and every operator surface renders the exemption in words rather than a blank, so a
+  criteria and fold with `criteriaExempt: true`<!--exists:criteriaExemptFlag-->. *Bounded:* the
+  exempt set is finite and closed — it cannot grow — and every operator surface renders the exemption in words rather than a blank, so a
   missing bar is never mistaken for a met one. Backfilling those items was rejected deliberately:
   criteria written against work that already exists are measured against the answer, which is an
   expensive way to manufacture agreement. *Matters when:* an old parked item is approved months from

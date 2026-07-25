@@ -1,6 +1,6 @@
 /**
- * doc-claims.ts — pins the NUMBERS and the `file:line` CITATIONS in `docs/plane-flows.md`
- * and `docs/limitations.md` to the source they describe.
+ * doc-claims.ts — pins the NUMBERS, the `file:line` CITATIONS, and the EXISTENCE CLAIMS in
+ * `docs/plane-flows.md` and `docs/limitations.md` to the source they describe.
  *
  * Why this exists: both documents drifted. `plane-flows.md` said a breaker tripped on the
  * "third attempt" while `BUILDER_BREAKER_N` had been 5 for months; `limitations.md` advertised
@@ -24,6 +24,61 @@
  * and are checked by READING the cited line and asserting it still contains the code the
  * citation claims to point at. A line that drifts fails with the line number it drifted to,
  * so the fix is one edit.
+ *
+ * THE THIRD KIND: EXISTENCE (WI-196)
+ * ----------------------------------
+ * Numbers and citations between them could not catch the worst thing either doc did — assert
+ * that a CAPABILITY EXISTS. Both `plane-flows.md` and `method.md` said the reactor produced work
+ * items "with acceptance criteria" for weeks while the concept `criteria` appeared nowhere in
+ * `packages/core/src`; it became true only when WI-193 shipped the field. The sentence carried no
+ * number and cited no line, so the tripwire — which the same day caught 26 drifted citations —
+ * had nothing to bite on. A published framework describing a feature it does not have is a worse
+ * defect than a stale threshold, because the reader cannot even discover the gap by testing.
+ *
+ * An existence marker binds a doc sentence to a SYMBOL — a schema field, an exported function, a
+ * config key, a parameter — and asserts the symbol is really declared in the module the claim
+ * names, and (optionally) that named other modules really reference it:
+ *
+ *     a short list of falsifiable **acceptance criteria**<!--exists:itemCriteriaField-->
+ *
+ * The reference half is what makes it more than a spell-check on the codebase: a field can be
+ * declared and dead. "The reactor produces items carrying criteria" is only true if `reactor.ts`
+ * writes them, so that claim registers `reactor.ts` as a reference site and fails if it stops.
+ *
+ * Same anti-theatre properties as the other two kinds — one authored side (the registry states a
+ * PATTERN, never the symbol's existence, which is derived from source text every run), bijection
+ * with the markers, and a probe that throws rather than defaults.
+ *
+ * WHAT THIS STILL CANNOT CATCH — read this before trusting a green run
+ * -------------------------------------------------------------------
+ * The point of the mechanism is that it earns a specific, narrow trust. Over-trusting it is the
+ * same failure as the drift it replaces, so the limits are stated rather than implied:
+ *
+ *  1. IT PROVES EXISTENCE, NEVER BEHAVIOUR. `criteria?: string[]` being declared and referenced
+ *     says nothing about whether criteria are enforced, correct, or reached at runtime. A field
+ *     that is written and never read passes. Only the real test suite speaks to behaviour.
+ *  2. IT CANNOT SEE AN UNMARKED SENTENCE. Every claim here exists because a human chose to mark
+ *     it. Unlike bolded numbers — where "if you bold a threshold you pin it" is mechanically
+ *     enforceable, because a bare `**12**` is recognisable — a prose capability assertion has no
+ *     detectable shape. There is no sweep for "this paragraph promises something"; a new
+ *     unmarked false claim lands exactly as the criteria one did. This is the mechanism's
+ *     biggest hole and no amount of regex closes it.
+ *  3. IT CANNOT SEE A CONTRADICTION BETWEEN TWO DOCS. Plate 02 of `plane-flows.md` said build
+ *     worktrees open from ambient `HEAD` while `limitations.md`, in the same repo, said WI-183
+ *     had fixed exactly that. Each sentence is individually markable and individually
+ *     true-looking; nothing here compares two docs' MEANINGS. See the note in
+ *     `doc-claims.test.ts` for why no mechanical check was built for this.
+ *  4. A REFERENCE SITE PROVES A PATTERN MATCHES A LINE, NOT THAT THE LINE IS LIVE CODE. Patterns
+ *     are matched per line against source TEXT, so a match inside a comment or a dead branch
+ *     counts. Registry patterns are written to be call-shaped for that reason.
+ *  5. IT CANNOT SEE STALE FRAMING AROUND A LIVE SYMBOL. "The reactor slices anything too big
+ *     into children" can go from true to misleading with the symbol untouched — scope, defaults
+ *     and ordering all drift under a still-declared name. Pinning `criteria` proves the field is
+ *     there, not that the paragraph around it still describes what the plane does.
+ *  6. A DOC THAT SAYS NOTHING PASSES EVERYTHING. Deleting a claim removes its marker and its
+ *     registry entry together, which is a legitimate two-sided edit. The bijection stops the
+ *     one-sided delete (a marker gone while the claim stands, or vice versa), not an honest
+ *     retreat into vagueness. Silence is always the cheapest way to be un-wrong.
  *
  * Anti-theatre properties, deliberately:
  *
@@ -443,6 +498,198 @@ export const CITATION_CLAIMS: CitationClaim[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// The existence registry — a doc sentence asserting a capability must name a real symbol
+// ---------------------------------------------------------------------------
+
+/**
+ * A probe could not resolve at all: the symbol a doc names is gone, is unreferenced where the
+ * doc says it is used, or the registry pattern is too loose to prove anything. Distinct from
+ * `Error` so `checkDocClaims` can aggregate exactly these into the report and let any genuine
+ * bug in this module keep propagating.
+ */
+export class DocClaimProbeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DocClaimProbeError';
+  }
+}
+
+/**
+ * A module the doc says USES the symbol. Declared-but-dead is the failure this catches: the
+ * criteria field could have existed on the event type for weeks without the reactor ever
+ * writing one, and the sentence "the reactor turns prose into an item carrying criteria"
+ * would still have been false.
+ */
+export interface ReferenceSite {
+  file: SourceKey;
+  /** Matched per line against source text. Write it call-shaped, not name-shaped. */
+  pattern: RegExp;
+  /** One line: what this reference proves. Printed when it stops matching. */
+  proves: string;
+}
+
+export interface ExistenceClaim {
+  /** Marker id: the doc writes `<phrase><!--exists:<id>-->`. */
+  id: string;
+  /**
+   * The doc(s) that must carry this marker. A LIST is the co-anchoring convention: when two docs
+   * describe the same behaviour, marking both sentences with one id means a change to that symbol
+   * surfaces both sentences in a single failure, and whoever fixes one has the other in front of
+   * them. It is the only leverage available against the two-docs-disagreeing class (see the note
+   * in doc-claims.test.ts) — every listed doc must carry the marker, so the pairing cannot rot by
+   * one side quietly dropping it.
+   */
+  doc: DocKey | DocKey[];
+  /** The symbol as a reader would grep for it — used in the failure message, not in the check. */
+  symbol: string;
+  /** One line: the capability the marked sentence asserts. */
+  what: string;
+  /** Where the symbol is DECLARED. */
+  file: SourceKey;
+  /** Must match the declaration line. ≥1 match required; a pattern matching everything throws. */
+  declaration: RegExp;
+  referencedBy?: ReferenceSite[];
+}
+
+/** Above this many declaration hits the pattern is proving nothing — treat as a broken probe. */
+const VACUOUS_MATCH_LIMIT = 20;
+
+/** The docs a claim must be marked in, always as a list. */
+export function claimDocs(claim: ExistenceClaim): DocKey[] {
+  return Array.isArray(claim.doc) ? claim.doc : [claim.doc];
+}
+
+/** Lines (1-based) of `text` that the pattern matches. Cloned without /g so it stays stateless. */
+function matchingLines(text: string, pattern: RegExp): number[] {
+  const re = new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''));
+  const out: number[] = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i]!)) out.push(i + 1);
+  }
+  return out;
+}
+
+/** Where the symbol was actually found this run — derived, never authored. */
+export interface SymbolEvidence {
+  /** `path:line` for every declaration hit. */
+  declaredAt: string[];
+  /** `path:line (proves)` for every required reference. */
+  references: string[];
+}
+
+/**
+ * Resolve one existence claim against source text.
+ *
+ * Throws `DocClaimProbeError` — never returns a "not found" — for the same reason `probeNumber`
+ * throws: a renamed or deleted symbol must fail loudly. A probe that shrugged and returned false
+ * would let the next reader assume the claim was checked when it had quietly stopped being.
+ */
+export function probeSymbol(claim: ExistenceClaim, sources: SourceBundle): SymbolEvidence {
+  const path = SOURCE_PATHS[claim.file];
+  const hits = matchingLines(sources[claim.file], claim.declaration);
+  if (hits.length === 0) {
+    throw new DocClaimProbeError(
+      `existence claim '${claim.id}': the symbol \`${claim.symbol}\` is NOT DECLARED in ${path} ` +
+      `(no line matches ${claim.declaration}). ${claimDocs(claim).map(d => DOC_PATHS[d]).join(' + ')} ` +
+      `tells the reader "${claim.what}" — ` +
+      `either the code never had that capability, or it was renamed. Do not re-anchor before ` +
+      `re-reading the doc's sentence: if the capability is gone, the sentence is the thing to fix.`,
+    );
+  }
+  if (hits.length > VACUOUS_MATCH_LIMIT) {
+    throw new DocClaimProbeError(
+      `existence claim '${claim.id}': the declaration pattern ${claim.declaration} matches ${hits.length} ` +
+      `lines in ${path}. A pattern that matches that much proves nothing about \`${claim.symbol}\` — ` +
+      `tighten it to the declaration.`,
+    );
+  }
+  const references: string[] = [];
+  for (const site of claim.referencedBy ?? []) {
+    const sitePath = SOURCE_PATHS[site.file];
+    const refHits = matchingLines(sources[site.file], site.pattern);
+    if (refHits.length === 0) {
+      throw new DocClaimProbeError(
+        `existence claim '${claim.id}': \`${claim.symbol}\` is declared in ${path}, but ${sitePath} no ` +
+        `longer references it (${site.pattern} matches no line). That reference is what made the claim ` +
+        `true — ${site.proves}. A declared-but-unused symbol still leaves ` +
+        `${claimDocs(claim).map(d => DOC_PATHS[d]).join(' + ')} claiming "${claim.what}" of a plane ` +
+        `that does not do it.`,
+      );
+    }
+    references.push(`${sitePath}:${refHits.join('/')} (${site.proves})`);
+  }
+  return { declaredAt: hits.map(l => `${path}:${l}`), references };
+}
+
+export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
+  // ── The claim that motivated this whole marker kind. Both docs asserted the reactor produced
+  //    items "with acceptance criteria" while `criteria` existed nowhere in src; WI-193 made it
+  //    true afterwards. Declaration alone is not enough here — the sentence is about the REACTOR
+  //    authoring them and the FOLD carrying them, so both are reference sites.
+  {
+    id: 'itemCriteriaField',
+    doc: 'plane-flows',
+    symbol: 'criteria?: string[] (on the captured-item event)',
+    what: 'the reactor turns prose into a work item carrying falsifiable acceptance criteria',
+    file: 'schema',
+    declaration: /^\s{2}criteria\?: string\[\];$/,
+    referencedBy: [
+      {
+        file: 'reactor',
+        pattern: /normalizeCriteria\(fields\['CRITERIA'\]\)/,
+        proves: 'the routing wall parses a CRITERIA block off the router output and emits it',
+      },
+      {
+        file: 'fold',
+        pattern: /adoptCriteriaFromEvent\(ev\.actor,/,
+        proves: 'the fold carries criteria onto the item, from authorized actors only',
+      },
+    ],
+  },
+  // ── The judge's bar. "SPEC_SATISFIED is measured against the criteria" is false the moment the
+  //    prompt builder stops taking them, or dispatch stops passing them — which is a caller-side
+  //    regression a citation on judge.ts alone would never see.
+  {
+    id: 'judgePromptCriteriaArg',
+    doc: 'plane-flows',
+    symbol: 'buildJudgePrompt(..., criteria?: string[])',
+    what: "the judge is handed the item's acceptance criteria as the bar for SPEC_SATISFIED",
+    file: 'judge',
+    declaration: /^\s{2}criteria\?: string\[\],$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /buildJudgePrompt\(.*criteria\)/i,
+        proves: "the lane that runs the judge actually passes the item's criteria into the prompt",
+      },
+    ],
+  },
+  // ── The grandfathering promise in limitations.md. If the flag stops being folded, that doc's
+  //    "the exemption is rendered in words, never a blank" becomes a claim about nothing.
+  {
+    id: 'criteriaExemptFlag',
+    doc: 'limitations',
+    symbol: 'criteriaExempt',
+    what: 'an item captured before the requirement queues without criteria and folds as exempt',
+    file: 'fold',
+    declaration: /^\s{2}criteriaExempt\?: boolean;$/,
+    referencedBy: [
+      {
+        file: 'fold',
+        pattern: /rec\.criteriaExempt = \(critGate\.ok && critGate\.exempt\)/,
+        proves: 'the fold sets the flag from the gate result rather than leaving it assumed',
+      },
+      {
+        file: 'criteria',
+        pattern: /^export const CRITERIA_REQUIRED_FROM = '/,
+        proves: 'the cutoff the exemption is computed from is a real, single, stated instant',
+      },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Marker extraction + checking
 // ---------------------------------------------------------------------------
 
@@ -452,6 +699,8 @@ const PIN_RE = /\*\*([\d.]+)\*\*<!--pin:([A-Za-z_][A-Za-z0-9_]*)-->/g;
 const BOLD_NUMBER_RE = /\*\*([\d.]+)\*\*(<!--pin:[A-Za-z_][A-Za-z0-9_]*-->)?/g;
 /** `` `path/to/file.ts:123` ``<!--cite:id--> */
 const CITE_RE = /`([A-Za-z0-9_\-./]+\.ts):(\d+)`<!--cite:([A-Za-z_][A-Za-z0-9_]*)-->/g;
+/** `<the sentence asserting a capability>`<!--exists:id--> — no rendered value, so no value to compare. */
+const EXISTS_RE = /<!--exists:([A-Za-z_][A-Za-z0-9_]*)-->/g;
 
 export interface Finding {
   claim: string;
@@ -461,10 +710,13 @@ export interface Finding {
 export interface DocClaimReport {
   numeric: Finding[];
   citation: Finding[];
+  existence: Finding[];
   bijection: Finding[];
   unpinned: Finding[];
   /** Resolved source values, for reporting/debugging. */
   values: Record<string, number>;
+  /** Where each existence claim's symbol was actually found this run. */
+  symbols: Record<string, SymbolEvidence>;
 }
 
 function lineOf(text: string, index: number): number {
@@ -482,9 +734,11 @@ function lineOf(text: string, index: number): number {
 export function checkDocClaims(sources: SourceBundle, docs: DocBundle): DocClaimReport {
   const numeric: Finding[] = [];
   const citation: Finding[] = [];
+  const existence: Finding[] = [];
   const bijection: Finding[] = [];
   const unpinned: Finding[] = [];
   const values: Record<string, number> = {};
+  const symbols: Record<string, SymbolEvidence> = {};
 
   // ── Numeric claims ──────────────────────────────────────────────────────
   const pinsSeen = new Map<string, { doc: DocKey; value: string; line: number }[]>();
@@ -632,7 +886,69 @@ export function checkDocClaims(sources: SourceBundle, docs: DocBundle): DocClaim
     }
   }
 
-  return { numeric, citation, bijection, unpinned, values };
+  // ── Existence claims ────────────────────────────────────────────────────
+  const existsSeen = new Map<string, { doc: DocKey; docLine: number }[]>();
+  for (const [docKey, text] of Object.entries(docs) as [DocKey, string][]) {
+    EXISTS_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = EXISTS_RE.exec(text)) !== null) {
+      const list = existsSeen.get(m[1]!) ?? [];
+      list.push({ doc: docKey, docLine: lineOf(text, m.index) });
+      existsSeen.set(m[1]!, list);
+    }
+  }
+
+  for (const claim of EXISTENCE_CLAIMS) {
+    // probeSymbol THROWS when the symbol is gone (see its doc comment). It is caught here — and
+    // only `DocClaimProbeError` is caught — so one run reports every drift at once, the same
+    // property the numeric/citation halves have. The finding is still a hard failure in the
+    // test; catching aggregates it, it does not soften it. A genuine bug in this module throws
+    // a plain Error and keeps propagating, so a broken checker can never read as "no findings".
+    try {
+      symbols[claim.id] = probeSymbol(claim, sources);
+    } catch (err) {
+      if (!(err instanceof DocClaimProbeError)) throw err;
+      existence.push({ claim: claim.id, detail: err.message });
+      continue;
+    }
+    const occurrences = existsSeen.get(claim.id) ?? [];
+    const expectedDocs = claimDocs(claim);
+    for (const want of expectedDocs) {
+      if (!occurrences.some(o => o.doc === want)) {
+        existence.push({
+          claim: claim.id,
+          detail:
+            `no \`<!--exists:${claim.id}-->\` marker found in ${DOC_PATHS[want]}, but the claim is ` +
+            `registered${expectedDocs.length > 1 ? ` (co-anchored across ${expectedDocs.map(d => DOC_PATHS[d]).join(' + ')})` : ''}. ` +
+            `The doc asserts "${claim.what}" nowhere the checker can see it — restore the marker on ` +
+            `the sentence, or drop this claim deliberately (both sides, one commit).`,
+        });
+      }
+    }
+    for (const occ of occurrences) {
+      if (!expectedDocs.includes(occ.doc)) {
+        existence.push({
+          claim: claim.id,
+          detail:
+            `marked in ${DOC_PATHS[occ.doc]}:${occ.docLine} but the claim is registered against ` +
+            `${expectedDocs.map(d => DOC_PATHS[d]).join(' + ')}.`,
+        });
+      }
+    }
+  }
+
+  for (const [id, occurrences] of existsSeen) {
+    if (!EXISTENCE_CLAIMS.some(c => c.id === id)) {
+      bijection.push({
+        claim: id,
+        detail:
+          `${DOC_PATHS[occurrences[0]!.doc]}:${occurrences[0]!.docLine} marks '${id}' as an existence claim, ` +
+          `which no entry in EXISTENCE_CLAIMS resolves — that sentence asserts a capability nothing checks.`,
+      });
+    }
+  }
+
+  return { numeric, citation, existence, bijection, unpinned, values, symbols };
 }
 
 /** Convenience: run against the real tree. */

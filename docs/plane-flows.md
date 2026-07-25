@@ -20,7 +20,10 @@ carries an invisible marker naming its source constant, and
 [`doc-claims.test.ts`](../packages/core/test/doc-claims.test.ts) fails CI when the two disagree —
 the same discipline [`lane-matrix.md`](lane-matrix.md) already applies to the guard matrix. Every
 `file.ts:NNN` citation is checked the same way: the test reads the cited line and asserts it still
-contains the code named. This page drifted badly once; that is why.
+contains the code named. Sentences that assert a **capability** rather than a number carry the same
+kind of marker, bound to the symbol that backs them — this page claimed the reactor produced
+acceptance criteria for weeks before any such field existed, so a described-but-absent feature now
+fails CI too. This page drifted badly once; that is why.
 
 ---
 
@@ -50,9 +53,10 @@ flowchart LR
 **What each stage owns**
 
 - **Reactor** — turns prose into a work item carrying a free-prose `spec`, a short list of
-  falsifiable **acceptance criteria**, and a declared file footprint (`Touches`). The criteria are
-  authored here, from the request text alone and *before any build exists*; an item may not reach
-  `queued` without them (`packages/core/src/criteria.ts:178`<!--cite:criteriaGate-->). That ordering
+  falsifiable **acceptance criteria**<!--exists:itemCriteriaField-->, and a declared file footprint
+  (`Touches`). The criteria are authored here, from the request text alone and *before any build
+  exists*; an item may not reach `queued` without them
+  (`packages/core/src/criteria.ts:178`<!--cite:criteriaGate-->). That ordering
   is the point — it is what stops the bar drifting toward whatever the build found convenient.
   Slices anything too big into children.
 - **Dispatch** — picks by priority, groups so no two builds share a file, spawns a worker per group in
@@ -328,7 +332,8 @@ own. Push happens only where a target declares a remote.
   quota off-books. It is not a thin check: the prompt requires a `VERDICT`, a `CONFIDENCE`, and
   explicit `SPEC_SATISFIED` / `SCOPE_CREEP` / `TEST_THEATRE` calls, a deterministic wall parses them,
   and `loopctl verdicts` reports how well they agreed with your own accept/reject decisions.
-- 🔵 **`SPEC_SATISFIED` is now measured against the item's acceptance criteria, not its prose.** When
+- 🔵 **`SPEC_SATISFIED` is now measured against the item's acceptance criteria, not its
+  prose.**<!--exists:judgePromptCriteriaArg--> When
   an item carries criteria the judge is handed them as the bar, told they were written before the diff
   existed, and asked to walk them one at a time — `yes` only if *every* one is met, and a criterion it
   cannot verify from the diff counts as unmet
