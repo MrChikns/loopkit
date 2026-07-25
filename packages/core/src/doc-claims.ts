@@ -97,6 +97,8 @@ export const SOURCE_PATHS = {
   slo: `${SRC}/slo.ts`,
   acceptance: `${SRC}/acceptance.ts`,
   judge: `${SRC}/judge.ts`,
+  criteria: `${SRC}/criteria.ts`,
+  verdicts: `${SRC}/verdicts.ts`,
 } as const;
 export type SourceKey = keyof typeof SOURCE_PATHS;
 
@@ -217,6 +219,14 @@ export const NUMERIC_CLAIMS: NumericClaim[] = [
     doc: 'plane-flows',
     what: "the doctor's crash/stall retry breaker (also bounds transient ops-park requeues)",
     sites: [cfg(/^ {2}breakerN: (\d+),/m)],
+  },
+  // ── Judge arm-ability (WI-193 win 4). The deferral of judge-blocking used to have no
+  //    stated trigger; pinning these makes "not calibrated yet" a number, not a memory.
+  {
+    id: 'JUDGE_CALIBRATION_SAMPLE',
+    doc: 'plane-flows',
+    what: 'human-accepted outcomes needed before the judge agreement rate means anything',
+    sites: [{ file: 'verdicts', pattern: /^export const JUDGE_CALIBRATION_SAMPLE = (\d+);/m }],
   },
   {
     id: 'maxTransientRequeues',
@@ -412,7 +422,12 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'foldRespec', file: 'fold', mustContain: "case 'item.respec':" },
   { id: 'certificationRollback', file: 'fold', mustContain: 'if (!couldBreak || !detection || !rollback)' },
   { id: 'overseerFloor', file: 'acceptance', mustContain: 'export function overseerFloor(' },
+  // acceptance criteria (WI-193)
+  { id: 'criteriaGate', file: 'criteria', mustContain: 'export function criteriaGate(' },
+  { id: 'criteriaAuthors', file: 'criteria', mustContain: 'export const CRITERIA_AUTHORS' },
   { id: 'judgeAdvisoryOnly', file: 'judge', mustContain: 'ADVISORY-ONLY' },
+  { id: 'judgeCriteriaBar', file: 'judge', mustContain: 'SPEC_SATISFIED is about the CRITERIA' },
+  { id: 'calibrationProgress', file: 'verdicts', mustContain: 'export interface CalibrationProgress' },
   { id: 'ledgerAppendWrite', file: 'ledger', mustContain: 'await fh.write(line);' },
   { id: 'ledgerCorruptSkip', file: 'ledger', mustContain: 'Corrupt line — skip with a warning' },
   { id: 'ledgerLockAcquire', file: 'ledger', mustContain: 'async function acquireLock(' },

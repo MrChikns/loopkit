@@ -100,8 +100,20 @@ export function captureCommitRangeDiff(
 
 /**
  * Build the judge prompt. The judge is an independent reviewer who did NOT write
- * the code. It sees ONLY the work-item spec, declared Touches, and the diff.
- * No tools, no repo access, no builder transcript.
+ * the code. It sees ONLY the work-item spec, its acceptance criteria, the declared Touches,
+ * and the diff. No tools, no repo access, no builder transcript.
+ *
+ * WHY CRITERIA CHANGE WHAT SPEC_SATISFIED MEANS (WI-193 win 2). Without them the judge grades
+ * the diff against a free-prose `spec` — a narrative that is often written *alongside* the work
+ * and drifts toward describing what was built. Acceptance criteria are authored BEFORE any build
+ * exists (see criteria.ts), so when they are present they become the thing SPEC_SATISFIED is
+ * measured against, and the judge is asked to walk them one by one rather than form an
+ * impression. The spec stays in the prompt as context for scope-creep judgement; it stops being
+ * the bar. When an item carries no criteria (a grandfathered item) the prompt is byte-identical
+ * to the pre-criteria one, so old items are judged exactly as before.
+ *
+ * ADVISORY EITHER WAY. Nothing here changes merge behaviour; blocking on the judge is a
+ * separate, calibration-gated step (see the module header).
  *
  * Output grammar (transcribe-not-transform wall):
  *   VERDICT: pass|fail
@@ -117,9 +129,29 @@ export function buildJudgePrompt(
   spec: string,
   diff: string,
   touches?: string,
+  criteria?: string[],
 ): string {
   const touchesLine = touches
     ? `Declared Touches (code area the change is authorized to modify): ${touches}\n`
+    : '';
+  const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
+  const criteriaBlock = hasCriteria
+    ? `
+ACCEPTANCE CRITERIA — written down BEFORE this work started, by someone who had not seen the \
+diff. These, not the spec prose, are the bar:
+${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+`
+    : '';
+  const judgedAgainst = hasCriteria
+    ? `Evaluate the diff against the ACCEPTANCE CRITERIA. Take them one at a time and decide, for \
+each, whether the diff makes it true. Do not grade the spec prose — it is context for judging \
+scope only.`
+    : 'Evaluate the diff against the spec ONLY.';
+  const specSatisfiedRule = hasCriteria
+    ? `
+- SPEC_SATISFIED is about the CRITERIA: \`yes\` only if EVERY criterion is met by this diff, \
+\`partial\` if some are, \`no\` if none are. A criterion you cannot verify from the diff is NOT met.
+- Name the criterion number in a REASONS bullet for each one you judge unmet.`
     : '';
   return `You are an independent code reviewer. You did NOT write this code. \
 Your job is to judge whether the diff satisfies the spec — nothing else.
@@ -128,11 +160,11 @@ WORK ITEM: ${itemId}
 ${touchesLine}
 WORK ITEM SPEC:
 ${spec}
-
+${criteriaBlock}
 THE DIFF (git diff --stat + patch, possibly truncated):
 ${diff || '(empty diff — no changes detected)'}
 
-Evaluate the diff against the spec ONLY. Answer in EXACTLY this grammar — no prose before or after:
+${judgedAgainst} Answer in EXACTLY this grammar — no prose before or after:
 
 VERDICT: pass|fail
 CONFIDENCE: <0.0-1.0>
@@ -142,7 +174,7 @@ TEST_THEATRE: none|suspected
 REASONS:
 - <up to 5 short bullets citing concrete diff hunks/files>
 
-Scoring rules:
+Scoring rules:${specSatisfiedRule}
 - A diff that does MORE than the spec is scope creep even if the extras are good.
 - Tests that only restate the implementation without a behavioral assertion are test theatre.
 - If the diff is empty or the material is insufficient to judge: VERDICT: pass, CONFIDENCE: 0, \

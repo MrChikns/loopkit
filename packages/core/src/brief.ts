@@ -18,7 +18,7 @@ import { FoldResult } from './fold.js';
 import { LedgerEvent } from './schema.js';
 import { SloRow } from './slo.js';
 import { CostRow, CostSummary } from './costs.js';
-import { VerdictSummary } from './verdicts.js';
+import { VerdictSummary, CalibrationProgress } from './verdicts.js';
 import { RoutingTable } from './routing.js';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,13 @@ export interface QualitySummary {
   repairAttempts: number;
   judgeDisagreements: number;
   breakerTrips: number;
+  /**
+   * Judge arm-ability (WI-193 win 4) — how much calibration evidence exists and what is still
+   * missing before blocking on the judge could be justified. Lifetime, not windowed: calibration
+   * accumulates, and throwing away last month's outcomes would reset the count every week.
+   * Advisory readout; nothing in the plane gates on it.
+   */
+  calibration: CalibrationProgress;
 }
 
 export interface SpendSummary {
@@ -291,6 +298,7 @@ export function computeBrief(inputs: BriefInputs): BriefResult {
       repairAttempts,
       judgeDisagreements,
       breakerTrips,
+      calibration: inputs.verdicts.calibration,
     },
     spend: {
       byProvider: inputs.costSummary.byProvider,
@@ -349,6 +357,11 @@ export function renderBriefMarkdown(b: BriefResult): string {
   const fpValue = b.quality.firstPassRate !== null ? `${(b.quality.firstPassRate * 100).toFixed(0)}%` : 'no data';
   lines.push(`- First-pass gate rate: [${DOT[b.quality.firstPassStatus]}] ${fpValue} · floor ${(b.quality.firstPassFloor * 100).toFixed(0)}% · n=${b.quality.mergedCount}`);
   lines.push(`- Repair attempts ${b.quality.repairAttempts} · Judge disagreements ${b.quality.judgeDisagreements} · Breaker trips ${b.quality.breakerTrips}`);
+  // Judge calibration is LIFETIME, not windowed — say so, or the number reads as a 7d figure
+  // like everything else in this section and looks alarmingly small.
+  const cal = b.quality.calibration;
+  const calRate = cal.agreementRate !== null ? `${(cal.agreementRate * 100).toFixed(0)}%` : 'n/a';
+  lines.push(`- Judge calibration (lifetime): ${cal.withOutcome}/${cal.sampleTarget} outcomes · agreement ${calRate} · arm-able ${cal.armable ? 'YES' : 'no'} (${cal.blocker})`);
   lines.push('');
 
   lines.push('## Spend');

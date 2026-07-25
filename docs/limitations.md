@@ -47,7 +47,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:1003`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1023`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -69,7 +69,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **The target lane does not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4410`<!--cite:postIntegrationRegate-->). The target build lane
+  (`packages/core/src/beats/dispatch.ts:4415`<!--cite:postIntegrationRegate-->). The target build lane
   does not carry that invariant: it gates once, on its own branch, and merges. *Bounded:* it is an
   opt-in path that runs against the target's own repo and still gates before merging. *Matters when:*
   the destination branch advances during the build — the merged result is then a combination nothing
@@ -86,7 +86,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3184`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3189`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -107,7 +107,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4596`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4601`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -119,7 +119,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   this). `item.merged.deployed` is now uniformly `false` on every lane — a merge observes that code
   landed, never that it deployed — and `deploy.succeeded` / `deploy.failed`, appended by the
   detached deploy script itself (it receives `DEPLOY_WI_IDS`), are the sole authority
-  (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->). The plane spawns that script
+  (`packages/core/src/fold.ts:1396`<!--cite:foldDeploySucceeded-->). The plane spawns that script
   detached, stdio ignored, unreferenced, with no timeout and nothing awaiting it
   (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). What is *still*
   missing is a liveness contract on it: a deploy hook that dies before appending either event leaves
@@ -133,7 +133,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all
-  (`packages/core/src/fold.ts:705`<!--cite:certificationRollback-->). Nothing in the plane executes it —
+  (`packages/core/src/fold.ts:721`<!--cite:certificationRollback-->). Nothing in the plane executes it —
   it is written for a human to read and run. *Bounded:* that is the intended contract; an automated
   rollback with no verification step would be a worse failure mode than a recorded instruction.
   *Matters when:* you assumed "certified" implied a mechanism rather than a note.
@@ -162,6 +162,18 @@ cited three lines that had drifted, and one gap that had since been fixed.
   independent, if advisory, second opinion beside the gate. *Matters when:* you read a wall of merged,
   gate-proven items as evidence of quality rather than as evidence that your own suite passed. It is
   the same statement your CI already makes; the plane only makes it much more often.
+
+- **Acceptance criteria are required going forward, but items captured before the requirement are
+  grandfathered.** A build route now needs a `CRITERIA` list to reach `queued`, and only the routing
+  wall or the operator may author it — a build actor's `criteria` field is ignored by the fold
+  (`packages/core/src/criteria.ts:63`<!--cite:criteriaAuthors-->), which is what keeps the bar from
+  being written by the thing it measures. Items captured before `CRITERIA_REQUIRED_FROM` queue without
+  criteria and fold with `criteriaExempt: true`. *Bounded:* the exempt set is finite and closed — it
+  cannot grow — and every operator surface renders the exemption in words rather than a blank, so a
+  missing bar is never mistaken for a met one. Backfilling those items was rejected deliberately:
+  criteria written against work that already exists are measured against the answer, which is an
+  expensive way to manufacture agreement. *Matters when:* an old parked item is approved months from
+  now and ships with no bar — read it as "this one predates the requirement", not "this one passed".
 
 ## Acceptance tiering tells you, it does not authorize
 
@@ -213,12 +225,15 @@ cited three lines that had drifted, and one gap that had since been fixed.
   old silent-loss shape returns for that build), or when the intake backlog is where items go to be
   forgotten — capture makes the remainder *visible*, it does not make it *prioritized*.
 
-- **A steered item can display one thing and build another.** An operator reply that re-scopes work
-  appends `item.respec`, which amends the item's `spec`
-  (`packages/core/src/fold.ts:1377`<!--cite:foldRespec-->) — the field builders are given. Boards render
-  the item's original `text`. *Bounded:* the correction is on the trail as a `msg.out`, and the paired
-  `item.queued` is what actually re-runs the work, so nothing is lost. *Matters when:* you scan the
-  board to remember what an item is about and read a description the builder was never given.
+- **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
+  page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
+  `item.respec`, which amends the item's `spec` *and* its acceptance criteria
+  (`packages/core/src/fold.ts:1410`<!--cite:foldRespec-->) — the fields builders and the judge are
+  given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
+  rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
+  does not linger. *What remains:* the original capture text is still on the trail and still the right
+  thing to read when you want to know what was *asked*, as opposed to what is being *built* — the two
+  legitimately differ after a steer, and no surface tries to reconcile them.
 
 ## Deliberately deferred (not bugs — scope)
 

@@ -130,6 +130,17 @@ export interface ItemRoutedData {
   title?: string;
 }
 export interface ItemQueuedData { spec: string; touches?: string; model?: string; effort?: string; priority?: string; repairContext?: string;
+  /**
+   * ACCEPTANCE CRITERIA (WI-193) — the falsifiable statements this build will be measured
+   * against, authored from the request text BEFORE any build context exists. See criteria.ts
+   * for the independence property and why this is a list rather than prose.
+   *
+   * Optional on the WIRE (a legacy/grandfathered replay carries none, and a re-queue of an
+   * already-criteria'd item carries them forward on the fold rather than restating them), but
+   * REQUIRED IN PRACTICE at the one place raw intent becomes queued build work: the routing
+   * wall consults `criteriaGate` and refuses to emit this event without them.
+   */
+  criteria?: string[];
   /** Delivery lane. Absent → 'engineering'. See DEFAULT_LANE. */
   lane?: string;
   /**
@@ -451,7 +462,16 @@ export interface ItemBriefedData { brief: string; model?: string }
  * Emitted by the reactor engagement step alongside an item.queued (re-queue for a fresh build).
  * `inReplyTo` carries causation (the operator msg.in event id) for idempotent dedupe.
  */
-export interface ItemRespecData { spec: string; reason: string; inReplyTo?: string }
+export interface ItemRespecData { spec: string; reason: string; inReplyTo?: string;
+  /**
+   * Amended acceptance criteria (WI-193). Steering the work re-states the bar it is measured
+   * against, so the fold REPLACES the criteria list wholesale rather than merging into it —
+   * a respec that drops a criterion must actually drop it, on screen and for the judge (the
+   * WI-185 rule: operator-facing surfaces never render superseded text). Absent → the
+   * existing criteria stand, so a pure spec-wording steer does not silently erase the bar.
+   */
+  criteria?: string[];
+}
 /**
  * engagement.baseline — a single deploy-time marker event (item 'system'). Operator replies at
  * or before its ts are legacy-unresolved and never auto-engaged; only replies AFTER it enter the

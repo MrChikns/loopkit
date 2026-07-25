@@ -56,6 +56,7 @@ import { commitLedgerResidue, LedgerCommitResult } from '../ledgerCommit.js';
 import { checkLedgerRegressionGuard } from '../regressionGuard.js';
 import { LedgerMaxIds } from '../doctor.js';
 import { captureWorktreeDiff, captureCommitRangeDiff, buildJudgePrompt, runJudge, mergeVerdictData } from '../judge.js';
+import { CRITERIA_CONTRACT, criteriaGate, normalizeCriteria } from '../criteria.js';
 import { buildPathologyPrompt, parsePathologyOutput, runPathology, formatEventTrail, TrailEvent } from '../pathology.js';
 
 // ---------------------------------------------------------------------------
@@ -589,6 +590,12 @@ export interface RoutingDecision {
   lane: string;
   /** Router-stamped short title, 3-5 words. Absent when the model omitted TITLE. */
   title?: string;
+  /**
+   * ACCEPTANCE CRITERIA (WI-193) — falsifiable statements parsed from the CRITERIA: block,
+   * normalized through the ONE normalizer (criteria.ts). Absent when the router emitted none.
+   * On a `build` route that is not a gate PASS: see `criteriaGate` at the emit site.
+   */
+  criteria?: string[];
   /** Operator-facing reply, delivered as msg.out. */
   reply: string;
   /**
@@ -621,13 +628,14 @@ const VALID_LANES = new Set(['engineering', 'marketing']);
  *   TOUCHES: <comma-sep path prefixes>   MODEL: haiku|sonnet|opus
  *   EFFORT: low|medium|high|xhigh|max    PRIORITY: blocker|high|medium|low
  *   LANE: engineering|marketing    TITLE: <3-5 word short title>
+ *   CRITERIA: <one `- ` bullet per falsifiable acceptance statement>   (build only, REQUIRED)
  *   REPLY: <operator-facing text>
  */
 export function parseRoutingDecision(text: string): RoutingDecision {
   const fields: Record<string, string> = {};
   let current: string | null = null;
   for (const rawLine of text.split(/\r?\n/)) {
-    const m = rawLine.match(/^\s*(ROUTE|SPEC|TOUCHES|MODEL|EFFORT|PRIORITY|LANE|TITLE|REPLY)\s*:\s*(.*)$/);
+    const m = rawLine.match(/^\s*(ROUTE|SPEC|TOUCHES|MODEL|EFFORT|PRIORITY|LANE|TITLE|CRITERIA|REPLY)\s*:\s*(.*)$/);
     if (m) {
       current = m[1];
       fields[current] = m[2];
@@ -649,6 +657,9 @@ export function parseRoutingDecision(text: string): RoutingDecision {
   const lane = norm(fields['LANE']).toLowerCase();
   const spec = norm(fields['SPEC']) || undefined;
   const title = norm(fields['TITLE']) || undefined;
+  // Criteria go through the ONE normalizer (criteria.ts) — bullet-stripping, de-dup, caps —
+  // so a criterion means the same thing here as it does on the desk and in the judge prompt.
+  const criteria = normalizeCriteria(fields['CRITERIA']);
 
   // REPLY is what the operator sees. Missing REPLY but a block present → a route-appropriate
   // default (never surface the raw key:value lines). No block at all → the whole text.
@@ -667,6 +678,7 @@ export function parseRoutingDecision(text: string): RoutingDecision {
     // Unknown/absent lane → the engineering reference lane. Never lose the item.
     lane: VALID_LANES.has(lane) ? lane : DEFAULT_LANE,
     title,
+    ...(criteria ? { criteria } : {}),
     reply,
     routeValid,
   };
@@ -985,8 +997,14 @@ async function stepPortabilityPromotion(
             }));
           } else {
             // Mechanical ⇒ queue it directly; dispatch builds it against the named target.
+            // WI-193: this child IS the parent's pattern applied elsewhere, so its bar is the
+            // parent's bar — TRANSCRIBED verbatim, never re-authored. Inventing fresh criteria
+            // here would author them against a pattern whose build already exists, which is the
+            // ordering the independence property forbids (criteria.ts). A parent with no
+            // criteria (grandfathered) yields a child that queues on the same exemption.
             events.push(makeEvent('reactor', childId, 'item.queued', {
               spec: childText,
+              ...(rec.criteria ? { criteria: rec.criteria } : {}),
             } as ItemQueuedData));
           }
           promotedCount++;
@@ -1359,6 +1377,13 @@ async function stepRoute(
     // In degraded mode (tool-less fallback), prepend the degradation note to every prompt.
     const promptPrefix = degraded ? `${DEGRADED_ROUTING_NOTE}\n\n` : '';
 
+    // ACCEPTANCE CRITERIA contract (WI-193), APPENDED to whatever conductor prompt this target
+    // ships. It is injected rather than merely documented in prompts/conductor.md because that
+    // file is copied per target and versions independently: a target on a pre-criteria copy
+    // would emit no CRITERIA, every build route would fail the gate below, and the queue would
+    // wedge. Injecting binds the contract to the code that enforces it, so the two cannot drift.
+    const promptSuffix = `\n\n${CRITERIA_CONTRACT}`;
+
     const events: ReturnType<typeof makeEvent>[] = [];
 
     // Touches-grounding corrections made this beat (target items only) — surfaced in the
@@ -1438,7 +1463,7 @@ async function stepRoute(
  • PURE MULTI-SLICE EPIC (only slicing/sequencing remains — NO unresolved choice) → ROUTE: park, and SPEC MUST begin with "needs planner decomposition: <one line why>". This routes to the planner and leaves the operator's desk.
  • A SPECIFIC unresolved choice the approval did NOT settle (an architecture/scope/design fork) → ROUTE: park, and SPEC MUST begin with "needs decision: <the ONE precise open question>". State that exact question only — do NOT restate the original bundled reason.`
         : '';
-      const itemPrompt = `${promptPrefix}${conductorPrompt}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/REPLY: block described above.`;
+      const itemPrompt = `${promptPrefix}${conductorPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
 
       if (opts.dryRun) {
         out.push(makeEvent('reactor', rec.id, 'item.routed', {
@@ -1547,7 +1572,34 @@ async function stepRoute(
       // metadata — the fold guards item.routed from regressing an already-queued/parked
       // item back to 'routed', so ordering matters here.
       if (decision.route === 'build') {
+        // ACCEPTANCE-CRITERIA GATE (WI-193) — an item may NOT reach `queued` without criteria.
+        // This is the ONE place raw intent becomes queued build work, so it is the one place
+        // the requirement can be enforced without stranding anything: every OTHER item.queued
+        // emitter (unpark, repair, doctor requeue, push-fail retry) re-queues an item that
+        // already routed, and the fold carries its criteria forward.
+        //
+        // A missing bar is treated exactly like a garbled ROUTE: bump the durable failure
+        // counter, back off, retry — and cap into an ops park rather than queueing anyway.
+        // It is deliberately NOT downgraded to "queue it with a placeholder criterion": a
+        // placeholder is indistinguishable from none and re-opens the hole this closes.
+        //
+        // Grandfathering (items captured before CRITERIA_REQUIRED_FROM) and the code-less
+        // planning lane pass through `criteriaGate` as recorded exemptions — see criteria.ts
+        // for why backfilling old items would violate the independence property instead.
+        const gate = criteriaGate({
+          criteria: decision.criteria,
+          capturedAt: rec.capturedAt ?? rec.createdAt,
+          lane: decision.lane,
+        });
+        if (!gate.ok) {
+          bumpProviderFail(resolveRunDir(opts), rec.id, nowMs);
+          out.push(makeEvent('reactor', rec.id, 'msg.out', {
+            text: `routing rejected: ${gate.reason} — retrying (backing off)`,
+          }));
+          return out;
+        }
         const queuedData: ItemQueuedData = { spec: decision.spec ?? (rec.sourceText ?? '') };
+        if (decision.criteria) queuedData.criteria = decision.criteria;
         if (decision.touches) queuedData.touches = decision.touches;
         if (decision.model) queuedData.model = decision.model;
         if (decision.effort) queuedData.effort = decision.effort;
@@ -3798,7 +3850,7 @@ async function stepMergeJudge(
       if (!diff) continue;
 
       const spec = rec.spec ?? rec.sourceText ?? '';
-      const prompt = buildJudgePrompt(rec.id, spec, diff, rec.touches);
+      const prompt = buildJudgePrompt(rec.id, spec, diff, rec.touches, rec.criteria);
       const runResult = await runJudge(judgeProvider, judgeModel, prompt, judgeTimeoutMs);
 
       // review.verdict (advisory) shaped by the SHARED mergeVerdictData so a reactor-backstop verdict

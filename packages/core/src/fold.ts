@@ -33,6 +33,7 @@
 import { createHash } from 'node:crypto';
 import { LedgerEvent, DEFAULT_LANE, DEFAULT_CLAIM_TTL_MINUTES } from './schema.js';
 import { fallbackTargetId } from './target.js';
+import { adoptCriteriaFromEvent, criteriaGate } from './criteria.js';
 
 /**
  * Deterministic error fingerprint (a pure hash, never an LLM judgement) used by the
@@ -188,6 +189,21 @@ export interface ItemRecord {
 
   // spec and routing
   spec?: string;
+  /**
+   * ACCEPTANCE CRITERIA (WI-193) — the falsifiable statements this item is measured against,
+   * authored from raw intent BEFORE any build context existed. Set from item.queued and
+   * amended (replaced wholesale) by item.respec, in both cases only when the event's actor is
+   * a criteria author — see criteria.ts for the independence property this protects.
+   * Absent ⇒ see `criteriaExempt`.
+   */
+  criteria?: string[];
+  /**
+   * True when this item queued WITHOUT criteria and was legitimately allowed to: it was
+   * captured before CRITERIA_REQUIRED_FROM (grandfathered) or it runs in a lane that writes no
+   * code. Recorded rather than assumed so an operator surface renders "no criteria, and here
+   * is why" instead of a blank that reads like compliance. Undefined once criteria exist.
+   */
+  criteriaExempt?: boolean;
   route?: string;
   /** Router-stamped short title (item.routed.title). Absent on older replays and on routings
    *  where the model omitted it — consumers fall back to spec/text truncation. */
@@ -1071,6 +1087,23 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         rec.priority = typeof d['priority'] === 'string' ? d['priority'] : rec.priority;
         rec.repairContext = typeof d['repairContext'] === 'string' ? d['repairContext'] : undefined;
         rec.lane = foldLane(d, rec.lane);
+        // ACCEPTANCE CRITERIA (WI-193). Two rules, both load-bearing:
+        //  1. INDEPENDENCE — only a CRITERIA_AUTHORS actor (the routing wall or the operator)
+        //     may author them; a `dispatch`/worker event carrying a criteria field is ignored,
+        //     so a builder cannot write the bar it is measured against (see criteria.ts).
+        //  2. CARRY-FORWARD — absent ⇒ keep what is already there. Every re-queue path
+        //     (unpark, repair, doctor requeue, push-fail retry) restates only spec/touches, so
+        //     folding `undefined` in would silently strip the criteria off a re-queued item.
+        rec.criteria = adoptCriteriaFromEvent(ev.actor, d['criteria']) ?? rec.criteria;
+        // Record the exemption rather than assuming it: an item that legitimately queues with
+        // no criteria (grandfathered capture, planning lane) is marked so operator surfaces can
+        // say WHY it is blank instead of rendering silence that reads like compliance.
+        const critGate = criteriaGate({
+          criteria: rec.criteria,
+          capturedAt: rec.capturedAt ?? rec.createdAt,
+          lane: rec.lane,
+        });
+        rec.criteriaExempt = (critGate.ok && critGate.exempt) ? true : undefined;
         // WI-084: a requeue (with or without a preceding unpark) is the release signal for a
         // pathologist block — the victim is no longer waiting on the repair item.
         rec.blockedOn = undefined;
@@ -1374,9 +1407,20 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       // The paired msg.out carries the reason onto the trail. On terminal (merged) items this is
       // unreachable — the merged guard above no-ops it — so steering finished work never regresses
       // an item (the reactor downgrades such a steer to a sibling capture instead).
-      case 'item.respec':
+      case 'item.respec': {
         rec.spec = typeof d['spec'] === 'string' ? d['spec'] : rec.spec;
+        // Steering the work re-states the bar (WI-193 + the WI-185 rule that operator-facing
+        // surfaces must never render superseded text). REPLACE wholesale, never merge: a
+        // respec that drops a criterion has to actually drop it, or the desk keeps showing a
+        // promise nobody is still making. Absent ⇒ the existing bar stands, so a pure wording
+        // steer does not silently erase it. Same author restriction as item.queued.
+        const respecCriteria = adoptCriteriaFromEvent(ev.actor, d['criteria']);
+        if (respecCriteria) {
+          rec.criteria = respecCriteria;
+          rec.criteriaExempt = undefined;
+        }
         break;
+      }
 
       // SESSION MODE — item.claimed leases a queued item to an attended session; never a
       // state transition (the item stays 'queued'; the beats defer via isClaimActive at

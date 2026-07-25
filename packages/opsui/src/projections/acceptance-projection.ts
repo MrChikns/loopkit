@@ -53,6 +53,11 @@ export type AcceptanceItem = {
    *  {@link FoldMergedItem.certification}. Absent renders a visible "no certification
    *  provided" line (acceptanceRow), never a silent blank (leader-leader doctrine). */
   certification?: { couldBreak: string; detection: string; rollback: string };
+  /** Acceptance criteria (WI-193) — see {@link FoldMergedItem.criteria}. Absent renders a
+   *  visible absence line (criteriaBlock), never a silent blank. */
+  criteria?: string[];
+  /** Whether the absence of criteria is a recorded exemption rather than a gap. */
+  criteriaExempt?: boolean;
 };
 
 /** The typed payload the acceptance projection renders. */
@@ -190,6 +195,29 @@ function certificationBlock(cert: AcceptanceItem['certification']): string {
     `</dl>`;
 }
 
+/**
+ * Acceptance-criteria block (WI-193 win 3) — the bar beside the delivery.
+ *
+ * This is the win that pays immediately: the operator is the throughput bottleneck, and
+ * seeing what was promised next to what shipped makes the judgement faster with zero new
+ * automation. Same doctrine as {@link certificationBlock}: an absent bar renders ONE visible
+ * line naming WHY it is absent, because a blank where a promise should be reads like a promise
+ * that was kept.
+ */
+function criteriaBlock(i: AcceptanceItem): string {
+  if (!i.criteria || i.criteria.length === 0) {
+    const why = i.criteriaExempt
+      ? 'No acceptance criteria — this item predates the requirement.'
+      : 'No acceptance criteria recorded.';
+    return `<p class="opsui-acceptance__nocriteria">${esc(why)}</p>`;
+  }
+  return `<div class="opsui-acceptance__criteria">` +
+    `<p class="opsui-acceptance__criterialabel">Promised before the work started:</p>` +
+    `<ul class="opsui-acceptance__criterialist">` +
+    i.criteria.map((c) => `<li class="opsui-acceptance__criterion">${esc(c)}</li>`).join('') +
+    `</ul></div>`;
+}
+
 function acceptanceRow(i: AcceptanceItem): string {
   const actions = buildAcceptanceVerbActions(i.id, i.title, i.tier);
   return EventRow({
@@ -197,7 +225,9 @@ function acceptanceRow(i: AcceptanceItem): string {
     title: i.title,
     metadata: i.metadata,
     ...(i.captured ? { summary: i.captured } : {}),
-    body: certificationBlock(i.certification),
+    // The bar first, then the certification: the operator reads "what was promised" before
+    // "what could break", which is the order the judgement actually happens in.
+    body: criteriaBlock(i) + certificationBlock(i.certification),
     badge: i.badge,
     ...(i.originChip ? { originChip: i.originChip } : {}),
     ...(actions.length ? { actions } : {}),

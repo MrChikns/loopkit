@@ -1693,6 +1693,10 @@ export interface PostBuildGuardCtx {
     itemId: string;
     spec: string;
     itemTouches?: string;
+    /** Acceptance criteria (WI-193) — when present these, not the spec prose, are the bar the
+     *  judge grades SPEC_SATISFIED against. Absent on grandfathered items; the prompt is then
+     *  byte-identical to the pre-criteria one. */
+    itemCriteria?: string[];
   };
 }
 
@@ -1812,7 +1816,7 @@ export async function runPostBuildGuards(
   let judgeVerdict: JudgeStageResult | undefined;
   if (config.judge && ctx.judge?.provider) {
     const diff = captureWorktreeDiff(ctx.wtPath, ctx.baseSha, 20_000);
-    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches);
+    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches, ctx.judge.itemCriteria);
     try {
       const judgeRunResult = await runJudge(ctx.judge.provider, ctx.judge.model, prompt, ctx.judge.timeoutMs);
       judgeVerdict = { run: judgeRunResult, model: ctx.judge.model, providerName: ctx.judge.provider.name };
@@ -2468,6 +2472,7 @@ async function finalizeTargetBuild(
       itemId: rec.id,
       spec: rec.spec ?? rec.sourceText ?? '',
       itemTouches: rec.touches,
+      ...(rec.criteria ? { itemCriteria: rec.criteria } : {}),
     },
   }, {
     commitMode: 'dispatch',
@@ -4458,7 +4463,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             const finalBase = headBefore !== branchBase ? headBefore : branchBase;
             const diff = captureWorktreeDiff(w.wtPath, finalBase, judgeMaxDiffChars);
 
-            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches);
+            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches, r.criteria);
 
             let judgeRunResult;
             const injected = opts.judgeResults?.get(r.id);

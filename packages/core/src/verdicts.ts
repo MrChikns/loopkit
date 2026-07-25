@@ -39,6 +39,53 @@ export interface VerdictRow {
   acceptedAt?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Arm-ability thresholds — the written-down trigger for arming the judge
+// ---------------------------------------------------------------------------
+
+/**
+ * Human-accepted outcomes needed before an agreement rate means anything.
+ *
+ * WHY THIS EXISTS (WI-193 win 4). Blocking on the judge is deferred "until calibration", and
+ * until now that deferral had no visible trigger — it lived in someone's head, so the plane
+ * could accumulate calibration data indefinitely without anyone noticing it had enough. These
+ * constants make the condition a number the board can render and a reader can argue with.
+ *
+ * They gate NOTHING today. The judge stays advisory and fail-open; turning it into a blocker is
+ * a separate step. This is the instrument, not the lever.
+ */
+export const JUDGE_CALIBRATION_SAMPLE = 30;
+
+/** Agreement rate at or above which arming the judge is defensible. */
+export const JUDGE_ARM_AGREEMENT = 0.9;
+
+/**
+ * Calibration progress — "is the judge arm-able yet, and if not, what is missing?"
+ *
+ * Three conditions, all necessary. The third is the one that is easy to forget: a judge that has
+ * never returned `fail` on an item you later accepted has an empty false-alarm cell, so its
+ * agreement rate is 100% by construction and measures nothing. A calibration set with no
+ * disagreement is not a calibrated judge; it is an untested one.
+ */
+export interface CalibrationProgress {
+  /** Judged items carrying a recorded human outcome (the usable calibration sample). */
+  withOutcome: number;
+  /** How many such outcomes are wanted before the rate is meaningful. */
+  sampleTarget: number;
+  /** Outcomes still needed to reach `sampleTarget` (0 once met). */
+  remaining: number;
+  /** agreePass / withOutcome, or null when there is nothing to divide by. */
+  agreementRate: number | null;
+  /** The rate at or above which arming is defensible. */
+  agreementTarget: number;
+  /** At least one judged-`fail` item has a recorded outcome, so the rate can discriminate. */
+  discriminating: boolean;
+  /** All three conditions met. Advisory readout only — nothing in the plane reads this to gate. */
+  armable: boolean;
+  /** One operator-facing sentence: what is still missing, or that nothing is. */
+  blocker: string;
+}
+
 export interface VerdictSummary {
   total: number;
   judgedFail: number;
@@ -53,7 +100,52 @@ export interface VerdictSummary {
    * to avoid selection bias — counting them would make the judge appear to agree by construction).
    */
   provisionalAccepted: number;
+  /** Arm-ability readout — see {@link CalibrationProgress}. Never gates anything. */
+  calibration: CalibrationProgress;
   rows: VerdictRow[];
+}
+
+/**
+ * Derive the arm-ability readout from the agreement cells. Pure; exported so the CLI, the
+ * brief and the tests all read the SAME judgement rather than each re-deciding what "enough
+ * calibration" means.
+ */
+export function computeCalibration(cells: {
+  withOutcome: number;
+  agreePass: number;
+  failWithOutcome: number;
+}): CalibrationProgress {
+  const { withOutcome, agreePass, failWithOutcome } = cells;
+  const agreementRate = withOutcome > 0 ? agreePass / withOutcome : null;
+  const remaining = Math.max(0, JUDGE_CALIBRATION_SAMPLE - withOutcome);
+  const discriminating = failWithOutcome > 0;
+  const sampleMet = remaining === 0;
+  const rateMet = agreementRate !== null && agreementRate >= JUDGE_ARM_AGREEMENT;
+  const armable = sampleMet && rateMet && discriminating;
+
+  // Name the FIRST unmet condition rather than listing all three — the operator wants the next
+  // thing to wait for, not a scorecard.
+  let blocker: string;
+  if (armable) {
+    blocker = 'arm-able: sample, agreement and discrimination all met';
+  } else if (!sampleMet) {
+    blocker = `needs ${remaining} more judged item${remaining === 1 ? '' : 's'} with a recorded outcome`;
+  } else if (!discriminating) {
+    blocker = 'no judged-fail item has an outcome yet — the agreement rate cannot discriminate';
+  } else {
+    blocker = `agreement ${((agreementRate ?? 0) * 100).toFixed(0)}% is below the ${(JUDGE_ARM_AGREEMENT * 100).toFixed(0)}% bar`;
+  }
+
+  return {
+    withOutcome,
+    sampleTarget: JUDGE_CALIBRATION_SAMPLE,
+    remaining,
+    agreementRate,
+    agreementTarget: JUDGE_ARM_AGREEMENT,
+    discriminating,
+    armable,
+    blocker,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +208,10 @@ export function projectVerdicts(events: LedgerEvent[]): VerdictSummary {
   const agreePass = rows.filter(r => r.verdict === 'pass' && r.outcome === 'accepted').length;
   const falseAlarm = rows.filter(r => r.verdict === 'fail' && r.outcome === 'accepted').length;
   const provisionalAccepted = rows.filter(r => r.outcome === 'provisional').length;
+  // `falseAlarm` IS the judged-fail-with-outcome count: a fail verdict on an item the operator
+  // accepted anyway. It is the only cell that proves the judge is capable of disagreeing with
+  // the ground truth, which is what makes the agreement rate a measurement rather than a tautology.
+  const calibration = computeCalibration({ withOutcome, agreePass, failWithOutcome: falseAlarm });
 
-  return { total, judgedFail, withOutcome, agreePass, falseAlarm, provisionalAccepted, rows };
+  return { total, judgedFail, withOutcome, agreePass, falseAlarm, provisionalAccepted, calibration, rows };
 }

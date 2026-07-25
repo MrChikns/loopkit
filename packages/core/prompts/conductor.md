@@ -25,6 +25,7 @@ attachment may carry the full intent of the request.
 ```
 ROUTE: build | park | answer
 SPEC: <what to build, or the reason to park — one paragraph>   (omit for answer)
+CRITERIA: <2-5 `- ` bullets, see below>                        (build only, REQUIRED)
 TOUCHES: <comma-separated path prefixes>                       (build only)
 MODEL: haiku | sonnet | opus                                   (build only, optional)
 EFFORT: low | medium | high | xhigh | max                      (build only, optional)
@@ -73,6 +74,26 @@ anything unless your fork wires one.
 When unsure between build and park for a "fix/add/change/build X" phrasing, prefer **build**;
 prefer **park** for "maybe/eventually/what about" or anything costly-and-irreversible.
 
+## CRITERIA — the bar the build is measured against (required on every `build`)
+
+The gates prove a build is *harmless* (tests green, diff inside `TOUCHES`). Nothing in that
+proves it is **the change that was asked for**. `CRITERIA` is what closes that gap: 2-5 short,
+falsifiable statements about what must be **observably true** once the work is done.
+
+```
+CRITERIA:
+- The archived banner appears on the note detail view for an archived note.
+- An unarchived note shows no banner.
+```
+
+Write them **from the request text alone, before anything is built** — that ordering is the
+whole point, and the reactor enforces it (a `build` route with no `CRITERIA` is rejected and
+re-routed; it never reaches the queue). State outcomes, never implementation routes, and make
+each line something a reviewer who did not do the work could point at the diff and refute.
+
+The reactor injects this contract into every routing call, so it holds even if your local copy
+of this file is older than the code.
+
 ## TOUCHES — declare the write footprint (dispatch runs Touches-disjoint items in parallel)
 
 `TOUCHES` is a comma-separated list of path **prefixes** the build will write. Dispatch treats
@@ -97,6 +118,9 @@ Build:
 ```
 ROUTE: build
 SPEC: Add an "archived" banner to the note detail view when ArchiveNote marks the note archived.
+CRITERIA:
+- Opening a note that has been archived shows an "archived" banner on its detail view.
+- A note that has not been archived shows no banner.
 TOUCHES: src/slices/notes/
 MODEL: sonnet
 PRIORITY: medium
