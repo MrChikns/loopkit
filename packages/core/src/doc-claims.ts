@@ -97,6 +97,8 @@ export const SOURCE_PATHS = {
   slo: `${SRC}/slo.ts`,
   acceptance: `${SRC}/acceptance.ts`,
   judge: `${SRC}/judge.ts`,
+  criteria: `${SRC}/criteria.ts`,
+  verdicts: `${SRC}/verdicts.ts`,
 } as const;
 export type SourceKey = keyof typeof SOURCE_PATHS;
 
@@ -412,6 +414,9 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'foldRespec', file: 'fold', mustContain: "case 'item.respec':" },
   { id: 'certificationRollback', file: 'fold', mustContain: 'if (!couldBreak || !detection || !rollback)' },
   { id: 'overseerFloor', file: 'acceptance', mustContain: 'export function overseerFloor(' },
+  // acceptance criteria (WI-193)
+  { id: 'criteriaGate', file: 'criteria', mustContain: 'export function criteriaGate(' },
+  { id: 'criteriaAuthors', file: 'criteria', mustContain: 'export const CRITERIA_AUTHORS' },
   { id: 'judgeAdvisoryOnly', file: 'judge', mustContain: 'ADVISORY-ONLY' },
   { id: 'ledgerAppendWrite', file: 'ledger', mustContain: 'await fh.write(line);' },
   { id: 'ledgerCorruptSkip', file: 'ledger', mustContain: 'Corrupt line — skip with a warning' },

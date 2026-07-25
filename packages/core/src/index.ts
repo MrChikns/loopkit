@@ -26,6 +26,9 @@ export * from './costs.js';
 export * from './runbooks.js';
 export * from './verdicts.js';
 
+// Acceptance criteria: the falsifiable bar an item is measured against (WI-193)
+export * from './criteria.js';
+
 // Judge: LLM-as-judge merge review
 export * from './judge.js';
 

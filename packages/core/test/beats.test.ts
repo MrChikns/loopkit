@@ -346,6 +346,8 @@ test('reactor: route step parses a build reply into item.queued + queued state',
     const buildBlock = [
       'ROUTE: build',
       'SPEC: Add the banner slice.',
+      'CRITERIA:',
+      '- The banner is visible on the calendar surface after the change.',
       'TOUCHES: apps/example/src/slices/calendar/',
       'MODEL: sonnet',
       'PRIORITY: medium',
@@ -396,6 +398,8 @@ test('reactor: route step carries EFFORT from the conductor block onto item.queu
     const buildBlock = [
       'ROUTE: build',
       'SPEC: Do the hard refactor.',
+      'CRITERIA:',
+      '- The refactored calendar slice keeps its existing behaviour.',
       'TOUCHES: apps/example/src/slices/calendar/',
       'MODEL: opus',
       'EFFORT: high',
@@ -440,6 +444,8 @@ test('reactor: a fresh item.queued from stepRoute kicks dispatch immediately', a
     const buildBlock = [
       'ROUTE: build',
       'SPEC: Add the banner slice.',
+      'CRITERIA:',
+      '- The banner is visible on the calendar surface after the change.',
       'TOUCHES: apps/example/src/slices/calendar/',
       'REPLY: Queuing it now.',
     ].join('\n');
@@ -482,6 +488,8 @@ test('reactor: the default kickDispatch no-ops when dispatchKickLabel is unset (
     const buildBlock = [
       'ROUTE: build',
       'SPEC: Add the banner slice.',
+      'CRITERIA:',
+      '- The banner is visible on the calendar surface after the change.',
       'TOUCHES: apps/example/src/slices/calendar/',
       'REPLY: Queuing it now.',
     ].join('\n');
@@ -534,7 +542,7 @@ test('reactor: re-routes a spec-less queued item (unparked decision-park) into i
         seenPrompt = req.prompt;
         return {
           ok: true,
-          text: ['ROUTE: build', 'SPEC: Build the retry outbox slice.', 'TOUCHES: apps/example/src/public/', 'REPLY: Building it now.'].join('\n'),
+          text: ['ROUTE: build', 'SPEC: Build the retry outbox slice.', 'CRITERIA:', '- A failed send is retried from the outbox.', 'TOUCHES: apps/example/src/public/', 'REPLY: Building it now.'].join('\n'),
           usage: { in: 0, out: 1, usd: 0 },
         };
       },
@@ -1270,6 +1278,8 @@ test('reactor: opts.runDir redirects ALL run-state off repoRoot (plane-home mode
     const buildBlock = [
       'ROUTE: build',
       'SPEC: Add the banner slice.',
+      'CRITERIA:',
+      '- The banner is visible on the calendar surface after the change.',
       'TOUCHES: apps/example/src/slices/calendar/',
       'MODEL: sonnet',
       'PRIORITY: medium',
