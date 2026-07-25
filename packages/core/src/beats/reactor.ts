@@ -55,7 +55,7 @@ import { evaluateArmed, makeArmedProbe, ArmedProbe } from '../armed.js';
 import { commitLedgerResidue, LedgerCommitResult } from '../ledgerCommit.js';
 import { checkLedgerRegressionGuard } from '../regressionGuard.js';
 import { LedgerMaxIds } from '../doctor.js';
-import { captureWorktreeDiff } from '../judge.js';
+import { captureWorktreeDiff, captureCommitRangeDiff, buildJudgePrompt, runJudge, mergeVerdictData } from '../judge.js';
 import { buildPathologyPrompt, parsePathologyOutput, runPathology, formatEventTrail, TrailEvent } from '../pathology.js';
 
 // ---------------------------------------------------------------------------
@@ -3697,6 +3697,126 @@ async function stepTierCalibration(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Step (d1.5): post-merge judge backstop
+// ---------------------------------------------------------------------------
+
+/** Cost bound: judge at most this many unjudged merges per beat; the rest drain next beat. */
+const JUDGE_BACKSTOP_PER_BEAT_CAP = 10;
+
+/**
+ * Make the advisory merge-review verdict (review.verdict) fire on merged items whose LANE never
+ * judged them. The attended conductor + coordinator lanes emit item.merged with the SAME shape the
+ * beats do, but run no pre-merge judge — so an attended-run plane produces ZERO review.verdict
+ * events, starving the acceptance tier of its quality input (the classifier reads rec.judgeVerdict).
+ * This step is the universal backstop: it judges exactly the merged-state items carrying no
+ * judgeVerdict yet — the dispatch beat's own pre-merge judge already stamps the beat lane, so those
+ * are skipped, and no item is ever judged twice.
+ *
+ * Advisory + fail-open + capped, mirroring the beat judge's contract: it NEVER changes item state,
+ * NEVER blocks acceptance, and any per-item error/timeout/empty-diff just skips that item (retried
+ * next beat). Runs BEFORE tier-calibration/provisional-accept so a fresh verdict feeds THIS beat's
+ * acceptance tiering. Scoped to the PLANE's own repo — a registered target's merge commit range is
+ * not locally reachable from here, so target items are deferred (see the item's escalation note).
+ */
+async function stepMergeJudge(
+  opts: ReactorOptions,
+  cfg: LoopkitConfig,
+  provider: LlmProvider | null,
+  providerRegistry: ReturnType<typeof makeRegistry> | null,
+): Promise<StepResult> {
+  const step = 'merge-judge';
+  try {
+    const judgeEnabled = cfg.judge?.enabled ?? true;
+    if (!judgeEnabled) {
+      return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'judge disabled' };
+    }
+
+    const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
+    const foldResult = fold(allEvents);
+
+    // Eligible = merged, not yet judged, the plane's own repo (no registered target), and carrying
+    // a recorded commit range we can diff locally. Target items and range-less merges are skipped.
+    const eligible = [...foldResult.items.values()].filter(rec =>
+      rec.state === 'merged'
+      && !rec.judgeVerdict
+      && !(rec.targetId ?? rec.target)
+      && !!rec.mergeBaseSha
+      && !!rec.mergeHeadSha,
+    );
+    if (eligible.length === 0) {
+      return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'no unjudged plane merges' };
+    }
+
+    // Oldest-first (mergedAt ISO strings sort chronologically) so a backlog drains deterministically.
+    eligible.sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? ''));
+    const batch = eligible.slice(0, JUDGE_BACKSTOP_PER_BEAT_CAP);
+    const deferred = eligible.length - batch.length;
+
+    if (opts.dryRun) {
+      return {
+        step, ok: true, eventsWritten: 0, mdWritten: false,
+        detail: `[dry-run] would judge ${batch.length} unjudged plane merge(s)${deferred > 0 ? ` (+${deferred} deferred)` : ''}`,
+      };
+    }
+
+    const judgeModel = cfg.judge?.model ?? 'sonnet';
+    const judgeTimeoutMs = cfg.judge?.timeoutMs ?? 240_000;
+    const judgeMaxDiffChars = cfg.judge?.maxDiffChars ?? 20_000;
+
+    let judged = 0;
+    let eventsWritten = 0;
+    for (const rec of batch) {
+      // Sensitivity-scoped provider, fail-closed: the diff is repo material. Judge needs no tools.
+      const judgeProvider = resolveProviderForSensitivity(
+        providerRegistry ?? null, provider, itemSensitivity(rec), { requireTools: false },
+      );
+      if (!judgeProvider) continue;
+
+      // Reconstruct the merged commit range from the plane repo. An empty diff (range unreachable,
+      // or a genuinely empty merge) means "nothing to judge" — skip rather than fabricate a verdict
+      // on absent material (this also leaves fake-sha test fixtures untouched).
+      const diff = captureCommitRangeDiff(opts.repoRoot, rec.mergeBaseSha!, rec.mergeHeadSha!, judgeMaxDiffChars);
+      if (!diff) continue;
+
+      const spec = rec.spec ?? rec.sourceText ?? '';
+      const prompt = buildJudgePrompt(rec.id, spec, diff, rec.touches);
+      const runResult = await runJudge(judgeProvider, judgeModel, prompt, judgeTimeoutMs);
+
+      // review.verdict (advisory) shaped by the SHARED mergeVerdictData so a reactor-backstop verdict
+      // is byte-identical to a beat verdict; a provider failure becomes verdict:'unavailable', never
+      // a silent gap. cost.usage{loop:'judge'} mirrors the beat's metering.
+      const events: LedgerEvent[] = [
+        makeEvent('reactor', rec.id, 'review.verdict', mergeVerdictData(runResult, judgeModel)),
+      ];
+      if (runResult.usage) {
+        events.push(makeEvent('reactor', rec.id, 'cost.usage', {
+          provider: judgeProvider.name,
+          loop: 'judge',
+          tokens: (runResult.usage.in ?? 0) + (runResult.usage.out ?? 0),
+          usd: runResult.usage.usd,
+          wi: rec.id,
+          ...(runResult.usage.turns !== undefined ? { turns: runResult.usage.turns } : {}),
+          ...(runResult.usage.durationMs !== undefined ? { durationMs: runResult.usage.durationMs } : {}),
+        }));
+      }
+      await appendEvents(opts.ledgerDir, events);
+      eventsWritten += events.length;
+      judged++;
+      process.stderr.write(
+        `[reactor] merge-judge: ${rec.id} verdict=${runResult.parsed?.verdict ?? 'unavailable'} (post-merge backstop)\n`,
+      );
+    }
+
+    return {
+      step, ok: true, eventsWritten, mdWritten: false,
+      detail: `judged ${judged}/${batch.length} unjudged plane merge(s)${deferred > 0 ? ` (+${deferred} deferred)` : ''}`,
+    };
+  } catch (e) {
+    return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: `merge-judge failed: ${String(e)}` };
+  }
+}
+
 async function stepProvisionalAccept(
   opts: ReactorOptions,
   cfg: LoopkitConfig,
@@ -4665,6 +4785,13 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     // Step (d1): tier calibration (before accept — recalibrated windows
     // must be current for this beat's accept decisions)
     pushStep(await stepTierCalibration(opts, cfg));
+
+    // Step (d1.5): post-merge judge backstop — judge any merged item whose lane (attended
+    // conductor/coordinator) never ran the pre-merge judge, so the acceptance tiering below has a
+    // review.verdict to read. Advisory + fail-open + capped; runs before provisional-accept so a
+    // fresh verdict feeds THIS beat's tiering. Uses the same per-item sensitivity provider
+    // resolution as routing/engagement.
+    pushStep(await stepMergeJudge(opts, cfg, provider, providerRegistry));
 
     // Step (d2): provisional acceptance (after doctor — plane health confirmed above)
     pushStep(await stepProvisionalAccept(opts, cfg));

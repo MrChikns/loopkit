@@ -33,22 +33,18 @@ const JUDGE_TRUNCATION_MARKER = '\n[diff truncated — too large for judge]\n';
 const DIFF_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 
 /**
- * Capture `git diff --stat + patch` from a worktree (mergeBase..HEAD),
- * capped at `maxChars`. Best-effort: returns empty string on any error.
- * Used by both the judge stage and the dispatch repair-evidence path.
+ * Capture `git diff --stat + patch` for an arbitrary revision `range` (e.g. `A..B`) run in
+ * `cwd`, capped at `maxChars`. Best-effort: returns empty string on any error. The ENOBUFS
+ * overflow-detection + visible-truncation-marker semantics are the point of factoring this out
+ * (see DIFF_SPAWN_MAX_BUFFER) — every caller gets the same never-lie-about-truncation behavior.
  */
-export function captureWorktreeDiff(
-  wtPath: string,
-  mergeBase: string,
-  maxChars: number,
-): string {
-  if (!wtPath || !mergeBase) return '';
+function captureRangeDiff(cwd: string, range: string, maxChars: number): string {
   try {
-    const stat = spawnSync('git', ['diff', '--stat', `${mergeBase}..HEAD`], {
-      cwd: wtPath, stdio: 'pipe', maxBuffer: DIFF_SPAWN_MAX_BUFFER,
+    const stat = spawnSync('git', ['diff', '--stat', range], {
+      cwd, stdio: 'pipe', maxBuffer: DIFF_SPAWN_MAX_BUFFER,
     });
-    const patch = spawnSync('git', ['diff', `${mergeBase}..HEAD`], {
-      cwd: wtPath, stdio: 'pipe', maxBuffer: DIFF_SPAWN_MAX_BUFFER,
+    const patch = spawnSync('git', ['diff', range], {
+      cwd, stdio: 'pipe', maxBuffer: DIFF_SPAWN_MAX_BUFFER,
     });
     const statText = stat.stdout?.toString() ?? '';
     const patchText = patch.stdout?.toString() ?? '';
@@ -64,6 +60,38 @@ export function captureWorktreeDiff(
   } catch {
     return '';
   }
+}
+
+/**
+ * Capture `git diff --stat + patch` from a worktree (mergeBase..HEAD),
+ * capped at `maxChars`. Best-effort: returns empty string on any error.
+ * Used by both the judge stage and the dispatch repair-evidence path.
+ */
+export function captureWorktreeDiff(
+  wtPath: string,
+  mergeBase: string,
+  maxChars: number,
+): string {
+  if (!wtPath || !mergeBase) return '';
+  return captureRangeDiff(wtPath, `${mergeBase}..HEAD`, maxChars);
+}
+
+/**
+ * Capture the diff of a MERGED item's recorded commit range (`baseSha..headSha`) from a repo
+ * checkout, capped at `maxChars`. This is the post-merge counterpart of captureWorktreeDiff for
+ * lanes that no longer hold the build worktree (e.g. the reactor's post-merge judge backstop,
+ * which judges items merged by an attended lane that never ran the pre-merge judge). Returns ''
+ * when either sha is missing or the range is not locally reachable — the caller treats an empty
+ * diff as "nothing to judge here" and skips, so an unreachable range never fabricates a verdict.
+ */
+export function captureCommitRangeDiff(
+  repoRoot: string,
+  baseSha: string,
+  headSha: string,
+  maxChars: number,
+): string {
+  if (!repoRoot || !baseSha || !headSha) return '';
+  return captureRangeDiff(repoRoot, `${baseSha}..${headSha}`, maxChars);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,4 +299,47 @@ export async function runJudge(
 
   const parsed = parseJudgeOutput(result.text ?? '');
   return { parsed, usage: result.usage };
+}
+
+// ---------------------------------------------------------------------------
+// Verdict-event shaping (shared by every judging lane)
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a JudgeRunResult to the `review.verdict` event payload — the ONE place that decides what a
+ * merge-review verdict event looks like, so every lane (the dispatch beat's pre-merge judge and
+ * the reactor's post-merge backstop) emits an identical, correctly-shaped verdict.
+ *
+ * TRUST-HARDENING (defect b): a provider error/timeout that produced NO usable verdict is NOT a
+ * silent evidence loss — it becomes an explicit verdict:'unavailable' carrying the error in
+ * `reason`, which the acceptance classifier floors at the 'review' tier (never auto-accepts). The
+ * merge itself is never blocked; the judge is advisory. Parsed output (incl. 'unparseable') passes
+ * through verbatim.
+ */
+export function mergeVerdictData(run: JudgeRunResult, model: string): ReviewVerdictData {
+  if (!run.parsed) {
+    const reason = run.providerError ?? 'unknown';
+    return {
+      verdict: 'unavailable',
+      confidence: 0,
+      specSatisfied: 'unknown',
+      scopeCreep: 'unknown',
+      testTheatre: 'unknown',
+      reasons: [`judge unavailable: ${reason.slice(0, 400)}`],
+      model,
+      judge: 'merge-review',
+      reason,
+    };
+  }
+  const p = run.parsed;
+  return {
+    verdict: p.verdict,
+    confidence: p.confidence,
+    specSatisfied: p.specSatisfied,
+    scopeCreep: p.scopeCreep,
+    testTheatre: p.testTheatre,
+    reasons: p.reasons,
+    model,
+    judge: 'merge-review',
+  };
 }

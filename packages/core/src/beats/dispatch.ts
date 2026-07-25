@@ -46,7 +46,7 @@ import { readExitFile } from '../exitfile.js';
 import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
-import { captureWorktreeDiff, buildJudgePrompt, runJudge } from '../judge.js';
+import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData } from '../judge.js';
 import { runClaimAuditGate } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
@@ -1322,8 +1322,11 @@ export function attemptScopedCommit(
  * Build the read-only scout prompt for a single item. The scout output is stored
  * as an `item.briefed` event and injected into the subsequent build prompt.
  * Tools: Read, Grep, Glob — read-only; the scout MUST NOT modify any file.
+ *
+ * Exported so lanes other than the dispatch beat (e.g. the attended conductor) can reuse the ONE
+ * scout prompt/parse pair (with parseBrief below) rather than fork a second briefing prompt.
  */
-function buildScoutPrompt(itemId: string, spec: string, touches?: string): string {
+export function buildScoutPrompt(itemId: string, spec: string, touches?: string): string {
   const touchesLine = touches ? `Declared Touches (code area): ${touches}\n` : '';
   return `You are a read-only scout preparing a context pack for an implementation agent that has never seen this repo. Your job is to orient the builder quickly so it can land the change on the first attempt.
 
@@ -3831,38 +3834,24 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
               // the gap is visible in the ledger; the acceptance classifier floors any item
               // carrying it at 'review' (never auto/optional). The merge STILL proceeds — the
               // judge is advisory and never blocks — but the evidence gap is never silent again.
+              // mergeVerdictData (judge.ts) is the ONE place the unavailable shape is defined so the
+              // reactor's post-merge backstop emits an identical verdict.
               const reason = judgeRunResult.providerError ?? 'unknown';
               process.stderr.write(
                 `[dispatch] judge: ${r.id} provider error (${reason}) — recording review.verdict:unavailable, merge proceeds\n`,
               );
-              const unavailableEvent = makeEvent('dispatch', r.id, 'review.verdict', {
-                verdict: 'unavailable',
-                confidence: 0,
-                specSatisfied: 'unknown',
-                scopeCreep: 'unknown',
-                testTheatre: 'unknown',
-                reasons: [`judge unavailable: ${reason.slice(0, 400)}`],
-                model: judgeModel,
-                judge: 'merge-review',
-                reason,
-              } as import('../schema.js').ReviewVerdictData);
-              await appendEvents(opts.ledgerDir, [unavailableEvent]);
+              await appendEvents(opts.ledgerDir, [
+                makeEvent('dispatch', r.id, 'review.verdict', mergeVerdictData(judgeRunResult, judgeModel)),
+              ]);
               continue;
             }
 
             const { parsed, usage } = judgeRunResult;
-            // Append review.verdict event (advisory — never changes state)
-            const verdictEvent = makeEvent('dispatch', r.id, 'review.verdict', {
-              verdict: parsed.verdict,
-              confidence: parsed.confidence,
-              specSatisfied: parsed.specSatisfied,
-              scopeCreep: parsed.scopeCreep,
-              testTheatre: parsed.testTheatre,
-              reasons: parsed.reasons,
-              model: judgeModel,
-              judge: 'merge-review',
-            } as import('../schema.js').ReviewVerdictData);
-            await appendEvents(opts.ledgerDir, [verdictEvent]);
+            // Append review.verdict event (advisory — never changes state). Shaped by the shared
+            // mergeVerdictData helper so beat and reactor-backstop verdicts are byte-identical.
+            await appendEvents(opts.ledgerDir, [
+              makeEvent('dispatch', r.id, 'review.verdict', mergeVerdictData(judgeRunResult, judgeModel)),
+            ]);
 
             // Append cost.usage for judge call (mirrors scout/dispatch cost metering).
             // Pass through turns + durationMs when present.
