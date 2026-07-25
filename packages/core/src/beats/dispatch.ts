@@ -792,6 +792,36 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
   }
 }
 
+/**
+ * WI-172: the git sequence shared by all three worktree-creation call sites (dispatch's target
+ * lane, dispatch's batch lane, conductor's cluster lane) — drop any stale worktree/branch of the
+ * SAME name, `worktree add -b`, then provision deps. ONLY the git sequence: each caller keeps its
+ * own park-on-failure event shape (they differ deliberately — a batch-lane park writes N events
+ * for a co-located group, a conductor park returns an `outcome:'error'` cluster result, a
+ * target-lane park never cleans up the worktree it just made on a deps failure while the batch
+ * lane does) — none of that belongs in a shared helper, so it stays at the call site.
+ */
+export function openBuildWorktree(
+  repoRoot: string,
+  wtPath: string,
+  branch: string,
+  depsWorkdirs: string[],
+): { ok: true } | { ok: false; stage: 'worktree-add'; reason: string } | { ok: false; stage: 'deps'; reason: string } {
+  removeWorktree(repoRoot, wtPath);
+  spawnSync('git', ['branch', '-D', branch], { cwd: repoRoot, stdio: 'pipe' });
+  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: repoRoot, stdio: 'pipe' });
+  if (wtAdd.status !== 0) {
+    return { ok: false, stage: 'worktree-add', reason: wtAdd.stderr?.toString().trim() ?? '' };
+  }
+  if (depsWorkdirs.length > 0) {
+    const depsSetup = setupWorktreeDeps(repoRoot, wtPath, depsWorkdirs);
+    if (depsSetup.buildFailures.length > 0) {
+      return { ok: false, stage: 'deps', reason: depsSetup.buildFailures.join('; ') };
+    }
+  }
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // Worker evidence + worktree verification
 // ---------------------------------------------------------------------------
@@ -2459,34 +2489,22 @@ export async function runTargetLane(
     }
 
     // ── Worktree of the TARGET repo ──────────────────────────────────────────
-    removeWorktree(gitRoot, wtPath);
-    spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
-    const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], { cwd: gitRoot, stdio: 'pipe' });
-    if (wtAdd.status !== 0) {
-      const reason = `infra: target worktree add failed: ${wtAdd.stderr?.toString().trim()}`;
+    // (WI-172) Deps provisioning source is the target's own repoPath (manifest.depsWorkdirs),
+    // never the plane's embedded repo — a target knows its own dependency roots. A deps failure
+    // here deliberately does NOT clean up the worktree (unchanged from before the extraction) —
+    // the batch lane's copy of this sequence does clean up on the same failure; that is a real,
+    // pre-existing difference between the two call sites, left at the call site on purpose.
+    const opened = openBuildWorktree(gitRoot, wtPath, branch, manifest.depsWorkdirs);
+    if (!opened.ok) {
+      const reason = opened.stage === 'worktree-add'
+        ? `infra: target worktree add failed: ${opened.reason}`
+        : `infra: target file:-dep build failed: ${opened.reason}`;
       await appendEvents(opts.ledgerDir, [
-        makeEvent('dispatch', rec.id, 'build.crashed', { reason }),
+        ...(opened.stage === 'worktree-add' ? [makeEvent('dispatch', rec.id, 'build.crashed', { reason })] : [makeEvent('dispatch', rec.id, 'gate.failed', { reason })]),
         makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
       ]);
       results.push({ item: rec.id, dispatched: false, eventsWritten: 2, detail: reason });
       continue;
-    }
-
-    // Provision node_modules from the TARGET repo's own checkout (manifest.depsWorkdirs) —
-    // the target lane historically skipped this and every gate needing a local toolchain
-    // (tsc et al.) failed 127. The deps source is the target's repoPath, never the plane's
-    // embedded repo: a target knows its own dependency roots.
-    if (manifest.depsWorkdirs.length > 0) {
-      const depsSetup = setupWorktreeDeps(gitRoot, wtPath, manifest.depsWorkdirs);
-      if (depsSetup.buildFailures.length > 0) {
-        const reason = `infra: target file:-dep build failed: ${depsSetup.buildFailures.join('; ')}`;
-        await appendEvents(opts.ledgerDir, [
-          makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
-          makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
-        ]);
-        results.push({ item: rec.id, dispatched: false, eventsWritten: 2, detail: reason });
-        continue;
-      }
     }
 
     // ADR-008 §2 detach eligibility (fail-closed) — the SAME rule the legacy lane uses: the flag is
@@ -3290,47 +3308,29 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         continue;
       }
 
-      // Remove stale worktree and branch
-      removeWorktree(opts.repoRoot, wtPath);
-      spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
-
-      // Create worktree
-      const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], {
-        cwd: opts.repoRoot, stdio: 'pipe',
-      });
-      if (wtAdd.status !== 0) {
-        const reason = `infra: worktree add failed: ${wtAdd.stderr?.toString().trim()}`;
+      // Create worktree + provision deps (WI-172: shared git sequence — node_modules setup
+      // covers every deps workdir, since the gate may run suites in more than one package; a
+      // file:-dep build that exits non-zero means the gate would run against stale dist and
+      // silently green, so park immediately rather than lie).
+      const opened = openBuildWorktree(opts.repoRoot, wtPath, branch, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
+      if (!opened.ok) {
+        const reason = opened.stage === 'worktree-add'
+          ? `infra: worktree add failed: ${opened.reason}`
+          : `infra: file:-dep build failed: ${opened.reason}`;
         for (const r of group) {
-          allNewEvents.push(makeEvent('dispatch', r.id, 'build.crashed', { reason }));
+          allNewEvents.push(makeEvent('dispatch', r.id, opened.stage === 'worktree-add' ? 'build.crashed' : 'gate.failed', { reason }));
           allNewEvents.push(makeEvent('dispatch', r.id, 'item.parked', { reason, parkKind: 'ops' }));
         }
         results.push({
           item: rec.id, dispatched: false, eventsWritten: 2 * group.length, detail: reason,
         });
-        workers.push({ recs: group, branch, wtPath, attempt: attemptNum, providerPromise: null, spawned: false, errFile, provider: groupProvider });
-        continue;
-      }
-
-      // Set up node_modules for every deps workdir — the gate may run suites in more than
-      // one package (the gate script rebuilds the framework's own package when the diff touches
-      // it); a missing link there causes a `tsc: command not found` approve-gate failure. For a
-      // workdir with local `file:` deps this overlays the main tree's node_modules but points
-      // the file: package at the WORKTREE's copy so a branch changing both the package and the
-      // app compiles against the branch source, not the stale main tree.
-      const depsSetup = setupWorktreeDeps(opts.repoRoot, wtPath, cfg.depsWorkdirs ?? [cfg.appWorkdir]);
-      if (depsSetup.buildFailures.length > 0) {
-        // A file:-dep build that exits non-zero means the gate would run against stale dist
-        // and silently green. Park immediately rather than lie.
-        const reason = `infra: file:-dep build failed: ${depsSetup.buildFailures.join('; ')}`;
-        for (const r of group) {
-          allNewEvents.push(makeEvent('dispatch', r.id, 'gate.failed', { reason }));
-          allNewEvents.push(makeEvent('dispatch', r.id, 'item.parked', { reason, parkKind: 'ops' }));
+        // Unlike the worktree-add failure (nothing was created), a deps failure DOES leave a
+        // worktree/branch behind — clean it up here (the target lane's copy of this sequence
+        // deliberately does NOT, a real difference between the two call sites, left in place).
+        if (opened.stage === 'deps') {
+          removeWorktree(opts.repoRoot, wtPath);
+          spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
         }
-        results.push({
-          item: rec.id, dispatched: false, eventsWritten: 2 * group.length, detail: reason,
-        });
-        removeWorktree(opts.repoRoot, wtPath);
-        spawnSync('git', ['branch', '-D', branch], { cwd: opts.repoRoot, stdio: 'pipe' });
         workers.push({ recs: group, branch, wtPath, attempt: attemptNum, providerPromise: null, spawned: false, errFile, provider: groupProvider });
         continue;
       }

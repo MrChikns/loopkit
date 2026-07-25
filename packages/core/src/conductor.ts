@@ -26,7 +26,6 @@
  *    beat's worktree-deps helper is shared.
  */
 
-import { setupWorktreeDeps } from './beats/worktree-deps.js';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { appendEvents, loadAllEventsWithQuarantine } from './ledger.js';
@@ -42,6 +41,7 @@ import {
   CommitMode,
   loadApprovedTouches,
   mergeEvidence,
+  openBuildWorktree,
   persistWorkerLog,
   removeWorktree,
   runPostBuildGuards,
@@ -420,27 +420,19 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
   const branch = dirName;
   const wtPath = join(plan.repoPath, '..', dirName);
 
-  // One worktree per cluster, branched from the repo's current HEAD.
-  removeWorktree(plan.repoPath, wtPath);
-  spawnSync('git', ['branch', '-D', branch], { cwd: plan.repoPath, stdio: 'pipe' });
-  const wtAdd = spawnSync('git', ['worktree', 'add', '-b', branch, wtPath, 'HEAD'], {
-    cwd: plan.repoPath, stdio: 'pipe',
-  });
-  if (wtAdd.status !== 0) {
-    return { ...base, outcome: 'error', detail: `worktree add failed: ${wtAdd.stderr?.toString().trim()}` };
+  // One worktree per cluster, branched from the repo's current HEAD (WI-172: shared git
+  // sequence with the dispatch beat's own worktree-creation call sites — node_modules
+  // provisioning uses the same rule as the dispatch target lane: without it, any gate needing
+  // a local toolchain exits 127 in a fresh worktree; a failed file: dep build is a real red).
+  const opened = openBuildWorktree(plan.repoPath, wtPath, branch, plan.depsWorkdirs);
+  if (!opened.ok) {
+    const detail = opened.stage === 'worktree-add'
+      ? `worktree add failed: ${opened.reason}`
+      : `deps provisioning failed: ${opened.reason}`;
+    return { ...base, outcome: 'error', detail };
   }
   const baseSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' })
     .stdout?.toString().trim();
-
-  // Provision node_modules from the target's own checkout (manifest.depsWorkdirs) — same
-  // rule as the dispatch target lane: without it, any gate needing a local toolchain exits
-  // 127 in a fresh worktree. Failure to build a file: dep is a real red, not a skip.
-  if (plan.depsWorkdirs.length > 0) {
-    const deps = setupWorktreeDeps(plan.repoPath, wtPath, plan.depsWorkdirs);
-    if (deps.buildFailures.length > 0) {
-      return { ...base, outcome: 'error', detail: `deps provisioning failed: ${deps.buildFailures.join('; ')}` };
-    }
-  }
 
   // ── Build the cluster's items SEQUENTIALLY in the shared worktree ──────────────────────
   const built: ItemRecord[] = [];
