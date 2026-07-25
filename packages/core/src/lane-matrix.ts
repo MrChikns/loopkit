@@ -83,10 +83,20 @@ export const GUARD_IDS = [
   'denialNote',
   'gateWrapper',
   'commitSide',
+  'claimArbitration',
+  'postIntegrationRegate',
 ] as const;
 export type GuardId = (typeof GUARD_IDS)[number];
 
-/** Cell value for the boolean guard columns. `gateWrapper`/`commitSide` are enums instead. */
+/**
+ * Columns whose cell is an ENUM STRING rather than a boolean marker hit. A boolean would be a
+ * lie for all four: "does this lane arbitrate claims" and "does this lane re-gate" both have a
+ * meaningful middle (reserve without arbitrating; gate once and merge anyway) that `no` would
+ * flatten into "absent", which is precisely the misreading `limitations.md` warns about.
+ */
+export type EnumGuardId = 'gateWrapper' | 'commitSide' | 'claimArbitration' | 'postIntegrationRegate';
+
+/** Cell value for the boolean guard columns. The {@link EnumGuardId} columns are strings instead. */
 export type Cell = boolean | string;
 
 export interface LaneRow {
@@ -277,7 +287,7 @@ export function extractFunctionSpan(src: string, functionName: string): string |
 // ---------------------------------------------------------------------------
 
 /** A boolean-guard marker: the guard is "present" iff this pattern appears in the lane span. */
-const BOOLEAN_MARKERS: Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, RegExp> = {
+const BOOLEAN_MARKERS: Record<Exclude<GuardId, EnumGuardId>, RegExp> = {
   touchesOverstep: /checkTouchesOverstep\s*\(/,
   spineCheck: /checkSpine\s*\(/,
   judge: /\brunJudge\s*\(/,
@@ -299,7 +309,7 @@ const BOOLEAN_MARKERS: Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, Re
  * the guard fires under at least some condition. Declared literals win over the BOOLEAN_MARKERS
  * direct-call fallback (which stays live for a lane that hasn't migrated, e.g. the batch lane).
  */
-const CONFIG_KEY_FOR_GUARD: Partial<Record<Exclude<GuardId, 'gateWrapper' | 'commitSide'>, string>> = {
+const CONFIG_KEY_FOR_GUARD: Partial<Record<Exclude<GuardId, EnumGuardId>, string>> = {
   touchesOverstep: 'touchesOverstep',
   spineCheck: 'spineCheck',
   judge: 'judge',
@@ -402,6 +412,101 @@ function detectCommitSide(span: string, fileSource: string): string {
   return 'n/a (no code diff)';
 }
 
+/**
+ * Claim-before-pick (ADR-007): does this lane RESERVE the item it is about to build, and does it
+ * yield the ones a foreign holder took? Added for WI-184 — `limitations.md` names this as one of
+ * the two invariants that genuinely differ between lanes, and the matrix could not see it.
+ *
+ * The ladder, strongest first. Every rung is a REAL call/appended-event-type in the lane's own
+ * span (comments are stripped before matching), never a config literal:
+ *
+ *  - `arbitrate+claim` — the lane runs the inline arbitration (`decideClaimArbitration`) AND
+ *    appends its own `item.claimed` in the same locked pass (the engineering/batch lane).
+ *  - `claim (claimItems)` — the lane reserves through the SHARED session verb `claimItems`,
+ *    which re-folds under the ledger lock and skips anything another session actively holds
+ *    (`session.ts`). Deliberately a DIFFERENT cell from `arbitrate+claim`, not a weaker synonym:
+ *    both yield to a foreign claim, but only the inline path additionally yields to a foreign
+ *    in-flight BUILD (a recent `build.dispatched` carrying no claim — WI-074). Reading these two
+ *    as equal is the misreading this column exists to prevent.
+ *  - `arbitrate (no claim)` / `claim (inline)` — the two half-ported shapes. Neither exists today;
+ *    they are here so a partial port renders as what it is instead of being rounded to a
+ *    neighbouring cell.
+ *  - `defer-read` — the lane only READS claim state (`isClaimActive`) to skip claimed items. A
+ *    read, not a reservation: it cannot close the read-to-spawn race.
+ *  - `none` — the lane neither reserves nor reads. NOTE this is a statement about the lane's OWN
+ *    span: the planning and target lanes are handed their items by `runDispatch`, whose shared
+ *    pick list does a `defer-read` on their behalf *before* dispatching them — but neither lane
+ *    ever appends a claim, which is exactly the gap `limitations.md` records.
+ */
+function detectClaimArbitration(span: string): string {
+  const arbitrates = /\bdecideClaimArbitration\s*\(/.test(span);
+  // Naming the `item.claimed` event type in real (non-comment) code is how a lane appends a
+  // reservation — the string literal is the event type passed to `makeEvent`. String literals
+  // survive `stripComments`, so this fires on the append and not on prose about it.
+  const claimsInline = /['"]item\.claimed['"]/.test(span);
+  const claimsViaVerb = /\bclaimItems\s*\(/.test(span);
+  const readsClaims = /\bisClaimActive\s*\(/.test(span);
+
+  if (arbitrates && claimsInline) return 'arbitrate+claim';
+  if (claimsViaVerb) return 'claim (claimItems)';
+  if (arbitrates) return 'arbitrate (no claim)';
+  if (claimsInline) return 'claim (inline)';
+  if (readsClaims) return 'defer-read';
+  return 'none';
+}
+
+/**
+ * Post-integration re-gate: before merging, does the lane replay its branch onto a merge
+ * destination that MOVED during the build and re-run the gate over the combined state? The
+ * invariant (engineering lane, `dispatch.ts`): nothing reaches the destination without a gate
+ * covering every commit landed since the branch point.
+ *
+ * Detected structurally, in two parts with ORDER enforced (the gate marker must appear at a
+ * later offset in the span than the replay marker — textual order is execution order in these
+ * lanes' straight-line terminals). A lane that merely rebases somewhere, or merely gates, does
+ * not qualify; only "replay, THEN gate again" does:
+ *
+ *  - replay = `git rebase` ONTO A REF, or the push-race variant (`git reset` to the
+ *    freshly-fetched tip followed by a `git merge` of the branch). Both are the same invariant
+ *    with different mechanics, and both are matched so a lane that ports only the second one is
+ *    not reported as lacking the invariant it has.
+ *    "Onto a ref" is load-bearing, not pedantry: the batch lane's conflict handler calls
+ *    `git rebase --abort`, which a bare `['rebase'` marker happily matched — so deleting the
+ *    real replay left the cleanup call behind and the cell went on reporting `re-gate` for a
+ *    lane that no longer re-gated (found by mutation-testing this column, WI-184). The next
+ *    argument must therefore NOT be a `--flag`; `--abort`/`--continue`/`--skip` are rebase
+ *    bookkeeping, never an integration replay.
+ *  - re-gate = any gate-running call (`runLaneGate` / `runGate` / `runClusterGate` /
+ *    `runPostBuildGuards`) after that point.
+ *
+ * Cells: `re-gate` (replay + gate), `gate-once` (the lane merges — `closeMergedCluster` or an
+ * inline `git merge` — having gated only on its own untouched branch), `n/a (no merge)` (no
+ * merge step at all, i.e. the planning lane, which only queues child items).
+ */
+function detectPostIntegrationRegate(span: string): string {
+  // The negative lookahead sits DIRECTLY after the comma and swallows the whitespace itself.
+  // Written as `\s*,\s*(?!['"]--)` it is defeated by backtracking (the trailing `\s*` matches
+  // zero characters, the lookahead then inspects a space instead of the quote, and `--abort`
+  // sails through) — a hole this probe's own mutation test caught.
+  const rebase = /spawnSync\(\s*['"]git['"]\s*,\s*\[\s*['"]rebase['"]\s*,(?!\s*['"]--)/.exec(span);
+  const reset = /spawnSync\(\s*['"]git['"]\s*,\s*\[\s*['"]reset['"]/.exec(span);
+  const mergeSpawn = /spawnSync\(\s*['"]git['"]\s*,\s*\[\s*['"]merge['"]/;
+  const gateCall = /\b(?:runLaneGate|runClusterGate|runPostBuildGuards|runGate)\s*\(/;
+
+  const replayOffsets: number[] = [];
+  if (rebase) replayOffsets.push(rebase.index);
+  // A bare `git reset` is not an integration replay (a lane may reset for cleanup); it counts
+  // only when a `git merge` of the branch follows it — the push-race recovery shape.
+  if (reset && mergeSpawn.test(span.slice(reset.index))) replayOffsets.push(reset.index);
+
+  if (replayOffsets.length > 0) {
+    const from = Math.min(...replayOffsets);
+    if (gateCall.test(span.slice(from))) return 're-gate';
+  }
+  const merges = /\bcloseMergedCluster\s*\(/.test(span) || mergeSpawn.test(span);
+  return merges ? 'gate-once' : 'n/a (no merge)';
+}
+
 // ---------------------------------------------------------------------------
 // Per-lane extraction
 // ---------------------------------------------------------------------------
@@ -448,6 +553,11 @@ function buildRow(spec: LaneSpanSpec, sources: Record<keyof typeof LANE_SOURCE_F
   // DEFINES the gate helper or imports it — see detectGateWrapper.
   cells.gateWrapper = detectGateWrapper(combined, stripComments(src));
   cells.commitSide = detectCommitSide(combined, stripComments(src));
+  // Span-only (no file-scope fallback): both are properties of what THIS lane's terminal does,
+  // and dispatch.ts houses three lanes — a file-scope read would attribute the engineering
+  // lane's arbitration and re-gate to the planning and target lanes that sit beside it.
+  cells.claimArbitration = detectClaimArbitration(combined);
+  cells.postIntegrationRegate = detectPostIntegrationRegate(combined);
 
   return { lane: spec.lane, functionNames: spec.functionNames, cells };
 }
@@ -493,6 +603,8 @@ const GUARD_LABELS: Record<GuardId, string> = {
   denialNote: 'denialNote',
   gateWrapper: 'gate wrapper',
   commitSide: 'commit side',
+  claimArbitration: 'claim arbitration',
+  postIntegrationRegate: 'post-integration re-gate',
 };
 
 export function renderLaneMatrixMarkdown(matrix: LaneMatrix): string {

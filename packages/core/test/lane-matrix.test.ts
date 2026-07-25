@@ -48,27 +48,47 @@ import {
  * the lane's own span, so the generator reads the lane's DECLARED `gateWrapper` config literal
  * instead of a direct-call marker (see detectGateWrapper's doc comment) — this is not a
  * regression, it is the intended shape once a lane delegates its gate-running to one place.
+ *
+ * WI-184 (claimArbitration + postIntegrationRegate): the two invariants `limitations.md` says
+ * actually differ between lanes, previously invisible here. Each cell below was read off the
+ * source before the generator was run, not copied from its output:
+ *   - batch `arbitrate+claim` — `decideClaimArbitration` + the `item.claimed` append inside
+ *     runDispatch's locked pre-spawn pass; `re-gate` — `git rebase` onto the advanced tip
+ *     followed by a second `runLaneGate` before the merge (plus the push-race repeat).
+ *   - conductor `claim (claimItems)` — runConduct reserves via the shared session verb;
+ *     `gate-once` — runCluster gates its branch then `closeMergedCluster`s it, no replay.
+ *   - target `none` / `gate-once` — runTargetLane and finalizeTargetBuild contain no claim code
+ *     at all (runDispatch's shared pick list defers on their behalf, but never reserves) and
+ *     merge via `closeMergedCluster` straight after their single gate.
+ *   - planning `none` / `n/a (no merge)` — queues child items; no claim, no git merge.
+ * A change in ANY of these four cells is a real lane-invariant change (e.g. WI-186 porting
+ * claim-before-pick to the target lane would flip target's claimArbitration) — update the cell
+ * deliberately, never by pasting the regen.
  */
 const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
   planning: {
     touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'none', commitSide: 'n/a (no code diff)',
+    claimArbitration: 'none', postIntegrationRegate: 'n/a (no merge)',
   },
   target: {
     touchesOverstep: true, spineCheck: false, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'runGate (declared)', commitSide: 'dispatch (declared)',
+    claimArbitration: 'none', postIntegrationRegate: 'gate-once',
   },
   batch: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: true, push: true,
     alreadyShippedCommit: true, denialNote: true,
     gateWrapper: 'runLaneGate', commitSide: 'dispatch (declared)',
+    claimArbitration: 'arbitrate+claim', postIntegrationRegate: 're-gate',
   },
   conductor: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'runGate (declared)', commitSide: 'worker (declared)',
+    claimArbitration: 'claim (claimItems)', postIntegrationRegate: 'gate-once',
   },
 };
 
@@ -114,6 +134,8 @@ test('lane matrix: markdown rendering contains every lane and every guard column
   assert.ok(md.includes('Touches-overstep'));
   assert.ok(md.includes('gate wrapper'));
   assert.ok(md.includes('commit side'));
+  assert.ok(md.includes('claim arbitration'));
+  assert.ok(md.includes('post-integration re-gate'));
 });
 
 // ---------------------------------------------------------------------------
@@ -182,6 +204,8 @@ test('lane matrix: a marker mentioned only in a COMMENT must not flip a guard ce
 export async function runDispatch(opts: unknown): Promise<void> {
   // commentary mentioning BUILDER_TOOLS and attemptScopedCommit and runJudge and checkSpine
   // and checkTouchesOverstep and alreadyShippedCommit and buildScoutPrompt in prose only.
+  // Also narrating decideClaimArbitration, claimItems, an 'item.claimed' append and a
+  // spawnSync('git', ['rebase', tip]) re-gate — all prose, none of it executed here.
   const denialNoteLookingIdentifierButNotReal = 'denialNote appears only as a string here';
   doRealWork();
 }
@@ -200,6 +224,8 @@ async function runCluster(): Promise<void> { noop(); }
   }
   assert.equal(batch.cells.gateWrapper, 'none');
   assert.equal(batch.cells.commitSide, 'n/a (no code diff)');
+  assert.equal(batch.cells.claimArbitration, 'none', 'claim arbitration must not fire from prose');
+  assert.equal(batch.cells.postIntegrationRegate, 'n/a (no merge)', 're-gate must not fire from prose');
 });
 
 test('lane matrix: a lane that genuinely calls a guard reports it present, from injected sources', () => {
@@ -215,6 +241,9 @@ export async function runDispatch(opts: unknown): Promise<void> {
   spawnSync('git', ['push'], { cwd: opts.repoRoot });
   const shipped = alreadyShippedCommit(opts.repoRoot, id);
   let denialNote = '';
+  const decided = decideClaimArbitration(candidateIds, freshResult, sessionId, nowMs, ttlMs);
+  await tx.append([makeEvent('dispatch', d.item, 'item.claimed', { sessionId, ttlMinutes })]);
+  spawnSync('git', ['rebase', headBefore], { cwd: w.wtPath, stdio: 'pipe' });
   runLaneGate(gateId, cfg, wtPath, false, base, changedFiles);
 }
 `;
@@ -228,6 +257,115 @@ async function runCluster(): Promise<void> { noop(); }
     assert.equal(batch.cells[guard], true, `guard '${guard}' should be detected as present`);
   }
   assert.equal(batch.cells.gateWrapper, 'runLaneGate');
+  assert.equal(batch.cells.claimArbitration, 'arbitrate+claim');
+  assert.equal(batch.cells.postIntegrationRegate, 're-gate');
+});
+
+// ---------------------------------------------------------------------------
+// WI-184 columns: claim arbitration + post-integration re-gate.
+// These two are the invariants that actually differ between lanes (limitations.md), so their
+// probes get explicit coverage of every rung — a cell that silently rounds one lane's shape to
+// a neighbouring lane's would make the table lie exactly where it is trusted most.
+// ---------------------------------------------------------------------------
+
+/** Build a matrix from minimal lane stubs, overriding one lane's body. */
+function matrixWithBodies(bodies: { batch?: string; target?: string; conduct?: string }): LaneMatrix {
+  const dispatchSrc = `
+async function runPlanningLane(): Promise<void> { noop(); }
+async function finalizeTargetBuild(): Promise<void> { ${bodies.target ?? 'noop();'} }
+async function runTargetLane(): Promise<void> { noop(); }
+export async function runDispatch(opts: unknown): Promise<void> { ${bodies.batch ?? 'noop();'} }
+`;
+  const conductorSrc = `
+export async function runConduct(): Promise<void> { ${bodies.conduct ?? 'noop();'} }
+async function runCluster(): Promise<void> { noop(); }
+`;
+  return buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+}
+
+function cellOf(matrix: LaneMatrix, lane: string, guard: 'claimArbitration' | 'postIntegrationRegate'): string {
+  return String(matrix.rows.find(r => r.lane === lane)!.cells[guard]);
+}
+
+test('claim arbitration: the shared session verb reads as its own rung, not as inline arbitration', () => {
+  // The conductor reserves via claimItems (which yields to a foreign CLAIM under the lock) but
+  // has no inline arbitration (which additionally yields to a foreign in-flight BUILD). Rounding
+  // these two together is the misreading the column exists to prevent.
+  const m = matrixWithBodies({ conduct: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });` });
+  assert.equal(cellOf(m, 'conductor', 'claimArbitration'), 'claim (claimItems)');
+});
+
+test('claim arbitration: reading claim state without reserving is defer-read, not a claim', () => {
+  const m = matrixWithBodies({ batch: `const pick = recs.filter(r => !isClaimActive(r, sessions, Date.now()));` });
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'defer-read');
+});
+
+test('claim arbitration: a half-ported lane renders as half-ported (arbitrate without claim, claim without arbitration)', () => {
+  const arbitrateOnly = matrixWithBodies({ batch: `const d = decideClaimArbitration(ids, fresh, sid, now, ttl);` });
+  assert.equal(cellOf(arbitrateOnly, 'batch', 'claimArbitration'), 'arbitrate (no claim)');
+  const claimOnly = matrixWithBodies({ batch: `await tx.append([makeEvent('dispatch', id, 'item.claimed', { sessionId })]);` });
+  assert.equal(cellOf(claimOnly, 'batch', 'claimArbitration'), 'claim (inline)');
+});
+
+test('claim arbitration: a lane with no claim code at all reads none (the target-lane gap)', () => {
+  const m = matrixWithBodies({ target: `const closed = closeMergedCluster(gitRoot, wtPath, branch, dest, msg);` });
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'none');
+});
+
+test('post-integration re-gate: a merge with no replay is gate-once, both merge shapes', () => {
+  const helper = matrixWithBodies({ target: `const closed = closeMergedCluster(gitRoot, wtPath, branch, dest, msg);` });
+  assert.equal(cellOf(helper, 'target', 'postIntegrationRegate'), 'gate-once');
+  const inline = matrixWithBodies({ batch: `spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });` });
+  assert.equal(cellOf(inline, 'batch', 'postIntegrationRegate'), 'gate-once');
+});
+
+test('post-integration re-gate: ORDER is enforced — a gate BEFORE the replay does not count as a re-gate', () => {
+  // The invariant is "replay onto the moved destination, THEN gate the combined state". A lane
+  // that gates first and rebases afterwards has not re-verified anything; reporting it as
+  // re-gated would be precisely the kind of authoritative-but-wrong cell this table must not have.
+  const gateThenRebase = matrixWithBodies({
+    batch: `runLaneGate(gateId, cfg, wt, false, base, files);
+  spawnSync('git', ['rebase', headBefore], { cwd: wt });
+  spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });`,
+  });
+  assert.equal(cellOf(gateThenRebase, 'batch', 'postIntegrationRegate'), 'gate-once');
+
+  const rebaseThenGate = matrixWithBodies({
+    batch: `spawnSync('git', ['rebase', headBefore], { cwd: wt });
+  runLaneGate(gateId, cfg, wt, false, headBefore, files);
+  spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });`,
+  });
+  assert.equal(cellOf(rebaseThenGate, 'batch', 'postIntegrationRegate'), 're-gate');
+});
+
+test('post-integration re-gate: `git rebase --abort` is cleanup, not a replay (mutation-testing find)', () => {
+  // Mutation-testing this column (WI-184) caught the probe reporting `re-gate` for a lane whose
+  // real replay had been deleted: the conflict handler's `git rebase --abort` still matched a
+  // bare `['rebase'` marker, and a gate call sits after it. A cell that survives the removal of
+  // the thing it claims to detect is worse than no cell, so a rebase must name a REF, not a flag.
+  const abortOnly = matrixWithBodies({
+    batch: `spawnSync('git', ['rebase', '--abort'], { cwd: wt, stdio: 'pipe' });
+  runLaneGate(gateId, cfg, wt, false, base, files);
+  spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });`,
+  });
+  assert.equal(cellOf(abortOnly, 'batch', 'postIntegrationRegate'), 'gate-once');
+});
+
+test('post-integration re-gate: the push-race variant (reset + re-merge + gate) counts; a bare reset does not', () => {
+  const pushRace = matrixWithBodies({
+    batch: `spawnSync('git', ['reset', '--hard', 'origin/master'], { cwd: root });
+  spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });
+  runLaneGate(gateId, cfg, root, false, freshBase, freshFiles);`,
+  });
+  assert.equal(cellOf(pushRace, 'batch', 'postIntegrationRegate'), 're-gate');
+
+  // A reset used for cleanup, with a gate somewhere after it but no re-merge, is NOT a replay.
+  const bareReset = matrixWithBodies({
+    batch: `spawnSync('git', ['reset', '--hard', 'HEAD'], { cwd: wt });
+  runLaneGate(gateId, cfg, wt, false, base, files);
+  closeMergedCluster(root, wt, branch, dest, msg);`,
+  });
+  assert.equal(cellOf(bareReset, 'batch', 'postIntegrationRegate'), 'gate-once');
 });
 
 test('lane matrix: throws a clear error (not a silent wrong answer) when a named lane function cannot be found', () => {
