@@ -49,8 +49,8 @@ flowchart LR
 
 **What each stage owns**
 
-- **Reactor** — turns prose into a work item with acceptance criteria and a declared file footprint
-  (`Touches`). Slices anything too big into children.
+- **Reactor** — turns prose into a work item carrying a free-prose `spec` and a declared file
+  footprint (`Touches`). Slices anything too big into children.
 - **Dispatch** — picks by priority, groups so no two builds share a file, spawns a worker per group in
   its own git worktree.
 - **Gate** — the target repo's own test suite, run *before* the merge, never after. Then run **again**
@@ -60,11 +60,11 @@ flowchart LR
 The two beats run on timers your host installs — 30 s and 60 s in the reference install. The interval
 lives in the launchd plist, not in the framework, so it is not a constant this page can pin.
 
-This plate is the shape of **one** lane. There are four, and they do not carry the same guards.
+This plate is the shape of **one** lane. There are three, and they do not carry the same guards.
 
 ---
 
-## Plate 02 — Four lanes, not one pipeline
+## Plate 02 — Three lanes, not one pipeline
 
 The single most misleading thing the earlier version of this page did was imply one path with one
 guard set. An item's lane is a property of the **item** — its target, and whether routing decided it
@@ -76,17 +76,15 @@ flowchart TD
   W -->|oversized, needs splitting| PLAN["Planning lane<br/><small>read-only · serial<br/>no worktree, no commit</small>"]
   W -->|carries a target| TGT["Target lane<br/><small>builds in the target's repo<br/>against the target's gate</small>"]
   W -->|plain engineering work| BATCH["Engineering lane<br/><small>the plane's own repo<br/>parallel worktrees</small>"]
-  Q -.->|you drain it by hand| COND["Conductor lane<br/><small>attended CLI<br/>clusters by Touches</small>"]
   PLAN --> CH["child items re-enter"]
   TGT --> MG(["merged"])
   BATCH --> MG
-  COND --> MG
 
   classDef term fill:#111820,stroke:#111820,color:#ffffff
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
   class Q,MG term
-  class PLAN,TGT,BATCH,COND step
+  class PLAN,TGT,BATCH step
   class CH pass
 ```
 
@@ -94,19 +92,21 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2185`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2188`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2634`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2637`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery.
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
   spine guard, a push step, and the post-integration re-gate.
-- **Conductor** (`packages/core/src/conductor.ts:85`<!--cite:clusterByTouches-->) — the attended CLI
-  drain. Clusters items by `Touches`, runs disjoint clusters concurrently and the wildcard cluster
-  serially. Same ledger, same claims, same board.
-- 🟠 Target and conductor still lack the post-integration re-gate, and both open their worktree from
-  the repo's ambient `HEAD` rather than a declared default branch. Both are recorded in
+- An **attended drain** is not a fourth lane. When you drive the plane by hand, a coordinator agent
+  claims items through the same lease kernel ([ADR-007](decisions/ADR-007-claim-arbitration.md)),
+  builds them in worktrees and lands `item.merged` on the same board. There is no separate code path
+  for it — the CLI drain that used to be one was deleted in
+  [ADR-013](decisions/ADR-013-delete-the-conductor.md) after never producing a single ledger event;
+  the `Touches` clustering it offered lives on in the engineering lane as batch co-location.
+- 🟠 The target lane still lacks the post-integration re-gate. Recorded in
   [limitations](limitations.md).
 
 ---
@@ -182,20 +182,20 @@ flowchart TD
 **Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
 claimed in that window, and claims every survivor in the same locked append before spawning anything
-(`packages/core/src/beats/dispatch.ts:455`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
+(`packages/core/src/beats/dispatch.ts:458`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
 Both picking lanes — engineering and target — go through that one terminal, under one per-beat
 pseudo-session, so the reservation cannot drift between them (WI-186).
 That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3161`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3164`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
 **Provider health is a chain, not a single provider.** The registry walks the configured chain; an
 auth failure marks the current provider unhealthy and falls over to the next
-(`packages/core/src/beats/dispatch.ts:3321`<!--cite:providerFallback-->), and a later successful beat
+(`packages/core/src/beats/dispatch.ts:3324`<!--cite:providerFallback-->), and a later successful beat
 clears the marker. With no healthy provider for an item's sensitivity tier, the item parks rather than
 routing to a disallowed one.
 
@@ -210,7 +210,7 @@ routing to a disallowed one.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3281`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3284`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - 🔵 Builds spawned in one beat are collected by a later one via on-disk exit files, so a long build
   does not pin the beat that started it ([ADR-008](decisions/ADR-008-detached-dispatch-staging.md)).
@@ -297,13 +297,13 @@ behind it.
 
 **Two different scopes, easily confused.** What dispatch is willing to **commit** is the union of the
 item's declared `Touches` prefixes and the exact paths the worker reported in its manifest
-(`packages/core/src/beats/dispatch.ts:1465`<!--cite:planScopedCommit-->) — anything else stays
+(`packages/core/src/beats/dispatch.ts:1467`<!--cite:planScopedCommit-->) — anything else stays
 uncommitted and is reported as residue. What counts as an **overstep** is narrower: a changed file
 outside the declared prefixes, minus a test-file exemption and minus paths you previously approved
-(`packages/core/src/beats/dispatch.ts:1422`<!--cite:checkTouchesOverstep-->). The worker may also propose
+(`packages/core/src/beats/dispatch.ts:1424`<!--cite:checkTouchesOverstep-->). The worker may also propose
 the commit subject; dispatch uses it verbatim when present.
 
-**The spine guard** (`packages/core/src/beats/dispatch.ts:1344`<!--cite:checkSpine-->) parks any diff
+**The spine guard** (`packages/core/src/beats/dispatch.ts:1346`<!--cite:checkSpine-->) parks any diff
 touching the plane's own configured spine pattern for your decision. It is an engineering-lane guard
 — a target repo has no plane-spine concept.
 
@@ -328,7 +328,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:3973`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:3976`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -366,16 +366,16 @@ flowchart TD
 
 - The invariant: **no build reaches master without a gate covering every commit that landed since its
   branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4407`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4410`<!--cite:postIntegrationRegate-->).
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, hard-resets the primary tree onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4593`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:4596`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4619`<!--cite:pushRaceRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4622`<!--cite:pushRaceRegate-->).
 - Every failure here is a park, never a force. A conflict or a red re-gate stops the item; nothing is
   merged past a disagreement.
-- 🟠 This whole plate is engineering-lane only. See [limitations](limitations.md) for the target and
-  conductor lanes.
+- 🟠 This whole plate is engineering-lane only. See [limitations](limitations.md) for the target
+  lane.
 
 ---
 
@@ -436,11 +436,11 @@ counter, so by the time a park happened the budget was already spent.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3120`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3123`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:2915`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:2918`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
@@ -572,13 +572,13 @@ flowchart TD
 
 ## Plate 11 — The only switch
 
-There is no mode. There is a running plane and a stopped plane, and two ways to start work down the
+There is no mode. There is a running plane and a stopped plane, and two ways work starts down the
 lanes on Plate 02.
 
 ```mermaid
 flowchart LR
   T1["Plane running<br/><small>a beat picks work on a timer</small>"] --> ONE["The same lanes<br/><small>Plates 04–09</small>"]
-  T2["You drain it<br/><small>from the CLI, now</small>"] --> ONE
+  T2["You drive it<br/><small>an agent claims and builds, now</small>"] --> ONE
   ONE --> BOARD["One board<br/><small>one history, one proof</small>"]
 
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
@@ -590,13 +590,18 @@ flowchart LR
 Claims stop the two from colliding, so they may overlap — there is no switch to flip. Work you drove
 by hand lands with the same trail as work done while you slept.
 
-- 🟠 Today the CLI drain runs its own copy of this procedure rather than the same code
-  (`packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->). Collapsing them is the
-  remaining work, deferred deliberately — it is a hot path, and the honest way to change it is with
-  real builds running through it first. See [ADR-012](decisions/ADR-012-no-lanes.md), and
-  [`lane-matrix.md`](lane-matrix.md) for what the copy currently does and does not carry.
-- Everything that appears to differ between them — where a merge goes, whether it pushes, whether the
-  plane's own spine is in scope — is a property of the **item**, not a mode you choose.
+- An attended drain is **coordinated by an agent, not by a lane**. There used to be a CLI drain
+  (`loopctl conduct`) running its own copy of this procedure; it was deleted in
+  [ADR-013](decisions/ADR-013-delete-the-conductor.md) — it had never produced a ledger event, and
+  the `Touches` clustering it offered already ships inside the engineering lane as batch
+  co-location (off by default). What remains is the coordinator: it claims through the same lease
+  kernel, builds in worktrees, and appends the same events.
+- Everything that appears to differ between the two — where a merge goes, whether it pushes, whether
+  the plane's own spine is in scope — is a property of the **item**, not a mode you choose.
+- 🟠 What the coordinator does *not* get is the lane's guard set: it is an agent following a
+  documented procedure, so its guarantees are the guarantees of whoever is driving. The
+  guard-carrying path is the beat. See [`lane-matrix.md`](lane-matrix.md) for what each lane
+  carries.
 
 ---
 

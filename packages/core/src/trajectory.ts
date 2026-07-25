@@ -28,7 +28,7 @@
  * PARKKIND JOIN (WI-165, follow-up to WI-159):
  *   `parkKind` is carried by the COMPANION `item.parked` event, not by the terminal event the
  *   walk keys off (gate.failed/gate.parked/build.crashed never carry it in production). Every
- *   emitter (beats/dispatch.ts, doctor.ts, conductor.ts) appends the terminal and its companion
+ *   emitter (beats/dispatch.ts, doctor.ts) appends the terminal and its companion
  *   item.parked TOGETHER in one appendEvents([...]) call, companion immediately after terminal —
  *   so the join is an INDEX bracket (first item.parked for this wi at-or-after the terminal's
  *   stream index, before the next build.dispatched), not a timestamp comparison (concurrent
@@ -307,11 +307,11 @@ export function projectTrajectory(
 
   // -- Pass 3b: collect item.parked events indexed by item, in stream order --
   // WI-165: item.parked is the ONLY event carrying the real parkKind — 'decision' | 'ops' |
-  // 'hold' | 'decomposition' — because every emitter (dispatch.ts, doctor.ts, conductor.ts)
+  // 'hold' | 'decomposition' — because every emitter (dispatch.ts, doctor.ts)
   // appends a park's terminal event (gate.failed/gate.parked/build.crashed) and its companion
   // item.parked TOGETHER, in the same appendEvents([...]) call, with the companion always
   // immediately following the terminal for that item (verified across every park call site in
-  // beats/dispatch.ts, doctor.ts and conductor.ts, and against the real ledger: WI-164's two
+  // beats/dispatch.ts and doctor.ts, and against the real ledger: WI-164's two
   // attempts each show gate.failed then item.parked as consecutive events for that item).
   // item.parked is deliberately NOT added to TERMINAL_TYPES — the walk below still finds the
   // real terminal (gate.parked/gate.failed/build.crashed), then separately looks up the

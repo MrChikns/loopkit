@@ -93,7 +93,7 @@ prompts can't enforce claims, gates, or recording.)
 
 | Stage | Ships |
 |---|---|
-| **v0.1** (now) | single-target proof end-to-end · thin console · README + demo · the method skills in [`.claude/commands/`](../.claude/commands/) (`/drive`, `/plane-check`, `/board`) · **attended item claims + the conductor** (`session`/`claim`/`conduct`), shipped ahead of the original sequence per [ADR-007](decisions/ADR-007-claim-arbitration.md). Plans appear **only as this roadmap**. |
+| **v0.1** (now) | single-target proof end-to-end · thin console · README + demo · the method skills in [`.claude/commands/`](../.claude/commands/) (`/drive`, `/plane-check`, `/board`) · **attended item claims** (`session`/`claim`/`release`), shipped ahead of the original sequence per [ADR-007](decisions/ADR-007-claim-arbitration.md) — the CLI drain that shipped beside them was deleted in [ADR-013](decisions/ADR-013-delete-the-conductor.md). Plans appear **only as this roadmap**. |
 | v0.2 | `scope.claimed`-style *file-scope* claims + `reconcile` (the fast path) — item-level claiming already shipped in v0.1 |
 | v0.3 | plan DAG + one-shot run windows (the evening run) · **flip-gated releases** (see below) |
 | later | recurring schedules · presence suggestions · multi-target scheduling · skill registries |

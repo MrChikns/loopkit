@@ -241,7 +241,7 @@ test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usa
     assert.equal(verdictEvents[0]!.actor, 'dispatch');
 
     // cost.usage{loop:'judge'} — the second half of this test's title — with the ACTUAL
-    // token/usd figures the fake's judge call returned (mirrors conductor.test.ts's equivalent
+    // token/usd figures the fake's judge call returned (mirrors the equivalent
     // assertion for the attended lane).
     const judgeCost = events.filter(e =>
       e.type === 'cost.usage' && e.item === 'WI-001' && (e.data as { loop: string }).loop === 'judge');

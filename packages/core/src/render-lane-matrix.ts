@@ -37,7 +37,7 @@ export function renderDoc(): string {
 npm run lane-matrix --workspace packages/core
 \`\`\`
 
-Derived directly from \`packages/core/src/beats/dispatch.ts\` and \`packages/core/src/conductor.ts\`
+Derived directly from \`packages/core/src/beats/dispatch.ts\`
 by \`packages/core/src/lane-matrix.ts\` (static analysis of each lane's own function span — see
 that file's doc comment for the full rationale). A drift-detection test
 (\`packages/core/test/lane-matrix.test.ts\`) pins the matrix below as a snapshot and fails CI the
@@ -60,13 +60,14 @@ ${table}
   reality-check fallback).
 - **gate wrapper** — which gate-running helper the lane calls: \`runLaneGate\` (lane-aware
   dispatcher, picks the item's gate id), \`runGate\` (the plain shell-gate runner, called directly),
-  a **local fork** (the conductor's own \`runClusterGate\`, a documented consolidation remainder —
-  see conductor.ts's own top-of-file comment), or \`none\` (no code diff to gate — the planning
+  a **local fork** (a gate helper a lane's own file defines while the canonical one lives in
+  \`dispatch.ts\` — no lane does this today), or \`none\` (no code diff to gate — the planning
   lane only queues child items).
 - **commit side** — \`dispatch\` (dispatch stages + commits the worker's in-scope output itself,
   via either the shared \`attemptScopedCommit\` helper or the batch lane's inline
   \`planScopedCommit\` + \`git commit\` sequence), \`worker\` (the spawned agent holds a
-  commit-capable tool grant and commits itself), or \`n/a (no code diff)\` (planning lane).
+  commit-capable tool grant and commits itself — no lane declares this since ADR-013 deleted the
+  conductor), or \`n/a (no code diff)\` (planning lane).
 - **claim arbitration** — how the lane reserves an item before building it (ADR-007
   claim-before-pick): \`arbitrate+claim\` (the lane's own span runs the inline arbitration —
   \`decideClaimArbitration\`, yielding items a foreign session claimed *or* a foreign in-flight
@@ -74,7 +75,8 @@ ${table}
   \`claimBeforePick\` closure against its own candidate list), \`claim (claimItems)\` (reserves
   through the shared session verb, which re-folds under the ledger lock and skips what another
   session actively holds — it yields to a foreign *claim*, but not to a foreign in-flight
-  *build*), \`claim (shared pick, via batch)\` (reserved, but NOT by this lane's own code — the
+  *build*; no lane reports this since ADR-013), \`claim (shared pick, via batch)\` (reserved, but
+  NOT by this lane's own code — the
   reservation call site names this lane's candidate list from inside \`runDispatch\`, i.e. the
   batch lane's span; today this is the **target** lane, whose reservation moved into the shared
   \`makeClaimBeforePick\` factory under WI-186 without the target lane's own functions

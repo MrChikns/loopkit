@@ -8,10 +8,10 @@
  * files (and optionally a worker manifest) is all `run()` does — there is no code path in
  * here that could ever shell out to `git add`/`git commit`.
  *
- * For a `commitMode: 'worker'` lane (the conductor — a human is present, the worker
- * committing IS the contract) this helper is the wrong tool: that fake legitimately
- * commits, and the test must instead assert the PROMPT instructed it to (see
- * conductor.test.ts). Reach for this helper only for dispatch-side-commit lanes.
+ * For a `commitMode: 'worker'` lane (a human is present, so the worker committing IS the
+ * contract) this helper would be the wrong tool: such a fake legitimately commits, and the
+ * test must instead assert the PROMPT instructed it to. No lane declares `'worker'` since
+ * ADR-013, so today this helper fits every lane.
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';

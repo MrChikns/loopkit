@@ -64,22 +64,20 @@ cited three lines that had drifted, and one gap that had since been fixed.
   same millisecond and a consumer depends on strict cross-process total order — the fold is designed to
   be order-tolerant, but a future consumer that isn't would be exposed.
 
-## Integration-lane invariants (target + conductor)
+## Integration-lane invariants (target lane)
 
-- **The target and conductor lanes do not re-gate after integration.** The engineering lane will not
+- **The target lane does not re-gate after integration.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4407`<!--cite:postIntegrationRegate-->). Neither the target build
-  lane nor the attended conductor carries that invariant: each gates once, on its own branch, and
-  merges. *Bounded:* both are opt-in paths that run against their own repos and still gate before
-  merging. *Matters when:* the destination branch advances during the build — the merged result is
-  then a combination nothing ever tested. Porting the engineering lane's terminal to these two lanes
-  is the fix.
+  (`packages/core/src/beats/dispatch.ts:4410`<!--cite:postIntegrationRegate-->). The target build lane
+  does not carry that invariant: it gates once, on its own branch, and merges. *Bounded:* it is an
+  opt-in path that runs against the target's own repo and still gates before merging. *Matters when:*
+  the destination branch advances during the build — the merged result is then a combination nothing
+  ever tested. Porting the engineering lane's terminal to the target lane is the fix.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:879`<!--cite:openBuildWorktreeHead-->; the conductor's call at
-  `packages/core/src/conductor.ts:436`<!--cite:conductorWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:881`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -88,11 +86,10 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3181`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3184`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
-  their own `item.claimed` for every survivor before spawning. The conductor claims under the same lock
-  (`packages/core/src/conductor.ts:312`<!--cite:conductorClaimItems-->). What remains is ADR-007's
-  *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
+  their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
+  the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
   is fresh, so a genuinely-live operator whose heartbeat lagged past the bound reads inactive and a beat
   may take the item. *Bounded:* the reap age is derived from the build-timeout envelope and the common
   case is never a contest. *Matters when:* an attended session is suspended or starved long enough to
@@ -110,7 +107,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   the same shape as every existing column.
 
 - **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4593`<!--cite:pushRaceReset-->). The push-race recovery path
+  (`packages/core/src/beats/dispatch.ts:4596`<!--cite:pushRaceReset-->). The push-race recovery path
   force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
   tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
   that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
@@ -145,8 +142,8 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 - **Fail-closed provider resolution is routing-level, not content-level.** As of this hardening
   pass, provider resolution is per-item/per-group and fail-closed at **every** content-bearing call
-  site — the engineering group, the planning lane, the target build lane, the conductor cluster,
-  the operator-reply engagement lane, and the failure-pathology lane all resolve against the item's
+  site — the engineering group, the planning lane, the target build lane, the operator-reply
+  engagement lane, and the failure-pathology lane all resolve against the item's
   own (or the group's strictest) sensitivity and refuse to route a private-only item to a
   disallowed provider. What is **not** yet in place is a *pre-egress content scan*: a deterministic
   secret/credential/PII check on the prompt payload actually bound for a non-local provider.
@@ -182,8 +179,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
   and no RBAC**, and framing an unattended merge as "unauthorized" on a single-operator plane was
   explicitly rejected. *Bounded:* default OFF, so behaviour is unchanged unless you turn it on; it
   reads paths only (the judge is advisory and runs later, so a judge fail is not a landing-risk
-  class); and the conductor applies it to plane clusters only, since a targeted cluster's boundaries
-  live in a manifest that attended path does not read. *Matters when:* you expect it to be an
+  class). *Matters when:* you expect it to be an
   approval gate — it is a *pattern* hold. A risk change whose paths match nothing you listed still
   lands, and the honest answer for real approval-before-merge is still to park the item rather than
   queue it.
@@ -206,7 +202,7 @@ cited three lines that had drifted, and one gap that had since been fixed.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1307`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1309`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the

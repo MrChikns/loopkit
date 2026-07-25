@@ -1,5 +1,5 @@
 ---
-description: Drive the loopkit plane from an attended Claude Code session — capture intent, claim queued items, build them through the plane (mechanically via `loopctl conduct`, or as coordinator spawning parallel subagent builders), and land every result on the board as ledger events. Use when the operator hands you work in plain speech ("build these", "drain the queue", "go").
+description: Drive the loopkit plane from an attended Claude Code session — capture intent, claim queued items, build them as coordinator spawning parallel subagent builders, and land every result on the board as ledger events. Use when the operator hands you work in plain speech ("build these", "drain the queue", "go").
 ---
 
 You are the **coordinator**, not a typist. The operator is hands-on and driving; your job is to
@@ -8,8 +8,8 @@ board and the acceptance lanes exactly as beat-built work does. The method behin
 [docs/method.md](../../docs/method.md); the claim mechanics are
 [ADR-007](../../docs/decisions/ADR-007-claim-arbitration.md).
 
-**Do not build work inline in this session.** Volume goes through `loopctl conduct` or into
-subagent builders working in worktrees. Your context holds judgment and the board, not code.
+**Do not build work inline in this session.** Volume goes into subagent builders working in
+worktrees. Your context holds judgment and the board, not code.
 
 ## Setup
 
@@ -54,19 +54,15 @@ $LOOPCTL append item.parked --item WI-NNN \
 Park with an intent, not a bare question — the operator approves/rejects from the console's
 needs-you lane.
 
-## 3 · Build — two paths
+## 3 · Build — you coordinate, or you leave it to the beats
 
-**Mechanical (default for routine items):** let the conductor do it —
-```bash
-$LOOPCTL conduct --dry-run    # shows the Touches-disjoint cluster plan first
-$LOOPCTL conduct              # one worktree per cluster, gate per cluster, merges on green
-```
-It emits the same events as beat-built work (`build.dispatched → gate.* → item.merged`), so the
-board and history stay mode-agnostic. Two current boundaries: it does **not** yet apply the
-decision gates the beats apply (don't route spine/escalation-pattern items through it), and a
-cluster whose gate fails parks `hold` on the **first** red — other clusters continue.
-
-**Coordinator (when items need judgment at merge — review, boundary calls, thin specs):**
+There is **no mechanical CLI drain**. `loopctl conduct` was deleted in
+[ADR-013](../../docs/decisions/ADR-013-delete-the-conductor.md): it never produced a ledger event,
+and the `Touches` clustering it offered already lives in the engineering lane as batch co-location
+(`batchMaxItems`, off by default). Routine items the operator is not waiting on are best left
+**queued for the dispatch beat** — that is the path carrying the full guard set. Coordinate
+yourself when the operator is hands-on and wants it now, or when items need judgment at merge
+(review, boundary calls, thin specs):
 1. Cluster the claimed items so no two clusters share a file (Touches-disjoint; items that must
    touch the same file go in the **same** cluster — never two workers on one file).
 2. Spawn one builder subagent per cluster, all in one message so they run in parallel. Each gets
@@ -88,8 +84,9 @@ cluster whose gate fails parks `hold` on the **first** red — other clusters co
      \"gateCommand\":\"<the gate you ran>\",\"sessionId\":\"<your ses-id>\"}"
    ```
    (This is the evidence-carrying single-append pattern the acceptance layer explicitly
-   supports; it is deliberately lighter than the conductor's full
-   `build.dispatched → gate.* → item.merged` trail — use `conduct` when you want that.)
+   supports; it is deliberately lighter than the beats' full
+   `build.dispatched → gate.* → item.merged` trail — leave the item queued for the dispatch beat
+   when you want that.)
 
 ## 4 · Hand back to the operator
 
@@ -103,8 +100,8 @@ a problem" becomes a new item (`$LOOPCTL new "..."`); their accept closes it
 ## Guardrails (breach = park + report, never silent)
 
 - Never build inline in this session; never two workers on one file.
-- Coordinator mode: gate red twice on one item → park it (`parkKind` omitted — it's an ops
-  park, not a decision); a third retry is a runaway. (`conduct` is stricter: first red parks.)
+- Gate red twice on one item → park it (`parkKind` omitted — it's an ops park, not a decision);
+  a third retry is a runaway.
 - Costly-AND-irreversible → park with the intent-format escalation above; the operator unparks.
 - `LOOPKIT_AUTONOMY` is the emergency kill switch, not a working mode — leave it as the
   operator set it; claims are what make an attended drain safe alongside armed beats.

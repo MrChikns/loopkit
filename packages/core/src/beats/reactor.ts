@@ -3724,7 +3724,7 @@ const JUDGE_BACKSTOP_PER_BEAT_CAP = 10;
 
 /**
  * Make the advisory merge-review verdict (review.verdict) fire on merged items whose LANE never
- * judged them. The attended conductor + coordinator lanes emit item.merged with the SAME shape the
+ * judged them. An attended coordinator emits item.merged with the SAME shape the
  * beats do, but run no pre-merge judge — so an attended-run plane produces ZERO review.verdict
  * events, starving the acceptance tier of its quality input (the classifier reads rec.judgeVerdict).
  * This step is the universal backstop: it judges exactly the merged-state items carrying no
@@ -4804,8 +4804,8 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     // must be current for this beat's accept decisions)
     pushStep(await stepTierCalibration(opts, cfg));
 
-    // Step (d1.5): post-merge judge backstop — judge any merged item whose lane (attended
-    // conductor/coordinator) never ran the pre-merge judge, so the acceptance tiering below has a
+    // Step (d1.5): post-merge judge backstop — judge any merged item whose path (an attended
+    // coordinator) never ran the pre-merge judge, so the acceptance tiering below has a
     // review.verdict to read. Advisory + fail-open + capped; runs before provisional-accept so a
     // fresh verdict feeds THIS beat's tiering. Uses the same per-item sensitivity provider
     // resolution as routing/engagement.
