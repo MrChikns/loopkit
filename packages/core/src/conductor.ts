@@ -18,9 +18,9 @@
  *  - Where the beat path would park a DECISION (spine/overstep/judge gates), the conductor
  *    applies none of those boundary gates yet: a red cluster gate parks `hold` and other
  *    clusters continue; interactive inline prompting is a later slice.
- *  - The minimal provider invocation + gate/log helpers here mirror dispatch's internal
- *    (unexported) runGate/persistWorkerLog — consolidation remainder: export those from the
- *    beat and delete the local copies.
+ *  - (resolved, ADR-010 step 3) The provider invocation + gate/log helpers are the SAME
+ *    `runGate`/`persistWorkerLog` the dispatch beat uses (both now exported from
+ *    beats/dispatch.ts) — the local forks (`runClusterGate`/`persistConductLog`) are deleted.
  *  - (resolved) Worktree dependency provisioning is applied per cluster from the manifest; a target whose
  *    gate needs installed node_modules should gate via a command that installs, until the
  *    beat's worktree-deps helper is shared.
@@ -28,8 +28,7 @@
 
 import { setupWorktreeDeps } from './beats/worktree-deps.js';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { appendEvents, loadAllEventsWithQuarantine } from './ledger.js';
 import { fold, FoldResult, ItemRecord, isClaimActive } from './fold.js';
 import { makeEvent, resolveAttachmentPaths } from './schema.js';
@@ -39,13 +38,16 @@ import { LoopkitConfig, loadConfig } from './config.js';
 import { LlmProvider } from './providers/types.js';
 import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import {
-  BUILDER_TOOLS,
   buildPrompt,
+  CommitMode,
   mergeEvidence,
+  persistWorkerLog,
   removeWorktree,
+  runGate,
   SPAWN_MAX_BUFFER,
   groupSensitivity,
   resolveProviderForSensitivity,
+  toolsForCommitMode,
 } from './beats/dispatch.js';
 import {
   activeSessionClaims,
@@ -211,38 +213,12 @@ export function planClusters(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal gate / evidence helpers (consolidation remainder: dispatch's runGate/
-// persistWorkerLog are unexported — these mirror their semantics for the conductor)
+// Commit contract (ADR-010): a human is present in this lane, so workers commit their own
+// output (multi-commit slices stay possible) — the shared prompt clause and the granted
+// toolset both derive from this ONE value via toolsForCommitMode, so they cannot drift apart.
 // ---------------------------------------------------------------------------
 
-function runClusterGate(
-  gateCommand: string,
-  gateWorkdir: string,
-  wtPath: string,
-  timeoutMs: number,
-  baseSha?: string,
-): { passed: boolean; reason: string } {
-  const cwd = resolve(wtPath, gateWorkdir);
-  // Env hygiene mirrors the beat gate: target code must never inherit the plane's identity vars.
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env['LOOPKIT_HOME'];
-  delete env['LOOPKIT_LEDGER'];
-  if (baseSha) env['GATE_BASE_SHA'] = baseSha;
-  const result = spawnSync('sh', ['-c', gateCommand], {
-    cwd, env, stdio: 'pipe', timeout: timeoutMs, maxBuffer: SPAWN_MAX_BUFFER,
-  });
-  const combined = ((result.stdout?.toString() ?? '') + '\n' + (result.stderr?.toString() ?? '')).trim();
-  if (result.status === 0) return { passed: true, reason: 'tests green' };
-  return { passed: false, reason: `gate exited ${result.status}: ${combined.slice(-800)}` };
-}
-
-function persistConductLog(runDir: string, itemId: string, attempt: number, output: string): void {
-  try {
-    mkdirSync(runDir, { recursive: true });
-    const tail = output.split('\n').slice(-100).join('\n');
-    writeFileSync(join(runDir, `${itemId}-attempt-${attempt}.log`), tail, 'utf8');
-  } catch { /* best-effort evidence — never block a terminal path */ }
-}
+const CONDUCT_COMMIT_MODE: CommitMode = 'worker';
 
 function getChangedFiles(cwd: string, baseSha: string): string[] {
   const r = spawnSync('git', ['diff', '--name-only', `${baseSha}..HEAD`], {
@@ -482,14 +458,20 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
       attempt, worktree: wtPath, branch, pid: process.pid, provider: clusterProvider.name, model,
     })]);
     const spec = rec.spec ?? rec.sourceText ?? '';
+    // ADR-010: the attended conductor lane keeps commitMode 'worker' — a human is present, and
+    // multi-commit slices are wanted here (unlike the unattended dispatch-side-commit lanes).
+    // Prompt clause and toolset both derive from CONDUCT_COMMIT_MODE via toolsForCommitMode, so
+    // they cannot drift apart the way they did pre-ADR-010 (this lane hard-parked on every
+    // build: BUILDER_TOOLS was granted but the shared prompt still said "you do NOT hold a
+    // git-commit tool", so the worker never committed and the cluster always hit "no commit").
     const res = await clusterProvider.run({
-      prompt: buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText)),
+      prompt: buildPrompt(spec, rec.repairContext, resolveAttachmentPaths(rec.sourceText), undefined, undefined, undefined, undefined, undefined, undefined, CONDUCT_COMMIT_MODE),
       model,
       cwd: wtPath,
-      tools: BUILDER_TOOLS,
+      tools: toolsForCommitMode(CONDUCT_COMMIT_MODE),
       timeoutMs: plan.buildTimeoutMinutes * 60 * 1000,
     });
-    persistConductLog(ctx.runDir, rec.id, attempt, res.ok ? res.text : (res.error ?? ''));
+    persistWorkerLog(ctx.runDir, rec.id, attempt, res.ok ? res.text : (res.error ?? ''));
     if (res.ok && res.usage) {
       await appendEvents(ctx.ledgerDir, [makeEvent('conduct', rec.id, 'cost.usage', {
         provider: clusterProvider.name, loop: 'conduct',
@@ -527,8 +509,9 @@ async function runCluster(plan: ConductClusterPlan, ctx: ClusterCtx): Promise<Co
   }
 
   // ── ONE gate for the whole cluster ─────────────────────────────────────────────────────
-  const gate = runClusterGate(
-    plan.gateCommand, plan.gateWorkdir, wtPath, plan.buildTimeoutMinutes * 60 * 1000, baseSha,
+  const gate = runGate(
+    plan.gateCommand, plan.gateWorkdir, wtPath, /* dryRun */ false, baseSha,
+    plan.buildTimeoutMinutes * 60 * 1000,
   );
   if (!gate.passed) {
     // Keep the worktree for inspection; park the cluster's items and let other clusters run.
