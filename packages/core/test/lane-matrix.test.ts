@@ -64,6 +64,37 @@ import {
  * A change in ANY of these four cells is a real lane-invariant change (e.g. WI-186 porting
  * claim-before-pick to the target lane would flip target's claimArbitration) — update the cell
  * deliberately, never by pasting the regen.
+ *
+ * WI-186 (post-hoc revision of the above, same session): WI-186 shipped the exact change the
+ * prior paragraph named as hypothetical — the target lane's TOCTOU gap is closed — but did it by
+ * extracting BOTH lanes' reservation call into a shared factory closure (`makeClaimBeforePick`,
+ * called once, producing `claimBeforePick`), rather than by giving the target lane its own inline
+ * copy. Re-derived cell by cell against the new shape:
+ *   - batch `arbitrate+claim` (UNCHANGED VALUE, different reason): `runDispatch`'s own span no
+ *     longer contains `decideClaimArbitration`/`item.claimed` directly (they moved inside the
+ *     factory body), but it DOES call `claimBeforePick(groups...)` — the shared closure, invoked
+ *     against the batch lane's own candidate list, from the batch lane's own span. That is
+ *     judged equivalent evidence to the old inline markers: WHERE the arbitration logic is
+ *     defined changed; THAT the batch lane invokes it against its own picks did not.
+ *   - target `claim (shared pick, via batch)` (WAS `none` — that was the false negative this
+ *     entry repairs). `finalizeTargetBuild`/`runTargetLane` still contain no claim code — that
+ *     part of the old comment remains true — but it was never the right test. The target lane's
+ *     reservation happens at `claimBeforePick(targetedQueued...)`, a call site that lives inside
+ *     `runDispatch` (dispatch.ts:3428), which is BATCH's span, not target's. Span-only attribution
+ *     is structurally blind to this, so `detectClaimArbitration` now also greps `runDispatch`'s
+ *     span for the target lane's own candidate-variable name (`targetedQueued`) as an explicit,
+ *     per-lane exception — never a generic "any call to claimBeforePick counts for every lane"
+ *     scan, which could not distinguish target's call site from batch's. Reporting `none` here
+ *     would misrepresent the code exactly as badly as batch briefly reporting `defer-read` did:
+ *     the reservation is real, WI-186's whole point was adding it, and the column exists to make
+ *     it visible. The distinct cell value (not reused `arbitrate+claim`) is deliberate: it tells
+ *     the reader BOTH that the item is reserved AND that the reservation is not in this lane's
+ *     own code — collapsing that distinction would hide the very indirection a maintainer needs
+ *     to know about when next touching either lane.
+ *   - conductor / planning: unaffected — WI-186 touched only the two dispatch.ts picking lanes.
+ * A change to ANY of the four claimArbitration cells (or the detector's candidate-variable
+ * allowlist) is a real lane-invariant change — update deliberately, cell by cell, never by
+ * pasting the regen.
  */
 const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
   planning: {
@@ -76,7 +107,7 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     touchesOverstep: true, spineCheck: false, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'runGate (declared)', commitSide: 'dispatch (declared)',
-    claimArbitration: 'none', postIntegrationRegate: 'gate-once',
+    claimArbitration: 'claim (shared pick, via batch)', postIntegrationRegate: 'gate-once',
   },
   batch: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: true, push: true,
@@ -287,6 +318,37 @@ function cellOf(matrix: LaneMatrix, lane: string, guard: 'claimArbitration' | 'p
   return String(matrix.rows.find(r => r.lane === lane)!.cells[guard]);
 }
 
+/**
+ * Build a matrix from minimal lane stubs INCLUDING a `makeClaimBeforePick` factory definition,
+ * for exercising `factoryStillReserves` (WI-186 repair): a real `dispatch.ts` post-WI-186 always
+ * defines this factory, so its body is the thing that must actually contain the reservation
+ * markers — a `claimBeforePick(` call site's NAME is not sufficient evidence on its own.
+ */
+function matrixWithFactory(bodies: { batch?: string; target?: string; factory?: string }): LaneMatrix {
+  const dispatchSrc = `
+function makeClaimBeforePick(ledgerDir: string, sessionId: string, ttl: number) {
+  ${bodies.factory ?? `return async (candidateIds: string[]) => {
+    const decided = decideClaimArbitration(candidateIds, freshResult, sessionId, Date.now(), ttl);
+    const kept = decided.filter(d => d.keep);
+    await tx.append([...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId, ttl }))]);
+    return decided;
+  };`}
+}
+async function runPlanningLane(): Promise<void> { noop(); }
+async function finalizeTargetBuild(): Promise<void> { ${bodies.target ?? 'noop();'} }
+async function runTargetLane(): Promise<void> { noop(); }
+export async function runDispatch(opts: unknown): Promise<void> {
+  const claimBeforePick = makeClaimBeforePick(opts.ledgerDir, sessionId, ttl);
+  ${bodies.batch ?? `const decisions = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));`}
+}
+`;
+  const conductorSrc = `
+export async function runConduct(): Promise<void> { noop(); }
+async function runCluster(): Promise<void> { noop(); }
+`;
+  return buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+}
+
 test('claim arbitration: the shared session verb reads as its own rung, not as inline arbitration', () => {
   // The conductor reserves via claimItems (which yields to a foreign CLAIM under the lock) but
   // has no inline arbitration (which additionally yields to a foreign in-flight BUILD). Rounding
@@ -307,9 +369,111 @@ test('claim arbitration: a half-ported lane renders as half-ported (arbitrate wi
   assert.equal(cellOf(claimOnly, 'batch', 'claimArbitration'), 'claim (inline)');
 });
 
-test('claim arbitration: a lane with no claim code at all reads none (the target-lane gap)', () => {
+test('claim arbitration: a lane with genuinely no claim code anywhere (own span or shared pick) reads none', () => {
+  // Neither the target lane's own span NOR the shared runDispatch span (default `noop();` here)
+  // names targetedQueued at a claimBeforePick( call site — the true "gap" shape, pre-WI-186.
   const m = matrixWithBodies({ target: `const closed = closeMergedCluster(gitRoot, wtPath, branch, dest, msg);` });
   assert.equal(cellOf(m, 'target', 'claimArbitration'), 'none');
+});
+
+test('claim arbitration: WI-186 shape — target reserved by the shared closure in runDispatch, not its own span', () => {
+  // The real dispatch.ts shape post-WI-186: the target lane's own functions contain no claim
+  // code (mirrors the prior test's body), but runDispatch calls the shared closure against
+  // targetedQueued — the target lane's own candidate-list variable, named at a real call site
+  // living in a DIFFERENT function than the target lane's own span. This is the exact case the
+  // coordinator flagged as a false negative (`none`) and the fix must report reserved-elsewhere.
+  const m = matrixWithBodies({
+    target: `const closed = closeMergedCluster(gitRoot, wtPath, branch, dest, msg);`,
+    batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));
+  const more = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));`,
+  });
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'claim (shared pick, via batch)');
+  // The SAME call site, read from batch's own span, is in-span evidence — batch is not
+  // downgraded to the cross-span rung just because it shares the source with target's mention.
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'arbitrate+claim');
+});
+
+test('claim arbitration: a claimBeforePick( call for ONE lane must not bleed into the other lane\'s cell', () => {
+  // Only the target lane's candidate variable appears at a real call site; batch's own span has
+  // no reservation marker of any kind, in-span or shared, so it must read none — proves the
+  // per-lane candidate-variable allowlist is doing real discrimination, not just "some call to
+  // claimBeforePick exists somewhere in the file ⇒ every picking lane is claimed".
+  const m = matrixWithBodies({
+    batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));`,
+  });
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'claim (shared pick, via batch)');
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'none');
+});
+
+test('claim arbitration: cross-span attribution never overrides a lane that already reserves in its own span', () => {
+  // If a lane's OWN span already resolves to a rung (e.g. conductor's claimItems), a claim
+  // mentioning that lane's name/variable elsewhere in the shared span must not overwrite it.
+  // (conductor.ts is a separate source file from dispatch.ts, so this is belt-and-braces: the
+  // shared-pick lookup only ever reads dispatch.ts's runDispatch, never conductor.ts — confirmed
+  // by asserting the conductor cell is unaffected by a batch body that mentions its variable.)
+  const m = matrixWithBodies({
+    conduct: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });`,
+    batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));`,
+  });
+  assert.equal(cellOf(m, 'conductor', 'claimArbitration'), 'claim (claimItems)');
+});
+
+// ---------------------------------------------------------------------------
+// Factory integrity (WI-186 repair, found by this fix's OWN bite-proof): `claimBeforePick(` is
+// just a NAME. A `makeClaimBeforePick` factory that still exists and is still called, but whose
+// body no longer writes the reservation, must not report `arbitrate+claim` / `claim (shared
+// pick, via batch)` for either lane — that is precisely the false-negative-turned-false-positive
+// this repair closes.
+// ---------------------------------------------------------------------------
+
+test('claim arbitration: a real factory that still reserves reports normally (control case)', () => {
+  const m = matrixWithFactory({});
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'arbitrate+claim');
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'none'); // default batch body only calls with groups
+});
+
+test('claim arbitration: BITE — deleting the item.claimed append from the factory body flips both lanes off', () => {
+  // Mirrors the exact mutation applied to the real dispatch.ts during this fix's bite-proof:
+  // the two call sites (`claimBeforePick(groups...)`, `claimBeforePick(targetedQueued...)`) are
+  // left completely untouched; only the factory's own reservation write is removed. Before the
+  // `factoryStillReserves` gate, this mutation was INVISIBLE to the column — both lanes still
+  // reported reserved because the call sites still named `claimBeforePick`.
+  const m = matrixWithFactory({
+    factory: `return async (candidateIds: string[]) => {
+    const decided = decideClaimArbitration(candidateIds, freshResult, sessionId, Date.now(), ttl);
+    const kept = decided.filter(d => d.keep);
+    // item.claimed append REMOVED — the reservation write is gone, the call sites are untouched.
+    return decided;
+  };`,
+    batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));
+  const more = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));`,
+  });
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'none', 'batch must NOT read arbitrate+claim once the factory stops appending item.claimed');
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'none', 'target must NOT read claim (shared pick) once the factory stops appending item.claimed');
+});
+
+test('claim arbitration: BITE — deleting decideClaimArbitration from the factory body also flips both lanes off', () => {
+  const m = matrixWithFactory({
+    factory: `return async (candidateIds: string[]) => {
+    // decideClaimArbitration REMOVED — the factory no longer arbitrates at all.
+    const kept = candidateIds.map(id => ({ item: id, keep: true }));
+    await tx.append([...kept.map(d => makeEvent('dispatch', d.item, 'item.claimed', { sessionId, ttl }))]);
+    return kept;
+  };`,
+    batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));
+  const more = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));`,
+  });
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'none');
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'none');
+});
+
+test('claim arbitration: no makeClaimBeforePick factory defined at all falls back to name-only (isolated fixtures)', () => {
+  // matrixWithBodies (used throughout this file for every OTHER claim-arbitration test) never
+  // defines the factory — `factorySpan` is undefined, not empty — so `claimBeforePick(` naming a
+  // lane's own candidate list is sufficient on its own, matching every existing assertion above.
+  // This is the documented, deliberate fallback for a caller that doesn't model the factory.
+  const m = matrixWithBodies({ batch: `const decisions = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));` });
+  assert.equal(cellOf(m, 'batch', 'claimArbitration'), 'arbitrate+claim');
 });
 
 test('post-integration re-gate: a merge with no replay is gate-once, both merge shapes', () => {
@@ -368,11 +532,26 @@ test('post-integration re-gate: the push-race variant (reset + re-merge + gate) 
   assert.equal(cellOf(bareReset, 'batch', 'postIntegrationRegate'), 'gate-once');
 });
 
-test('lane matrix: throws a clear error (not a silent wrong answer) when a named lane function cannot be found', () => {
-  // Simulates the sibling's in-flight rename churn: if `runDispatch` (or any lane entry point)
-  // is renamed and LANE_SPANS in lane-matrix.ts is not updated to match, the generator must fail
-  // loudly rather than silently produce an empty/misleading row.
+test('lane matrix: throws a clear error (not a silent wrong answer) when the shared pick span (runDispatch) is missing', () => {
+  // WI-186: `findSharedPickSpan` resolves `runDispatch` BEFORE any lane row is built (every
+  // row's claimArbitration cell may need it), so a dispatch.ts missing `runDispatch` entirely
+  // now fails loudly at that point, before ever reaching a per-lane function lookup.
   const dispatchSrc = `async function runPlanningLane(): Promise<void> { noop(); }`;
+  const conductorSrc = `export async function runConduct(): Promise<void> { noop(); }`;
+  assert.throws(
+    () => buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc }),
+    /could not locate function 'runDispatch'/,
+  );
+});
+
+test('lane matrix: throws a clear error when a named lane function cannot be found (rename/removal, runDispatch present)', () => {
+  // Simulates the sibling's in-flight rename churn: if a lane entry point OTHER than
+  // runDispatch is renamed and LANE_SPANS in lane-matrix.ts is not updated to match, the
+  // generator must fail loudly rather than silently produce an empty/misleading row.
+  const dispatchSrc = `
+async function runPlanningLane(): Promise<void> { noop(); }
+export async function runDispatch(opts: unknown): Promise<void> { noop(); }
+`;
   const conductorSrc = `export async function runConduct(): Promise<void> { noop(); }`;
   assert.throws(
     () => buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc }),

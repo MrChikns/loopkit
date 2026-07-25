@@ -19,7 +19,7 @@ blindly accepting whatever the regen produces) before committing both together.
 | lane | Touches-overstep | spine check | judge | scout | git push | alreadyShippedCommit | denialNote | gate wrapper | commit side | claim arbitration | post-integration re-gate |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | planning | no | no | no | no | no | no | no | none | n/a (no code diff) | none | n/a (no merge) |
-| target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) | none | gate-once |
+| target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) | claim (shared pick, via batch) | gate-once |
 | batch | yes | yes | yes | yes | yes | yes | yes | runLaneGate | dispatch (declared) | arbitrate+claim | re-gate |
 | conductor | yes | yes | yes | no | no | no | no | runGate (declared) | worker (declared) | claim (claimItems) | gate-once |
 
@@ -42,16 +42,22 @@ blindly accepting whatever the regen produces) before committing both together.
   `planScopedCommit` + `git commit` sequence), `worker` (the spawned agent holds a
   commit-capable tool grant and commits itself), or `n/a (no code diff)` (planning lane).
 - **claim arbitration** — how the lane reserves an item before building it (ADR-007
-  claim-before-pick): `arbitrate+claim` (inline `decideClaimArbitration` — yields items a
-  foreign session claimed *or* a foreign in-flight build holds — plus its own `item.claimed` in
-  the same locked append), `claim (claimItems)` (reserves through the shared session verb, which
-  re-folds under the ledger lock and skips what another session actively holds — it yields to a
-  foreign *claim*, but not to a foreign in-flight *build*), `defer-read` (reads `isClaimActive`
-  to skip claimed items — a read, not a reservation, so it cannot close the read-to-spawn race),
-  or `none`. `none` describes the lane's OWN span: the planning and target lanes are handed
-  their items by `runDispatch`, whose shared pick list defers to active claims on their behalf,
-  but neither lane ever appends a claim of its own — the gap
-  [`limitations.md`](limitations.md) records.
+  claim-before-pick): `arbitrate+claim` (the lane's own span runs the inline arbitration —
+  `decideClaimArbitration`, yielding items a foreign session claimed *or* a foreign in-flight
+  build holds — and appends its own `item.claimed`, whether inline or by calling the shared
+  `claimBeforePick` closure against its own candidate list), `claim (claimItems)` (reserves
+  through the shared session verb, which re-folds under the ledger lock and skips what another
+  session actively holds — it yields to a foreign *claim*, but not to a foreign in-flight
+  *build*), `claim (shared pick, via batch)` (reserved, but NOT by this lane's own code — the
+  reservation call site names this lane's candidate list from inside `runDispatch`, i.e. the
+  batch lane's span; today this is the **target** lane, whose reservation moved into the shared
+  `makeClaimBeforePick` factory under WI-186 without the target lane's own functions
+  `finalizeTargetBuild`/`runTargetLane` ever calling it directly), `defer-read` (reads
+  `isClaimActive` to skip claimed items — a read, not a reservation, so it cannot close the
+  read-to-spawn race), or `none` (reserves nowhere — neither its own span nor, for target, the
+  shared pick site). A `none`/`claim (shared pick, via batch)` swap on this cell is exactly the
+  class of regression this column exists to catch — see
+  [`limitations.md`](limitations.md).
 - **post-integration re-gate** — whether the lane re-verifies the *combined* state when its merge
   destination moves during the build: `re-gate` (replays the branch onto the fresh tip — `git
   rebase`, or the push-race `git reset` + re-merge — and runs the gate again before merging),

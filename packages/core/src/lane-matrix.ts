@@ -417,40 +417,134 @@ function detectCommitSide(span: string, fileSource: string): string {
  * yield the ones a foreign holder took? Added for WI-184 — `limitations.md` names this as one of
  * the two invariants that genuinely differ between lanes, and the matrix could not see it.
  *
- * The ladder, strongest first. Every rung is a REAL call/appended-event-type in the lane's own
- * span (comments are stripped before matching), never a config literal:
+ * WI-186 (post-hoc revision): the reservation terminal was extracted into a factory,
+ * `makeClaimBeforePick`, whose closure `claimBeforePick(candidateIds)` both picking lanes now
+ * call. `decideClaimArbitration(` and the `'item.claimed'` append moved INSIDE the factory body
+ * — a function distinct from `runDispatch` — so a span-only read of `runDispatch` no longer sees
+ * either marker, and `finalizeTargetBuild`/`runTargetLane` never contained them to begin with.
+ * The naive fix (matching `claimBeforePick(` as a new alias for `decideClaimArbitration(`) was
+ * rejected: it would report the SAME cell for both call sites even though only one of them is in
+ * a given lane's own span, silently erasing the distinction this column exists to draw.
  *
- *  - `arbitrate+claim` — the lane runs the inline arbitration (`decideClaimArbitration`) AND
- *    appends its own `item.claimed` in the same locked pass (the engineering/batch lane).
+ * The honest fix has three parts (the third found by this fix's OWN bite-proof — see below):
+ *
+ *  1. `runDispatch` (batch's span) still calls `claimBeforePick(groups...)` as REAL code — the
+ *     factory-vs-inline split is a refactor of WHERE the arbitration logic lives, not whether the
+ *     batch lane calls it. `claimBeforePick(` naming the batch lane's own `groups`-derived
+ *     candidate list is treated as equivalent evidence to the old inline markers.
+ *  2. `finalizeTargetBuild`/`runTargetLane`'s span structurally CANNOT see the target lane's own
+ *     reservation — it happens at the `claimBeforePick(targetedQueued...)` call site inside
+ *     `runDispatch`, i.e. inside a DIFFERENT function than the target lane's own entry points.
+ *     Reporting `none` here would be exactly the "reports the right answer for the wrong reason"
+ *     failure inverted into its opposite: a column that goes on saying "no reservation" after the
+ *     reservation shipped is a lie by omission, and WI-186's whole purpose was closing this gap.
+ *     So this function accepts an OPTIONAL second span — `runDispatch`'s own source — and, for a
+ *     lane whose own span has no reservation marker, greps that shared span for a
+ *     `claimBeforePick(<lane's own queue variable>` call site keyed by an explicit, per-lane
+ *     candidate-variable allowlist (never a generic "any call counts" scan, which could not tell
+ *     target's call site from batch's). Finding one reports a DISTINCT cell —
+ *     `claim (shared pick, via batch)` — that names both facts at once: reserved, and NOT in this
+ *     lane's own code. Rounding it to `arbitrate+claim` would hide that the property no longer
+ *     lives where the lane's own span says it does; `none` would hide that it happens at all.
+ *  3. Neither (1) nor (2) is sufficient alone: both key off the NAME `claimBeforePick`, which is
+ *     just an identifier — it says nothing about whether the factory that produced it still does
+ *     the reservation. The bite-proof for this fix caught exactly that hole: deleting the real
+ *     `item.claimed` append from inside `makeClaimBeforePick`'s own body, while leaving both call
+ *     sites untouched, left every cell reporting reserved. A column that reports "reserved"
+ *     because a function is still NAMED claimBeforePick, independent of what that function's body
+ *     still does, is the same class of lie stripComments exists to prevent for a guard NAME in a
+ *     comment — just one hop further away. So a THIRD optional span is threaded in —
+ *     `makeClaimBeforePick`'s own body — and `claimBeforePick(` naming a lane's candidate list
+ *     (in-span or cross-span) counts only when that factory span still contains the real
+ *     `decideClaimArbitration(` + `'item.claimed'` markers. No factory span supplied (a caller
+ *     that only wants the old inline behaviour, e.g. a unit test) falls back to treating any
+ *     `claimBeforePick(` name-match as sufficient, matching the pre-fix behaviour for isolated
+ *     fixtures that never define the factory at all.
+ *
+ * The ladder for a lane's OWN span, strongest first (comments stripped before matching, config
+ * literals never count):
+ *
+ *  - `arbitrate+claim` — the lane's own span runs the inline arbitration
+ *    (`decideClaimArbitration`) AND appends its own `item.claimed` in the same locked pass, OR
+ *    calls the shared closure (`claimBeforePick`) against ITS OWN candidate list (WI-186 shape).
  *  - `claim (claimItems)` — the lane reserves through the SHARED session verb `claimItems`,
  *    which re-folds under the ledger lock and skips anything another session actively holds
  *    (`session.ts`). Deliberately a DIFFERENT cell from `arbitrate+claim`, not a weaker synonym:
- *    both yield to a foreign claim, but only the inline path additionally yields to a foreign
- *    in-flight BUILD (a recent `build.dispatched` carrying no claim — WI-074). Reading these two
- *    as equal is the misreading this column exists to prevent.
+ *    both yield to a foreign claim, but only the inline/closure path additionally yields to a
+ *    foreign in-flight BUILD (a recent `build.dispatched` carrying no claim — WI-074). Reading
+ *    these two as equal is the misreading this column exists to prevent.
  *  - `arbitrate (no claim)` / `claim (inline)` — the two half-ported shapes. Neither exists today;
  *    they are here so a partial port renders as what it is instead of being rounded to a
  *    neighbouring cell.
+ *  - `claim (shared pick, via batch)` — see point 2 above: reserved by a call site OUTSIDE this
+ *    lane's own span, inside the shared `runDispatch` function.
  *  - `defer-read` — the lane only READS claim state (`isClaimActive`) to skip claimed items. A
  *    read, not a reservation: it cannot close the read-to-spawn race.
- *  - `none` — the lane neither reserves nor reads. NOTE this is a statement about the lane's OWN
- *    span: the planning and target lanes are handed their items by `runDispatch`, whose shared
- *    pick list does a `defer-read` on their behalf *before* dispatching them — but neither lane
- *    ever appends a claim, which is exactly the gap `limitations.md` records.
+ *  - `none` — the lane neither reserves (in its own span or via the shared pick site) nor reads.
  */
-function detectClaimArbitration(span: string): string {
+const CLAIM_BEFORE_PICK_CANDIDATE_VAR: Partial<Record<LaneId, string>> = {
+  // The literal candidate-list expression at each call site (dispatch.ts:3428 / :3481) — an
+  // explicit per-lane allowlist, not a generic "claimBeforePick( appears somewhere" scan, so a
+  // future third call site cannot silently get attributed to the wrong lane.
+  target: 'targetedQueued',
+  batch: 'groups',
+};
+
+/**
+ * Does the factory that PRODUCES the `claimBeforePick` closure still actually reserve anything?
+ * A `claimBeforePick(` call site is just a name — it proves a lane invokes SOMETHING by that
+ * name, not that the something still does the reservation. `factorySpan` is
+ * `makeClaimBeforePick`'s own body; undefined means the caller never supplied one (isolated unit
+ * fixtures that hand-roll a `claimBeforePick(` call without defining the factory at all still get
+ * the pre-fix, name-only behaviour — see the doc comment above).
+ */
+function factoryStillReserves(factorySpan: string | undefined): boolean {
+  if (factorySpan === undefined) return true;
+  return /\bdecideClaimArbitration\s*\(/.test(factorySpan) && /['"]item\.claimed['"]/.test(factorySpan);
+}
+
+function detectClaimArbitration(
+  span: string,
+  lane: LaneId,
+  sharedPickSpan?: string,
+  factorySpan?: string,
+): string {
   const arbitrates = /\bdecideClaimArbitration\s*\(/.test(span);
   // Naming the `item.claimed` event type in real (non-comment) code is how a lane appends a
   // reservation — the string literal is the event type passed to `makeEvent`. String literals
   // survive `stripComments`, so this fires on the append and not on prose about it.
   const claimsInline = /['"]item\.claimed['"]/.test(span);
+  const factoryOk = factoryStillReserves(factorySpan);
+  // WI-186: the shared closure, called against THIS lane's own candidate list, from THIS lane's
+  // own span — e.g. the engineering lane calling `claimBeforePick(groups...)` inside its own
+  // `runDispatch` body. Distinct from the cross-span case below (a lane whose span does not
+  // contain the call at all). Gated on `factoryOk`: the call site's NAME survives a deletion of
+  // the factory's actual reservation write, so the name alone is not sufficient evidence — see
+  // `factoryStillReserves`'s doc comment (found by this column's own bite-proof).
+  const candidateVar = CLAIM_BEFORE_PICK_CANDIDATE_VAR[lane];
+  const closureCallRe = candidateVar
+    ? new RegExp(`\\bclaimBeforePick\\s*\\(\\s*${candidateVar}\\b`)
+    : undefined;
+  const claimsViaClosureInOwnSpan = closureCallRe ? closureCallRe.test(span) && factoryOk : false;
   const claimsViaVerb = /\bclaimItems\s*\(/.test(span);
   const readsClaims = /\bisClaimActive\s*\(/.test(span);
 
   if (arbitrates && claimsInline) return 'arbitrate+claim';
+  if (claimsViaClosureInOwnSpan) return 'arbitrate+claim';
   if (claimsViaVerb) return 'claim (claimItems)';
   if (arbitrates) return 'arbitrate (no claim)';
   if (claimsInline) return 'claim (inline)';
+
+  // Cross-span attribution: this lane's OWN span has no reservation marker, but its candidate
+  // list is reserved by name at a `claimBeforePick(` call site living in the shared span
+  // (runDispatch) — gated on `factoryOk` for the same reason as the in-span case above. Checked
+  // only after every in-span rung has failed, so a lane that reserves itself is never overridden
+  // by a stale/unrelated shared-span match.
+  if (sharedPickSpan && candidateVar && factoryOk) {
+    const crossSpanRe = new RegExp(`\\bclaimBeforePick\\s*\\(\\s*${candidateVar}\\b`);
+    if (crossSpanRe.test(sharedPickSpan)) return 'claim (shared pick, via batch)';
+  }
+
   if (readsClaims) return 'defer-read';
   return 'none';
 }
@@ -525,19 +619,51 @@ const LANE_SPANS: LaneSpanSpec[] = [
   { lane: 'conductor', file: 'conductor', functionNames: ['runConduct', 'runCluster'] },
 ];
 
-function buildRow(spec: LaneSpanSpec, sources: Record<keyof typeof LANE_SOURCE_FILES, string>): LaneRow {
+function extractNamedSpan(src: string, functionName: string, forLane: LaneId, fileKey: string): string {
+  const span = extractFunctionSpan(src, functionName);
+  if (span === undefined) {
+    throw new Error(
+      `lane-matrix: could not locate function '${functionName}' in ${fileKey} for lane '${forLane}'. ` +
+      `Either the function was renamed/removed (update LANE_SPANS in lane-matrix.ts to match) or the ` +
+      `file's shape changed enough that brace-matching failed — investigate before trusting any matrix output.`,
+    );
+  }
+  return span;
+}
+
+/**
+ * `runDispatch`'s own span, comments-stripped — the ONE place both `claimBeforePick(` call sites
+ * live post-WI-186 (dispatch.ts:3428 for the target lane's queue, :3481 for the batch lane's).
+ * Computed once and passed into every `buildRow` call so a lane whose own span cannot see its
+ * reservation (the target lane) can still be attributed correctly — see `detectClaimArbitration`'s
+ * doc comment for why span-only attribution is wrong here specifically.
+ */
+function findSharedPickSpan(sources: Record<keyof typeof LANE_SOURCE_FILES, string>): string {
+  const span = extractNamedSpan(sources.dispatch, 'runDispatch', 'batch', LANE_SOURCE_FILES.dispatch);
+  return stripComments(span);
+}
+
+/**
+ * `makeClaimBeforePick`'s own body, comments-stripped — where the REAL reservation write
+ * (`decideClaimArbitration` + the `item.claimed` append) lives post-WI-186. Optional: a factory
+ * by this name is not guaranteed to exist (a lane could still ship the pre-WI-186 inline shape,
+ * or a test fixture may hand-roll a bare `claimBeforePick(` call without ever defining the
+ * factory) — `undefined` signals "no factory to check", not "the factory is empty", and
+ * `factoryStillReserves` treats the two differently. See that function's doc comment.
+ */
+function findClaimFactorySpan(sources: Record<keyof typeof LANE_SOURCE_FILES, string>): string | undefined {
+  const span = extractFunctionSpan(sources.dispatch, 'makeClaimBeforePick');
+  return span === undefined ? undefined : stripComments(span);
+}
+
+function buildRow(
+  spec: LaneSpanSpec,
+  sources: Record<keyof typeof LANE_SOURCE_FILES, string>,
+  sharedPickSpan: string,
+  factorySpan: string | undefined,
+): LaneRow {
   const src = sources[spec.file];
-  const spans = spec.functionNames.map(name => {
-    const span = extractFunctionSpan(src, name);
-    if (span === undefined) {
-      throw new Error(
-        `lane-matrix: could not locate function '${name}' in ${LANE_SOURCE_FILES[spec.file]} for lane '${spec.lane}'. ` +
-        `Either the function was renamed/removed (update LANE_SPANS in lane-matrix.ts to match) or the ` +
-        `file's shape changed enough that brace-matching failed — investigate before trusting any matrix output.`,
-      );
-    }
-    return span;
-  });
+  const spans = spec.functionNames.map(name => extractNamedSpan(src, name, spec.lane, LANE_SOURCE_FILES[spec.file]));
   // Comments-only stripped (string literals preserved — several markers depend on a literal
   // argument, e.g. `'push'`) so a marker can only fire on REAL code, never on prose that merely
   // names a guard (comments in this codebase narrate guard behaviour constantly).
@@ -553,10 +679,13 @@ function buildRow(spec: LaneSpanSpec, sources: Record<keyof typeof LANE_SOURCE_F
   // DEFINES the gate helper or imports it — see detectGateWrapper.
   cells.gateWrapper = detectGateWrapper(combined, stripComments(src));
   cells.commitSide = detectCommitSide(combined, stripComments(src));
-  // Span-only (no file-scope fallback): both are properties of what THIS lane's terminal does,
-  // and dispatch.ts houses three lanes — a file-scope read would attribute the engineering
-  // lane's arbitration and re-gate to the planning and target lanes that sit beside it.
-  cells.claimArbitration = detectClaimArbitration(combined);
+  // Span-only for every OTHER column (no file-scope fallback): both are properties of what THIS
+  // lane's terminal does, and dispatch.ts houses three lanes — a file-scope read would attribute
+  // the engineering lane's re-gate to the planning and target lanes that sit beside it.
+  // claimArbitration is the deliberate, documented exception: it also takes the shared
+  // `runDispatch` span, because WI-186 moved the target lane's reservation there — see
+  // detectClaimArbitration's doc comment.
+  cells.claimArbitration = detectClaimArbitration(combined, spec.lane, sharedPickSpan, factorySpan);
   cells.postIntegrationRegate = detectPostIntegrationRegate(combined);
 
   return { lane: spec.lane, functionNames: spec.functionNames, cells };
@@ -577,7 +706,9 @@ export function buildLaneMatrix(): LaneMatrix {
 
 /** Build the matrix from supplied source text (test injection — no disk dependency). */
 export function buildLaneMatrixFromSources(sources: Record<keyof typeof LANE_SOURCE_FILES, string>): LaneMatrix {
-  const rows = LANE_SPANS.map(spec => buildRow(spec, sources));
+  const sharedPickSpan = findSharedPickSpan(sources);
+  const factorySpan = findClaimFactorySpan(sources);
+  const rows = LANE_SPANS.map(spec => buildRow(spec, sources, sharedPickSpan, factorySpan));
   return {
     rows,
     generatedNote: 'GENERATED by packages/core/src/lane-matrix.ts — do not hand-edit; regenerate via `node dist/render-lane-matrix.js` or `npm run lane-matrix` (see docs/lane-matrix.md).',
