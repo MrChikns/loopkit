@@ -351,6 +351,20 @@ export function parsePortabilityTargets(portability: string | undefined): Portab
 }
 export interface ItemMergedData {
   commit: string;
+  /**
+   * WI-176 — ONE semantic across every lane: **always `false` at merge time.** A merge observes
+   * that code landed on a branch; it never observes a deploy. Deploy truth arrives out of band —
+   * `fireDeployOnMerge` spawns the deploy DETACHED with `DEPLOY_WI_IDS`, and the deploy script
+   * appends `deploy.succeeded` / `deploy.failed`, which the fold applies to `ItemRecord.deployed`.
+   * Those events are the SOLE authority; the `deployBehindHours` SLO probe (git-based, default 1h)
+   * is the backstop for a deploy script that never reports at all.
+   *
+   * Two lanes used to contradict the rest of the same board: the targeted merge paths (dispatch's
+   * target lane, the reactor's target approve-merge) wrote `!!manifest.deployCommand` — true
+   * whenever a deploy command was merely CONFIGURED, asserted before anything was observed — and
+   * the already-shipped retirement wrote a flat `true`. Never reintroduce either: "a deploy is
+   * configured" and "a deploy succeeded" are different facts, and this field is the second one.
+   */
   deployed?: boolean;
   /** How this item was attributed in a batch merge (absent on single-item merges that had no manifest). */
   attribution?: 'manifest' | 'commit-subject';

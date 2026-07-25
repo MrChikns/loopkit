@@ -396,8 +396,6 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'queuedClaimDeference', file: 'dispatch', mustContain: '!isClaimActive(r, foldResult.sessions, Date.now())' },
   { id: 'runPlanningLane', file: 'dispatch', mustContain: 'export async function runPlanningLane(' },
   { id: 'runTargetLane', file: 'dispatch', mustContain: 'export async function runTargetLane(' },
-  { id: 'targetDeployedFlag', file: 'dispatch', mustContain: 'deployed: !!manifest.deployCommand' },
-  { id: 'batchDeployedFlag', file: 'dispatch', mustContain: 'if (anyMerged && !opts.dryRun) fireDeployOnMerge(' },
   { id: 'salvageOnCrash', file: 'dispatch', mustContain: "salvageFn(w.wtPath, rec.id, w.attempt, artifactDir, 'crash'" },
 
   // reactor

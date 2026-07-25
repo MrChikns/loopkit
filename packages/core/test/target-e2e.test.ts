@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -334,6 +334,80 @@ test('WI-166: target lane merges via dispatch\'s own scoped commit when the work
 
     const gate = spawnSync('sh', ['-c', 'npm test'], { cwd: targetRoot, stdio: 'pipe' });
     assert.equal(gate.status, 0, 'the merged target repo main must be gate-green');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('WI-176: a target merge records deployed:false even when the manifest CONFIGURES a deployCommand', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-wi176-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    // Give the target a real (harmless, non-reporting) deployCommand. This is the whole point:
+    // `deployed` used to be `!!manifest.deployCommand`, so merely CONFIGURING a deploy made the
+    // ledger claim the item was deployed — before the detached script had done anything at all,
+    // and in direct contradiction of the `deployed: false` the engineering lane writes on the
+    // same board for the same kind of event.
+    const manifestPath = join(targetRoot, 'loopkit.target.json');
+    const rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    rawManifest['deployCommand'] = 'true';
+    writeFileSync(manifestPath, JSON.stringify(rawManifest, null, 2), 'utf8');
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'chore: configure a deploy command']);
+
+    const manifest = readTargetManifest(targetRoot);
+    assert.equal(manifest.deployCommand, 'true', 'the manifest really does configure a deploy');
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-032', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-032', 'item.queued', { spec: 'add a marker', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      files: [
+        { path: 'src/extra.js', contents: 'export const marker = 12;\n' },
+        {
+          path: 'test/extra.test.js',
+          contents: "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { marker } from '../src/extra.js';\ntest('marker', () => { assert.equal(marker, 12); });\n",
+        },
+      ],
+      manifest: {
+        wi: 'WI-032',
+        filesTouched: ['src/extra.js', 'test/extra.test.js'],
+        testsAdded: ['test/extra.test.js'],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-032): add extra marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-032');
+    assert.ok(merged, 'the targeted item must merge');
+    // ONE semantic across every lane: a merge observes that code landed, never that it deployed.
+    // deploy.succeeded / deploy.failed (appended by the detached script itself) are the sole
+    // authority for this flag.
+    assert.equal((merged!.data as { deployed?: boolean }).deployed, false,
+      'a configured deployCommand is not an observed deploy — item.merged.deployed must be false on every lane');
+    assert.equal(fold(events).items.get('WI-032')?.deployed, false, 'the fold agrees — nothing has reported a deploy yet');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

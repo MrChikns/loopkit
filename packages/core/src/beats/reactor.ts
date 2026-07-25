@@ -2727,9 +2727,13 @@ function applyApprovedTargetMerge(
   if (manifest.deployCommand) fireDeployOnMerge(targetRoot, manifest.deployCommand, [rec.id]);
 
   events.push(makeEvent('reactor', rec.id, 'gate.passed', { tests: 'green' }));
+  // WI-176: `deployed: false` at merge, on EVERY lane — this used to be
+  // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED, before
+  // anything was observed. The deploy fired just above is detached and self-reporting:
+  // `deploy.succeeded` / `deploy.failed` are the sole authority for this flag.
   events.push(makeEvent('reactor', rec.id, 'item.merged', {
     commit: mergeSha,
-    deployed: !!manifest.deployCommand,
+    deployed: false,
     ...(targetMergeEvidence ?? {}),
   }));
   return { events, merged: true };

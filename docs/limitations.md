@@ -114,22 +114,21 @@ cited three lines that had drifted, and one gap that had since been fixed.
 
 ## Deploy signalling
 
-- **The `deployed` flag means different things in different lanes, and nothing verifies the deploy
-  script ever reports.** The result events exist and are folded
-  (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->) — but they are appended by **your**
-  deploy script, which the plane spawns detached, stdio ignored, unreferenced, with no timeout and
-  nothing awaiting it (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). On
-  top of that the flag on `item.merged` is not written consistently: the engineering lane writes
-  `false` and fires the deploy afterwards
-  (`packages/core/src/beats/dispatch.ts:4490`<!--cite:batchDeployedFlag-->), while the target lane writes
-  `!!manifest.deployCommand` (`packages/core/src/beats/dispatch.ts:2350`<!--cite:targetDeployedFlag-->) —
-  true because a deploy command is *configured*, before anything has been observed. *Bounded:* deploy
-  is off by default (empty `deployCommand`), merge correctness never depends on it, and a
-  deploy-freshness SLO probe (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) notices a deployed
-  checkout that falls behind master. *Matters when:* a deploy hook exits silently without appending
-  either event — at the item level that is indistinguishable from success, the SLO row is the only
-  thing that would ever say otherwise, and it notifies rather than parking. Normalising the flag to one
-  meaning, and treating "merged but never reported" as a state, closes it.
+- **Nothing verifies that a deploy script ever reports** (WI-176 closed the older, worse half of
+  this). `item.merged.deployed` is now uniformly `false` on every lane — a merge observes that code
+  landed, never that it deployed — and `deploy.succeeded` / `deploy.failed`, appended by the
+  detached deploy script itself (it receives `DEPLOY_WI_IDS`), are the sole authority
+  (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->). The plane spawns that script
+  detached, stdio ignored, unreferenced, with no timeout and nothing awaiting it
+  (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). What is *still*
+  missing is a liveness contract on it: a deploy hook that dies before appending either event leaves
+  the item reading "not deployed" forever, which is honest but indistinguishable from "deploy not
+  configured". *Bounded:* deploy is off by default (empty `deployCommand`), merge correctness does not
+  depend on deploy, and the deploy-freshness SLO probe
+  (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) catches a plane-repo deploy that has
+  genuinely stopped shipping. *Matters when:* a per-TARGET deploy hook fails silently — the probe only
+  watches `LOOPKIT_DEPLOY_ROOT`, not each target's own deploy. There is also no rollback path for a
+  `deploy.failed`.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all

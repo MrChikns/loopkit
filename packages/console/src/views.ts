@@ -908,7 +908,11 @@ function deployReceipt(rec: ItemRecord, itemEvents: LedgerEvent[]): { label: str
     return { label: reason ? `deploy failed — ${reason}` : 'deploy failed', ok: false };
   }
   if (rec.deployed === true) return { label: rec.mergeCommit ? `deployed ${rec.mergeCommit}` : 'deployed', ok: true };
-  if (rec.deployed === false) return { label: 'deploy failed', ok: false };
+  // WI-176: a `false` reaching this fallback can only have come from item.merged, where every lane
+  // now writes `deployed: false` to mean "no deploy observed yet" — NOT "the deploy failed". A real
+  // failure arrives as a deploy.failed event and is handled above (with its reason). Rendering
+  // 'deploy failed' here would brand every merge on the board as a failed deploy, so fall through
+  // to the row's own honest default ("not deployed").
   return undefined;
 }
 

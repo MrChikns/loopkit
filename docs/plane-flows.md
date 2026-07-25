@@ -545,12 +545,11 @@ flowchart TD
   `deploy.failed`.
 - Those events do exactly one thing when they arrive: set the item's `deployed` flag
   (`packages/core/src/fold.ts:1363`<!--cite:foldDeploySucceeded-->). Nothing branches on it.
-- 🟠 **The `deployed` flag on `item.merged` does not mean the same thing in every lane.** The
-  engineering lane writes `deployed: false` and fires the deploy afterwards
-  (`packages/core/src/beats/dispatch.ts:4490`<!--cite:batchDeployedFlag-->). The target lane writes
-  `deployed: !!manifest.deployCommand` (`packages/core/src/beats/dispatch.ts:2350`<!--cite:targetDeployedFlag-->)
-  — true whenever a deploy command is merely *configured*, before anything has been observed. Do not
-  read the flag as evidence.
+- ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
+  that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
+  authority. It carried opposite meanings in two lanes until WI-176 — the target lane wrote
+  `true` whenever a deploy command was merely *configured* — so a board read before that fix could
+  not be trusted on this field.
 - 🟠 **A deploy script that never reports is indistinguishable from one that succeeded**, at the item
   level. The only thing that notices is a deploy-freshness SLO row
   (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->): the deployed checkout may lag master by

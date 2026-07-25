@@ -2359,7 +2359,13 @@ async function finalizeTargetBuild(
   await appendEvents(opts.ledgerDir, [
     makeEvent('dispatch', rec.id, 'gate.passed', { tests: gate.reason }),
     makeEvent('dispatch', rec.id, 'build.finished', { commit: mergeCommit }),
-    makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: !!manifest.deployCommand, ...targetEvidence }),
+    // WI-176: `deployed: false` at merge, on EVERY lane. This used to be
+    // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED —
+    // asserted before anything was observed, and contradicting the engineering/batch lanes'
+    // `false` on the same board. The deploy fired just above is detached and self-reporting:
+    // `deploy.succeeded` / `deploy.failed` (folded in fold.ts) are the sole authority for this
+    // flag, with the `deployBehindHours` SLO probe as the backstop for a script that never reports.
+    makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
   ]);
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
@@ -3907,7 +3913,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             const short = shipped.slice(0, 8);
             return [
               makeEvent('dispatch', id, 'gate.passed', { tests: 'green', reason: `already shipped at ${short} — no-commit is a stale requeue; retiring instead of re-parking` }),
-              makeEvent('dispatch', id, 'item.merged', { commit: short, deployed: true, attribution: 'commit-subject' }),
+              // WI-176: `deployed: false` — this retirement observes only that the WI's code is
+              // already on master, never that it reached a deploy target. It used to claim `true`,
+              // the opposite assertion from the very batch lane whose merges it retires. Nothing
+              // fires a deploy here, so no deploy.* event will ever contradict it; "not observed
+              // deployed" is the honest reading and the deploy-age SLO stays the real backstop.
+              makeEvent('dispatch', id, 'item.merged', { commit: short, deployed: false, attribution: 'commit-subject' }),
             ];
           }
           return [

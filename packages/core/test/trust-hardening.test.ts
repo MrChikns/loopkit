@@ -639,6 +639,52 @@ test('deploy: merge with empty deployCommand appends no deploy events', async ()
   }
 });
 
+test('WI-176: the already-shipped retirement records deployed:false (it observes a merge, never a deploy)', async () => {
+  const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
+    makeEvent('cli', 'WI-600', 'item.captured', { source: 'cli', text: 'stale requeue' }),
+    makeEvent('conductor', 'WI-600', 'item.queued', { spec: 'already done', touches: 'src/' }),
+  ]);
+  try {
+    // The WI's code is ALREADY on master under a non-ledger commit tagged `(WI-600)` — the exact
+    // shape alreadyShippedCommit looks for. The build below produces nothing (correctly, there is
+    // nothing left to do), so dispatch retires the item instead of re-parking it forever.
+    const { spawnSync } = await import('node:child_process');
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'shipped.ts'), '// shipped out of band', 'utf8');
+    spawnSync('git', ['add', 'src/shipped.ts'], { cwd: repoRoot, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'feat: shipped out of band (WI-600)'], { cwd: repoRoot, stdio: 'pipe' });
+
+    const noopProvider: LlmProvider = {
+      name: 'fake',
+      async run(): Promise<ProviderResult> { return { ok: true, text: 'nothing left to do' }; },
+    };
+
+    await runDispatch({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: noopProvider,
+      config: makeTestConfig({ deployCommand: '' }),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-600');
+    assert.ok(merged, 'the already-shipped item must be retired via item.merged, not re-parked');
+    // ONE semantic across lanes: this path used to write `deployed: true` — the exact opposite of
+    // what the batch lane whose merges it retires writes on the same board. Nothing here fires or
+    // observes a deploy, so `true` was never anything but an assertion made up out of thin air.
+    assert.equal((merged!.data as unknown as ItemMergedData).deployed, false,
+      'the retirement observes only that code is on master — never that it deployed');
+    assert.equal(events.filter(e => e.type === 'deploy.succeeded' || e.type === 'deploy.failed').length, 0,
+      'no deploy event backs this retirement — which is exactly why it may not claim deployed:true');
+  } finally {
+    cleanup();
+  }
+});
+
 test('deploy: fireDeployOnMerge runs nothing when deployCommand is empty', () => {
   const dir = makeTempDir();
   try {
