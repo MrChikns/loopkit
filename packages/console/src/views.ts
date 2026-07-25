@@ -563,11 +563,11 @@ export function renderStatusStrip(result: FoldResult, events: LedgerEvent[], now
     .join('');
   const lastEvent = `<span class="statusstrip__item">last event <span class="statusstrip__count">${esc(ageLabel(lastTs, now))}</span> ago</span>`;
   // Execution-mode pill (attended vs. away): attended ⇒ an operator session is live and CLI intents are built
-  // immediately by the conductor; away ⇒ the background beats own the queue. Derived from the fold
+  // immediately by that session; away ⇒ the background beats own the queue. Derived from the fold
   // (planeMode), so it flips the instant a session starts/ends or its heartbeat goes stale.
   const mode = planeMode(result.sessions, now.getTime());
   const modeBadge = mode === 'attended'
-    ? `<span class="statusstrip__mode statusstrip__mode--attended" title="An operator session is live — CLI intents are picked up and built immediately by the attended conductor, not the background beats.">● Attended · session</span>`
+    ? `<span class="statusstrip__mode statusstrip__mode--attended" title="An operator session is live — CLI intents are picked up and built immediately by the attended session, not the background beats.>● Attended · session</span>`
     : `<span class="statusstrip__mode statusstrip__mode--away" title="No live operator session — the background reactor/dispatch beats handle the queue autonomously.">○ Away · beats</span>`;
   return `${modeBadge}${items}${lastEvent}`;
 }

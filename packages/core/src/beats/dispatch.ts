@@ -25,9 +25,9 @@
  *   - The engineering (batch) lane's worker never commits (WI-161), and neither does the
  *     target lane's (WI-166): dispatch stages + commits the worker's in-scope output itself
  *     (DISPATCH_BUILDER_TOOLS grants no git add/commit), so a compound-shell-denied commit
- *     command is no longer a failure class either lane can reach. Only conductor.ts's attended
- *     lane is unchanged — a human is present there, so its worker still commits its own output
- *     (BUILDER_TOOLS).
+ *     command is no longer a failure class either lane can reach. Since ADR-013 deleted the
+ *     conductor, NO lane declares worker-side commit any more — {@link BUILDER_TOOLS} survives
+ *     only as the other half of the {@link CommitMode} contract.
  */
 
 import { join, resolve, dirname } from 'node:path';
@@ -81,10 +81,11 @@ export const SPAWN_MAX_BUFFER = 32 * 1024 * 1024;
 
 /**
  * Builder worker allowed-tools list — passed as --allowedTools to every headless build spawn.
- * Used ONLY by conductor.ts's attended session lane now: a human is present there, so the
- * worker still commits its own output and needs `git add`/`git commit`. The batch/engineering
- * lane (WI-161) and the target lane (WI-166) both migrated to {@link DISPATCH_BUILDER_TOOLS} —
- * dispatch commits their output itself, so their workers hold no commit tool at all.
+ * NO lane uses it today: the batch/engineering lane (WI-161) and the target lane (WI-166) both
+ * migrated to {@link DISPATCH_BUILDER_TOOLS} (dispatch commits their output itself, so their
+ * workers hold no commit tool at all), and ADR-013 deleted the conductor, which was the last
+ * caller. It survives as the `'worker'` half of {@link CommitMode} — the contract a lane would
+ * declare if a human were present to hold the commit — and is kept honest by the pairing test.
  * A spawn that omits this list gets permission-prompted on every file write, and a headless
  * session has no approver — the worker then honestly parks with "no commit" instead. Every
  * lane that spawns a headless build must pass the list appropriate to it; a lane that forgets
@@ -113,8 +114,8 @@ export const BUILDER_TOOLS = [
  * commit path for both lanes, so their workers are never granted a commit tool to race against
  * or fall back from — a compound shell command silently denied by the allowlist is no longer a
  * failure class either lane can even reach, because there is no worker-side commit attempt to
- * deny. conductor.ts's attended lane is unaffected (BUILDER_TOOLS, unchanged) — a human is
- * present there.
+ * deny. The `'worker'` contract (BUILDER_TOOLS, unchanged) has no lane declaring it since
+ * ADR-013.
  */
 export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
   t => t !== 'Bash(git add:*)' && t !== 'Bash(git commit:*)',
@@ -123,8 +124,10 @@ export const DISPATCH_BUILDER_TOOLS = BUILDER_TOOLS.filter(
 /**
  * ADR-010: the ONE commit contract, explicit in the type system. `'dispatch'` = dispatch
  * stages + commits the worker's in-scope output itself (the worker holds no commit tool,
- * matches DISPATCH_BUILDER_TOOLS); `'worker'` = a human is present (the attended conductor
- * lane), so the worker commits its own output and needs BUILDER_TOOLS. Every `buildPrompt`/
+ * matches DISPATCH_BUILDER_TOOLS); `'worker'` = a human is present, so the worker commits its
+ * own output and needs BUILDER_TOOLS. No lane declares `'worker'` since ADR-013 deleted the
+ * conductor; the parameter and its pairing test stay because they are what stop prompt text and
+ * tool grants disagreeing the next time one does. Every `buildPrompt`/
  * `buildBatchPrompt` call site and every spawn's toolset MUST derive from the SAME
  * `commitMode` value — see {@link toolsForCommitMode} — so prompt text and granted tools can
  * never disagree. This is the fix for the 2026-07-25 outage class where a shared prompt said
@@ -714,11 +717,11 @@ export function hasUnconsumedCancelRequest(
 // ---------------------------------------------------------------------------
 
 /**
- * ADR-010 step 3: exported (was internal to this beat) so conductor.ts can use the ONE gate
- * runner instead of maintaining its own fork (`runClusterGate`, now deleted). `timeoutMs`
- * defaults to 5 minutes — the beat's own historical hardcoded value — so both existing beat
- * call sites (which don't pass it) are byte-for-byte unchanged; the conductor passes its own
- * per-target `buildTimeoutMinutes`-derived value explicitly.
+ * ADR-010 step 3: exported (was internal to this beat) so a lane outside it could use the ONE
+ * gate runner instead of maintaining its own fork. `timeoutMs` defaults to 5 minutes — the
+ * beat's own historical hardcoded value — so both existing beat call sites (which don't pass it)
+ * are byte-for-byte unchanged; a caller with a per-target `buildTimeoutMinutes` passes its own
+ * value explicitly.
  */
 export function runGate(
   gateCommand: string,
@@ -848,17 +851,16 @@ export function removeWorktree(repoRoot: string, wtPath: string): void {
 }
 
 /**
- * WI-172: the git sequence shared by all three worktree-creation call sites (dispatch's target
- * lane, dispatch's batch lane, conductor's cluster lane) — drop any stale worktree/branch of the
- * SAME name, `worktree add -b`, then provision deps. ONLY the git sequence: each caller keeps its
- * own park-on-failure event shape (they differ deliberately — a batch-lane park writes N events
- * for a co-located group, a conductor park returns an `outcome:'error'` cluster result, a
- * target-lane park never cleans up the worktree it just made on a deps failure while the batch
- * lane does) — none of that belongs in a shared helper, so it stays at the call site.
+ * WI-172: the git sequence shared by the worktree-creation call sites (dispatch's target lane
+ * and dispatch's batch lane) — drop any stale worktree/branch of the SAME name,
+ * `worktree add -b`, then provision deps. ONLY the git sequence: each caller keeps its own
+ * park-on-failure event shape (they differ deliberately — a batch-lane park writes N events for
+ * a co-located group, a target-lane park never cleans up the worktree it just made on a deps
+ * failure while the batch lane does) — none of that belongs in a shared helper, so it stays at the call site.
  *
  * WI-183 — `baseRef` is REQUIRED and must be the SAME ref the caller will later merge INTO.
- * This used to be a hardcoded 'HEAD'. Two lanes (dispatch's target lane, conductor's targeted
- * clusters) branch in a repo whose checkout they do not control and then merge into a
+ * This used to be a hardcoded 'HEAD'. The target lane branches in a repo whose checkout it
+ * does not control and then merges into a
  * MANIFEST-DECLARED default branch. When that checkout's HEAD was not the default branch, every
  * commit already on HEAD rode into the merge — while the Touches-overstep check and the judge's
  * diff evidence only ever inspect what the BUILD added on top of its base. Unrelated work could
@@ -890,13 +892,13 @@ export function openBuildWorktree(
 }
 
 /**
- * WI-172: git mechanics shared by the target lane's and conductor's merge-and-close tails only
- * (never the batch lane — ADR-012). Checkout `mergeDestination` (passed IN by the caller, NEVER
+ * WI-172: git mechanics for the target lane's merge-and-close tail only (never the batch lane —
+ * ADR-012). Checkout `mergeDestination` (passed IN by the caller, NEVER
  * derived here — deriving it is the false-green class ADR-012 calls out), `merge --no-ff`,
  * abort+report on conflict, else resolve the merge commit. Mutex/loop-name/deploy stay at call
  * sites (real per-caller differences, not lane accidents). The `stage` discriminant preserves
  * an unverified asymmetry as-is: the target lane emits 1 event on checkout failure vs 2 on merge
- * conflict; conductor's mutex-wrapped path always emits 2. Not resolved here — reproduced verbatim.
+ * conflict. Not resolved here — reproduced verbatim.
  */
 export function closeMergedCluster(
   gitRoot: string,
@@ -930,9 +932,9 @@ export function closeMergedCluster(
  * terminal path — a no-commit / dirty-tree park used to leave zero evidence. The
  * text is the provider's success output or its error string, whichever is present.
  *
- * ADR-010 step 3: exported so conductor.ts can use this instead of its own fork
- * (`persistConductLog`, now deleted) — best-effort `mkdirSync` added so a caller whose
- * run dir may not exist yet (the conductor's `ctx.runDir`) does not need its own guard.
+ * ADR-010 step 3: exported so a lane outside this beat can use it instead of its own fork —
+ * best-effort `mkdirSync` added so a caller whose run dir may not exist yet does not need its
+ * own guard.
  */
 export function persistWorkerLog(
   runDir: string,
@@ -1621,7 +1623,7 @@ export interface PostBuildGuardConfig {
 }
 
 /** The judge stage's result, returned to the caller so IT can append `review.verdict` +
- * `cost.usage` — the two event shapes differ by loop name (`dispatch` vs `conduct`), so this
+ * `cost.usage` — the two event shapes differ by loop name, so this
  * pipeline (which has no ledger dependency of its own) hands back the raw ingredients rather
  * than picking an actor. `null` means the judge stage did not run (disabled, or no provider). */
 export interface JudgeStageResult {
@@ -1659,8 +1661,8 @@ export interface PostBuildGuardCtx {
   baseSha: string;
   /** Declared Touches for the item(s) sharing this worktree (union for a co-located group). */
   touches: string | undefined;
-  /** Manifest ids to read `filesTouched`/`subject` from (batch: every group member; target/
-   * conductor: the one item). */
+  /** Manifest ids to read `filesTouched`/`subject` from (batch: every group member; target: the
+   * one item). */
   manifestIds: string[];
   /** Whose manifest `subject` becomes the fallback commit's message when present. */
   subjectId: string;
@@ -1705,7 +1707,7 @@ export interface PostBuildGuardCtx {
  * even when the judge stage errors or is skipped. The `'passed'` outcome carries an optional
  * `judgeVerdict` ({@link JudgeStageResult}) — the caller is responsible for turning it into
  * `review.verdict`/`cost.usage` events, since those differ in ledger shape by loop name
- * (`dispatch` vs `conduct`) and this pipeline has no ledger dependency of its own (pure over its
+ * (by loop name) and this pipeline has no ledger dependency of its own (pure over its
  * git/gate inputs so it is trivially testable without a ledger fixture).
  */
 export async function runPostBuildGuards(
@@ -1838,12 +1840,13 @@ export async function runPostBuildGuards(
  * guard pipeline records the SAME verdict shape rather than inventing a second one (ADR-010
  * stage-2 fix: the pipeline used to only log the verdict to stderr and never persist it).
  *
- * @param loop the ledger actor for these events ('dispatch' for the target lane, 'conduct' for
- *   the attended conductor) — the only axis the shape legitimately varies on.
+ * @param loop the ledger actor for these events. Narrowed to `'dispatch'` by ADR-013 — the
+ *   `'conduct'` variant existed only for the deleted conductor lane. Kept as a parameter rather
+ *   than inlined because the actor is the one axis this shape may legitimately vary on.
  */
 export function judgeVerdictEvents(
   itemId: string,
-  loop: 'dispatch' | 'conduct',
+  loop: 'dispatch',
   judgeVerdict: JudgeStageResult | undefined,
 ): LedgerEvent[] {
   if (!judgeVerdict) return [];
@@ -1873,8 +1876,8 @@ export function judgeVerdictEvents(
  * as an `item.briefed` event and injected into the subsequent build prompt.
  * Tools: Read, Grep, Glob — read-only; the scout MUST NOT modify any file.
  *
- * Exported so lanes other than the dispatch beat (e.g. the attended conductor) can reuse the ONE
- * scout prompt/parse pair (with parseBrief below) rather than fork a second briefing prompt.
+ * Exported so a lane outside the dispatch beat can reuse the ONE scout prompt/parse pair (with
+ * parseBrief below) rather than fork a second briefing prompt.
  */
 export function buildScoutPrompt(itemId: string, spec: string, touches?: string): string {
   const touchesLine = touches ? `Declared Touches (code area): ${touches}\n` : '';
@@ -1924,8 +1927,8 @@ Do NOT commit this file. It is read by the dispatch gate for attribution and obs
  * {@link CommitMode} so it can never disagree with the granted toolset (see
  * {@link toolsForCommitMode}). `'dispatch'` (the default — no human present, dispatch commits
  * the worker's output itself) tells the worker it holds no commit tool at all; `'worker'` (a
- * human is present — the attended conductor lane) restores the commit instructions AND the
- * compound-shell-syntax warning that lane actually needs (a worker composing its own
+ * human is present — no lane declares this since ADR-013) restores the commit instructions AND
+ * the compound-shell-syntax warning such a lane would need (a worker composing its own
  * `git add && git commit` can get silently denied by the allowlist on a compound command).
  */
 function commitClauseFor(mode: CommitMode): string {
@@ -4067,7 +4070,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // messages — was silently denied, leaving a FINISHED, gate-ready tree uncommitted and
       // the item parked); promoting it to the ONLY path removes that failure class by
       // construction instead of detecting-then-parking it. ADR-010 point 3: this now calls the
-      // SAME shared `attemptScopedCommit` the target lane and conductor use (was an inline
+      // SAME shared `attemptScopedCommit` the target lane uses (was an inline
       // duplicate of the identical staging/commit sequence, now deleted) — one implementation,
       // one caller shape, differing only in which ids/subject it reads. Skipped when tests
       // inject a synthetic diff list.

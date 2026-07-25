@@ -383,7 +383,7 @@ export interface ItemMergedData {
   changedFilesTruncated?: boolean;
   gateCommand?: string;
   /**
-   * SESSION MODE: the attended session that built and merged this item (conductor path).
+   * SESSION MODE: the attended session that built and merged this item (coordinator path).
    * Absent on every beat-built merge — the fold treats both identically (mode-agnostic events);
    * this is attribution only, never behavior.
    */

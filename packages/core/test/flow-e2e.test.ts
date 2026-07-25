@@ -118,7 +118,7 @@ test('an item claimed by a live attended session is not picked by a dispatch bea
     const iso = (deltaMs: number) => new Date(now.getTime() + deltaMs).toISOString();
 
     // A real attended session (session.started + a fresh heartbeat) holds a live claim on
-    // WI-910 — the exact envelope an attended `conduct`/fast-drain session leaves behind.
+    // WI-910 — the exact envelope an attended fast-drain session leaves behind.
     await seedLedger(ledgerDir, [
       makeEvent('cli', 'WI-910', 'item.captured', { source: 'cli', text: 'do the thing' }, iso(-60_000)),
       makeEvent('cli', 'WI-910', 'item.queued', { spec: 'do the thing', touches: 'src/' }, iso(-59_000)),

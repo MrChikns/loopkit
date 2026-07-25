@@ -66,7 +66,7 @@ Put that diagram next to this repo and the nodes line up:
 | Reference node | loopkit |
 |---|---|
 | **In** | operator intent → `item.captured`, whatever the transport |
-| **Orchestrator** *(decompose)* | the reactor's grooming beat — an LLM event-models raw intent into a work item with acceptance criteria and a `Touches` set |
+| **Orchestrator** *(decompose)* | the reactor's grooming beat — an LLM event-models raw intent into a work item with a free-prose `spec` and a `Touches` set |
 | **Orchestrator** *(delegate)* | the dispatch picker — **deterministic, no model**: `Touches`-disjoint grouping under claims |
 | **Worker LLM calls** | build agents, one git worktree each |
 | **Synthesizer** | the target's gate, then `git merge --no-ff` — per item, serial |

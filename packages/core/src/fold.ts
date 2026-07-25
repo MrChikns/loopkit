@@ -1522,7 +1522,7 @@ export function computeAcceptanceDebt(
 // ---------------------------------------------------------------------------
 
 /**
- * Expected attended-session heartbeat cadence. The conductor beats between items (and the
+ * Expected attended-session heartbeat cadence. A session beats between items (and the
  * operator can `session beat` manually); a session silent for longer than ~3× this cadence
  * is treated as dead and its claims stop deferring the beats (dead-man release — computed,
  * never mutated: the claims simply read as inactive from then on).
@@ -1554,7 +1554,7 @@ export function isSessionActive(
 /**
  * THE plane execution mode (attended vs. away dual-mode), derived — never stored. 'attended' iff any session
  * is live (isSessionActive): an operator is at the machine, so CLI intents are handled by the
- * attended conductor and the away beats defer to its claims. Otherwise 'away': the background
+ * attended session and the away beats defer to its claims. Otherwise 'away': the background
  * reactor/dispatch beats run autonomously. Mode-switching is just session events (start/end +
  * the dead-man), so this reads the current truth straight off the fold with no config knob.
  */
@@ -1571,7 +1571,7 @@ export function planeMode(sessions: Map<string, SessionRecord>, nowMs: number): 
  *   3. the claiming session is alive: started, not ended, and its last signal (heartbeat, else
  *      start) is fresher than SESSION_HEARTBEAT_STALE_MS (dead-man: a crashed session's stale
  *      heartbeat auto-releases every claim back to the shared queue, no mutation needed).
- * Every consumer — the dispatch/reactor pick filters, the conductor, projections — MUST use
+ * Every consumer — the dispatch/reactor pick filters, projections — MUST use
  * this ONE predicate; a second implementation is how two lanes come to disagree on one lease.
  */
 export function isClaimActive(

@@ -87,7 +87,7 @@ h2 {
 .statusstrip__count { font-weight: 640; color: var(--text); font-variant-numeric: tabular-nums; }
 
 /* Execution-mode pill (attended vs. away) — leads the status strip so the operator always knows whether CLI
-   intents run attended (live conductor, fast) or away (background beats). */
+   intents run attended (live coordinator, fast) or away (background beats). */
 .statusstrip__mode {
   display: inline-flex;
   align-items: center;

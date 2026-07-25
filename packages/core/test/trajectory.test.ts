@@ -263,7 +263,7 @@ function makeAttemptChain(opts: {
   terminalParkKind?: string;
   /**
    * WI-165: append a COMPANION item.parked event immediately after the terminal, matching the
-   * real production shape (every emitter in beats/dispatch.ts/doctor.ts/conductor.ts appends
+   * real production shape (every emitter in beats/dispatch.ts/doctor.ts appends
    * the terminal + item.parked together, companion second). Set this to exercise the
    * correlation join; omit it to keep a bare terminal with no companion (e.g. a crash the
    * breaker hasn't tripped on yet).
@@ -710,8 +710,10 @@ test('trajectory: multi-attempt item (real WI-164 shape) — each attempt gets i
 });
 
 test('trajectory: a hold park correlates parkKind but is excluded from attentionCostShare', () => {
-  // Mirrors conductor.ts:524 exactly: gate.failed{reason:'cluster produced no commit'} paired
-  // with item.parked{parkKind:'hold'} (the attended-lane degradation path).
+  // The `hold` shape as it appears in the real ledger: gate.failed{reason:'...no commit'} paired
+  // with item.parked{parkKind:'hold'}. The conductor lane that emitted this exact pair was
+  // deleted in ADR-013, but `hold` parks and the correlation join they exercise are not — this
+  // keeps the rung covered rather than losing it with the lane.
   const events: LedgerEvent[] = [
     ...makeAttemptChain({
       wi: 'WI-165d',

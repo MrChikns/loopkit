@@ -260,7 +260,7 @@ export async function releaseItems(ledgerDir: string, opts: ReleaseItemsOptions)
 // Read helpers
 // ---------------------------------------------------------------------------
 
-/** The session's ACTIVE claims on still-queued items (the conductor's work list). */
+/** The session's ACTIVE claims on still-queued items (the attended session's work list). */
 export function activeSessionClaims(
   result: FoldResult,
   sessionId: string,

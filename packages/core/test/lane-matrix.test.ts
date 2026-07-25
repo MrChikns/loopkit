@@ -1,10 +1,9 @@
 /**
  * lane-matrix.test.ts — the CI tripwire for ADR-010 point 6 (`docs/decisions/ADR-010-one-lane.md`).
  *
- * The matrix itself is DERIVED from `dispatch.ts`/`conductor.ts` source (see lane-matrix.ts's
- * own doc comment for why: a runtime registry would require editing the two files a sibling
- * agent owns mid-refactor; a hand-declared table just moves the same staleness risk one file
- * over). This test pins today's derived matrix as an explicit snapshot. It is deliberately
+ * The matrix itself is DERIVED from `dispatch.ts` source (see lane-matrix.ts's own doc comment
+ * for why: a runtime registry would require editing the file a sibling agent owned mid-refactor;
+ * a hand-declared table just moves the same staleness risk one file over). This test pins today's derived matrix as an explicit snapshot. It is deliberately
  * NOT a loose "still compiles" check — a lane silently losing (or gaining) a guard changes a
  * cell, and this test fails with a message naming exactly which lane/guard moved and telling
  * the reader to update the snapshot DELIBERATELY (i.e. only after confirming the change is
@@ -95,6 +94,17 @@ import {
  * A change to ANY of the four claimArbitration cells (or the detector's candidate-variable
  * allowlist) is a real lane-invariant change — update deliberately, cell by cell, never by
  * pasting the regen.
+ *
+ * ADR-013 (conductor deleted): the `conductor` row is GONE, not changed — `conductor.ts` and
+ * `loopctl conduct` were removed outright because the lane had never produced a single ledger
+ * event and the clustering it named already ships as batch co-location. Everything above about
+ * the conductor is history and stays readable as such; the three surviving lanes' cells are
+ * untouched by the removal (they live in `dispatch.ts`, which the deletion did not edit). Two
+ * consequences worth naming so a future reader does not mistake them for drift: no lane declares
+ * `commitMode: 'worker'` any more, and no lane reports `claim (claimItems)` — both rungs survive
+ * in the detector, and the `claimItems` rung keeps its unit coverage below via an injected
+ * fixture on the target lane rather than losing its only proof with the lane that used to
+ * exercise it.
  */
 const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
   planning: {
@@ -114,12 +124,6 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     alreadyShippedCommit: true, denialNote: true,
     gateWrapper: 'runLaneGate', commitSide: 'dispatch (declared)',
     claimArbitration: 'arbitrate+claim', postIntegrationRegate: 're-gate',
-  },
-  conductor: {
-    touchesOverstep: true, spineCheck: true, judge: true, scout: false, push: false,
-    alreadyShippedCommit: false, denialNote: false,
-    gateWrapper: 'runGate (declared)', commitSide: 'worker (declared)',
-    claimArbitration: 'claim (claimItems)', postIntegrationRegate: 'gate-once',
   },
 };
 
@@ -143,7 +147,7 @@ test('lane matrix: matches the pinned snapshot exactly — a diff here means a l
   assert.equal(
     drift.length, 0,
     `\nLane × guard matrix drifted from the pinned snapshot (ADR-010 point 6 tripwire):\n${drift.join('\n')}\n\n` +
-    `This means a lane (dispatch.ts / conductor.ts) silently gained or lost a guard/property.\n` +
+    `This means a lane (dispatch.ts) silently gained or lost a guard/property.\n` +
     `If this is INTENTIONAL (e.g. a lane just picked up Touches-overstep or a judge stage), update\n` +
     `EXPECTED_SNAPSHOT in packages/core/test/lane-matrix.test.ts to match — deliberately, cell by\n` +
     `cell, not by copy-pasting the new output wholesale. If it is NOT intentional, the lane just\n` +
@@ -244,11 +248,7 @@ async function runPlanningLane(): Promise<void> { noop(); }
 async function finalizeTargetBuild(): Promise<void> { noop(); }
 async function runTargetLane(): Promise<void> { noop(); }
 `;
-  const conductorSrc = `
-export async function runConduct(): Promise<void> { noop(); }
-async function runCluster(): Promise<void> { noop(); }
-`;
-  const matrix = buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+  const matrix = buildLaneMatrixFromSources({ dispatch: dispatchSrc });
   const batch = matrix.rows.find(r => r.lane === 'batch')!;
   for (const guard of ['touchesOverstep', 'spineCheck', 'judge', 'scout', 'alreadyShippedCommit'] as const) {
     assert.equal(batch.cells[guard], false, `guard '${guard}' must not fire from prose-only comment mentions`);
@@ -278,11 +278,7 @@ export async function runDispatch(opts: unknown): Promise<void> {
   runLaneGate(gateId, cfg, wtPath, false, base, changedFiles);
 }
 `;
-  const conductorSrc = `
-export async function runConduct(): Promise<void> { noop(); }
-async function runCluster(): Promise<void> { noop(); }
-`;
-  const matrix = buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+  const matrix = buildLaneMatrixFromSources({ dispatch: dispatchSrc });
   const batch = matrix.rows.find(r => r.lane === 'batch')!;
   for (const guard of ['touchesOverstep', 'spineCheck', 'judge', 'scout', 'push', 'alreadyShippedCommit', 'denialNote'] as const) {
     assert.equal(batch.cells[guard], true, `guard '${guard}' should be detected as present`);
@@ -300,18 +296,14 @@ async function runCluster(): Promise<void> { noop(); }
 // ---------------------------------------------------------------------------
 
 /** Build a matrix from minimal lane stubs, overriding one lane's body. */
-function matrixWithBodies(bodies: { batch?: string; target?: string; conduct?: string }): LaneMatrix {
+function matrixWithBodies(bodies: { batch?: string; target?: string }): LaneMatrix {
   const dispatchSrc = `
 async function runPlanningLane(): Promise<void> { noop(); }
 async function finalizeTargetBuild(): Promise<void> { ${bodies.target ?? 'noop();'} }
 async function runTargetLane(): Promise<void> { noop(); }
 export async function runDispatch(opts: unknown): Promise<void> { ${bodies.batch ?? 'noop();'} }
 `;
-  const conductorSrc = `
-export async function runConduct(): Promise<void> { ${bodies.conduct ?? 'noop();'} }
-async function runCluster(): Promise<void> { noop(); }
-`;
-  return buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+  return buildLaneMatrixFromSources({ dispatch: dispatchSrc });
 }
 
 function cellOf(matrix: LaneMatrix, lane: string, guard: 'claimArbitration' | 'postIntegrationRegate'): string {
@@ -342,19 +334,17 @@ export async function runDispatch(opts: unknown): Promise<void> {
   ${bodies.batch ?? `const decisions = await claimBeforePick(groups.flatMap(g => g.map(r => r.id)));`}
 }
 `;
-  const conductorSrc = `
-export async function runConduct(): Promise<void> { noop(); }
-async function runCluster(): Promise<void> { noop(); }
-`;
-  return buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc });
+  return buildLaneMatrixFromSources({ dispatch: dispatchSrc });
 }
 
 test('claim arbitration: the shared session verb reads as its own rung, not as inline arbitration', () => {
-  // The conductor reserves via claimItems (which yields to a foreign CLAIM under the lock) but
-  // has no inline arbitration (which additionally yields to a foreign in-flight BUILD). Rounding
-  // these two together is the misreading the column exists to prevent.
-  const m = matrixWithBodies({ conduct: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });` });
-  assert.equal(cellOf(m, 'conductor', 'claimArbitration'), 'claim (claimItems)');
+  // A lane reserving via claimItems yields to a foreign CLAIM under the lock but has no inline
+  // arbitration (which additionally yields to a foreign in-flight BUILD). Rounding these two
+  // together is the misreading the column exists to prevent. Injected onto the target lane's
+  // stub: since ADR-013 deleted the conductor NO real lane reports this rung, and a rung whose
+  // only proof was the deleted lane would silently become an untested branch of the detector.
+  const m = matrixWithBodies({ target: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });` });
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'claim (claimItems)');
 });
 
 test('claim arbitration: reading claim state without reserving is defer-read, not a claim', () => {
@@ -406,16 +396,15 @@ test('claim arbitration: a claimBeforePick( call for ONE lane must not bleed int
 });
 
 test('claim arbitration: cross-span attribution never overrides a lane that already reserves in its own span', () => {
-  // If a lane's OWN span already resolves to a rung (e.g. conductor's claimItems), a claim
-  // mentioning that lane's name/variable elsewhere in the shared span must not overwrite it.
-  // (conductor.ts is a separate source file from dispatch.ts, so this is belt-and-braces: the
-  // shared-pick lookup only ever reads dispatch.ts's runDispatch, never conductor.ts — confirmed
-  // by asserting the conductor cell is unaffected by a batch body that mentions its variable.)
+  // If a lane's OWN span already resolves to a rung (here the target lane's claimItems), a claim
+  // naming that lane's candidate variable in the SHARED span must not overwrite it — the
+  // cross-span lookup runs only after every in-span rung has failed. The batch body below is the
+  // exact call site that would otherwise report `claim (shared pick, via batch)` for target.
   const m = matrixWithBodies({
-    conduct: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });`,
+    target: `await claimItems(opts.ledgerDir, { sessionId, allQueued: true });`,
     batch: `const decisions = await claimBeforePick(targetedQueued.map(r => r.id));`,
   });
-  assert.equal(cellOf(m, 'conductor', 'claimArbitration'), 'claim (claimItems)');
+  assert.equal(cellOf(m, 'target', 'claimArbitration'), 'claim (claimItems)');
 });
 
 // ---------------------------------------------------------------------------
@@ -537,9 +526,8 @@ test('lane matrix: throws a clear error (not a silent wrong answer) when the sha
   // row's claimArbitration cell may need it), so a dispatch.ts missing `runDispatch` entirely
   // now fails loudly at that point, before ever reaching a per-lane function lookup.
   const dispatchSrc = `async function runPlanningLane(): Promise<void> { noop(); }`;
-  const conductorSrc = `export async function runConduct(): Promise<void> { noop(); }`;
   assert.throws(
-    () => buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc }),
+    () => buildLaneMatrixFromSources({ dispatch: dispatchSrc }),
     /could not locate function 'runDispatch'/,
   );
 });
@@ -552,9 +540,8 @@ test('lane matrix: throws a clear error when a named lane function cannot be fou
 async function runPlanningLane(): Promise<void> { noop(); }
 export async function runDispatch(opts: unknown): Promise<void> { noop(); }
 `;
-  const conductorSrc = `export async function runConduct(): Promise<void> { noop(); }`;
   assert.throws(
-    () => buildLaneMatrixFromSources({ dispatch: dispatchSrc, conductor: conductorSrc }),
+    () => buildLaneMatrixFromSources({ dispatch: dispatchSrc }),
     /could not locate function 'finalizeTargetBuild'/,
   );
 });

@@ -37,7 +37,6 @@ import {
   startSession, heartbeatSession, endSession, claimItems, releaseItems,
   readCurrentSession, writeCurrentSession, clearCurrentSession,
 } from './session.js';
-import { runConduct } from './conductor.js';
 import { runReactor } from './beats/reactor.js';
 import { runDispatch, parseManifest } from './beats/dispatch.js';
 import { evaluateSloBoard, makeRealProbes, deriveSloState, makeDeployProbe, makeInstanceProbe } from './slo.js';
@@ -147,7 +146,6 @@ Commands:
   session start|beat|end               Attended session lifecycle (claims lease queued items)
   claim <ids...|--all-queued> [--ttl <min>]   Lease queued items to the current session
   release <ids...> [--reason "<text>"]        Return leased items to the shared queue
-  conduct [--claim-all-queued] [--dry-run]    Build the session's claimed items (clustered, one gate per cluster)
 
 Environment:
   LOOPKIT_HOME     Plane-home root (default: ~/.loopkit — holds ledger/, config/, targets/, runs/)
@@ -1420,9 +1418,10 @@ async function cmdConv(rest: string[]): Promise<void> {
 
 
 // ---------------------------------------------------------------------------
-// Session mode (attended): session / claim / release / conduct
-// Bounded section — the claim-lease kernel verbs (session.ts) and the conductor
-// (conductor.ts). Nothing here touches the beat commands above.
+// Session mode (attended): session / claim / release
+// Bounded section — the claim-lease kernel verbs (session.ts) only. An attended
+// drain is coordinated by an agent claiming through these verbs (ADR-013); there
+// is no build lane here. Nothing in this section touches the beat commands above.
 // ---------------------------------------------------------------------------
 
 /** Resolve the terminal's current session id or exit with a hint. */
@@ -1521,41 +1520,6 @@ async function cmdRelease(rest: string[]): Promise<void> {
   }
 }
 
-async function cmdConduct(rest: string[]): Promise<void> {
-  const dryRun = hasFlag(rest, '--dry-run');
-  const claimAllQueued = hasFlag(rest, '--claim-all-queued');
-  const result = await runConduct({
-    ledgerDir: LEDGER_DIR,
-    runDir: RUN_DIR,
-    repoRoot: REPO_ROOT,
-    dryRun,
-    claimAllQueued,
-  });
-
-  if (result.clusters.length === 0) {
-    console.log(result.detail ?? 'Nothing to conduct.');
-    return;
-  }
-  if (dryRun) {
-    console.log(`[dry-run] conduct plan for ${result.sessionId} — ${result.clusters.length} cluster(s):`);
-    for (const c of result.clusters) {
-      const mode = c.serial ? 'serial' : 'parallel';
-      const tgt = c.target ? ` target=${c.target}` : '';
-      console.log(`  cluster ${c.index} (${mode})${tgt}: ${c.items.join(', ')}`);
-      if (c.detail) console.log(`    ${c.detail}`);
-    }
-    return;
-  }
-  console.log(`Conduct ${result.sessionId} — ${result.clusters.length} cluster(s):`);
-  let anyFailed = false;
-  for (const c of result.clusters) {
-    const tgt = c.target ? ` target=${c.target}` : '';
-    const commit = c.mergeCommit ? ` (${c.mergeCommit.slice(0, 8)})` : '';
-    console.log(`  cluster ${c.index}${tgt}: ${c.outcome}${commit} — ${c.items.join(', ')}${c.detail ? ` · ${c.detail}` : ''}`);
-    if (c.outcome !== 'merged') anyFailed = true;
-  }
-  if (anyFailed) process.exit(1);
-}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -1668,9 +1632,6 @@ async function main(): Promise<void> {
       break;
     case 'release':
       await cmdRelease(rest);
-      break;
-    case 'conduct':
-      await cmdConduct(rest);
       break;
 
     // stubs (route/park still pending full implementation)

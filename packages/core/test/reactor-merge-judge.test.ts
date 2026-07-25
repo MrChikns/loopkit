@@ -2,7 +2,7 @@
  * reactor-merge-judge.test.ts — the reactor's post-merge judge backstop (stepMergeJudge).
  *
  * Root cause it fixes: the advisory merge-review judge (review.verdict) was implemented ONLY in the
- * dispatch beat's pre-merge terminal loop. Attended lanes (conductor / coordinator) emit item.merged
+ * dispatch beat's pre-merge terminal loop. An attended coordinator emits item.merged
  * with the same shape but run no judge — so an attended-run plane produces ZERO review.verdict
  * events, starving the acceptance tier of its quality input. The reactor now judges any merged plane
  * item that carries no verdict yet, regardless of which lane merged it.

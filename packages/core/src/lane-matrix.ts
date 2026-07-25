@@ -2,13 +2,17 @@
  * lane-matrix.ts — the lane × guard matrix, DERIVED from source, never hand-typed
  * (ADR-010 point 6: `docs/decisions/ADR-010-one-lane.md`).
  *
+ * ADR-013 deleted the conductor lane, so every remaining lane (planning, target, engineering)
+ * lives in `dispatch.ts`. The generator still reads a MAP of source files rather than a single
+ * one — a future lane in its own module needs a registry entry, not a rewrite.
+ *
  * Why derived-from-source and not a runtime registry or a declared table:
  *
  *  - A runtime registry the lanes actually *consume* (guards as configured properties of one
- *    path) is the ADR-010 end state, but it requires editing `dispatch.ts`/`conductor.ts` to
- *    read from it — exactly the two files a sibling agent owns mid-refactor right now. Doing
- *    that here would either collide with that work or force touching frozen files. Deferred to
- *    the lane-as-parameter stage the ADR itself sequences last.
+ *    path) is the ADR-010 end state, but it requires editing `dispatch.ts` to read from it —
+ *    exactly the file a sibling agent owned mid-refactor when this was written. Doing that here
+ *    would either collide with that work or force touching frozen files. Deferred to the
+ *    lane-as-parameter stage the ADR itself sequences last.
  *  - A hand-declared table (a JS object saying "target lane: no spine, no judge...") paired with
  *    a test asserting it matches reality just moves the rot one file over: nothing forces the
  *    declaration to be re-derived when a lane changes, and ADR-010's whole complaint is that
@@ -19,17 +23,17 @@
  *    loudly (not silently) the moment a lane's marker set changes, via the paired snapshot test.
  *
  * Mechanics: each lane function's source span is found by NAME (declaration line → matching
- * closing brace), never by line number — so this survives the sibling's in-flight edits to
- * `dispatch.ts` (introducing `commitMode`, consolidating commit paths). Within a lane's span we
+ * closing brace), never by line number — so this survives in-flight edits to `dispatch.ts`
+ * (introducing `commitMode`, consolidating commit paths). Within a lane's span we
  * grep for a fixed set of identifier markers, one per guard column. A marker is a real exported
  * or local identifier the lane would have to call/name to exercise that guard (e.g.
  * `checkTouchesOverstep(`, `runJudge(`, `denialNote`) — not free text, so a rename shows up as
  * the marker disappearing (fails safe: a lane that silently loses a guard call also loses the
  * marker, and the matrix records `false` for it).
  *
- * This module only READS `dispatch.ts` / `conductor.ts` as text. It imports nothing from them
- * and is never imported by them — safe to keep even if those files are mid-refactor or
- * temporarily uncompilable, and immune to identifier/type churn inside them.
+ * This module only READS `dispatch.ts` as text. It imports nothing from it and is never
+ * imported by it — safe to keep even if that file is mid-refactor or temporarily
+ * uncompilable, and immune to identifier/type churn inside it.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -65,12 +69,11 @@ const SRC_DIR = join(PACKAGE_ROOT, 'src');
 /** Repo-relative source files the matrix is derived from. */
 export const LANE_SOURCE_FILES = {
   dispatch: join(SRC_DIR, 'beats', 'dispatch.ts'),
-  conductor: join(SRC_DIR, 'conductor.ts'),
 } as const;
 
-export type LaneId = 'planning' | 'target' | 'batch' | 'conductor';
+export type LaneId = 'planning' | 'target' | 'batch';
 
-export const LANE_IDS: LaneId[] = ['planning', 'target', 'batch', 'conductor'];
+export const LANE_IDS: LaneId[] = ['planning', 'target', 'batch'];
 
 /** One guard/property column. Order here is the order rendered. */
 export const GUARD_IDS = [
@@ -90,7 +93,7 @@ export type GuardId = (typeof GUARD_IDS)[number];
 
 /**
  * Columns whose cell is an ENUM STRING rather than a boolean marker hit. A boolean would be a
- * lie for all four: "does this lane arbitrate claims" and "does this lane re-gate" both have a
+ * lie for all of them: "does this lane arbitrate claims" and "does this lane re-gate" both have a
  * meaningful middle (reserve without arbitrating; gate once and merge anyway) that `no` would
  * flatten into "absent", which is precisely the misreading `limitations.md` warns about.
  */
@@ -328,11 +331,12 @@ function detectDeclaredGuard(span: string, key: string): boolean | undefined {
  * local to the lane's own file.
  *
  * "Local fork" is decided by whether the lane's FILE defines the function itself versus importing
- * it — never by which file we happen to be looking at. An earlier version keyed this off "is this
- * the conductor", which was true only until the conductor's forked helpers were deleted and it
- * began calling the beat's exported `runGate`: the cell then read "local fork" for a call that had
- * just been de-duplicated, i.e. it reported the opposite of what had been fixed. A cell that lies
- * is worse than a missing cell, so the signal has to come from the source, not the filename.
+ * it — never by which file we happen to be looking at. An earlier version keyed this off the
+ * lane's identity ("is this the conductor"), which stayed true only until that lane's forked
+ * helpers were deleted and it began calling the beat's exported `runGate`: the cell then read
+ * "local fork" for a call that had just been de-duplicated, i.e. it reported the opposite of what
+ * had been fixed. A cell that lies is worse than a missing cell, so the signal has to come from
+ * the source, not the filename.
  *
  * ADR-010 stage 2: a lane that runs its gate through the shared `runPostBuildGuards` pipeline
  * (`beats/dispatch.ts`) no longer calls `runGate`/`runLaneGate` directly in its OWN span — the
@@ -382,10 +386,10 @@ function detectCommitSide(span: string, fileSource: string): string {
   // states its contract explicitly (`commitMode: 'worker' | 'dispatch'`, or a constant passed to
   // `toolsForCommitMode`), and reading that declaration is both more accurate and more durable
   // than grepping for a `BUILDER_TOOLS` identifier that de-duplication is actively removing.
-  // (Detecting the literal is what made this column report "no code diff" for the conductor the
-  // moment its hand-picked toolset became `toolsForCommitMode(CONDUCT_COMMIT_MODE)` — the column
-  // degraded precisely because the code improved.) The literal markers remain as a fallback for
-  // lanes that have not yet been migrated.
+  // (Detecting the literal is what made this column report "no code diff" for a lane the moment
+  // its hand-picked toolset became `toolsForCommitMode(...)` — the column degraded precisely
+  // because the code improved.) The literal markers remain as a fallback for lanes that have not
+  // yet been migrated.
   const allDeclaredIn = (text: string): string[] => {
     const found = new Set<string>();
     for (const re of [/\bcommitMode\s*:\s*'(worker|dispatch)'/g, /CommitMode\s*=\s*'(worker|dispatch)'/g]) {
@@ -396,7 +400,7 @@ function detectCommitSide(span: string, fileSource: string): string {
   // Span first: a declaration inside the lane's own body is unambiguously that lane's contract.
   const inSpan = allDeclaredIn(span);
   if (inSpan.length === 1) return `${inSpan[0]} (declared)`;
-  // File scope only when UNAMBIGUOUS. A single-lane file (conductor.ts) declares its contract as a
+  // File scope only when UNAMBIGUOUS. A single-lane file would declare its contract as a
   // module-scope constant, which we should read. A multi-lane file (dispatch.ts houses planning,
   // target and batch, plus both branches of toolsForCommitMode) contains every mode, so a
   // file-scope match says nothing about WHICH lane owns it — reading one anyway reported the
@@ -616,7 +620,6 @@ const LANE_SPANS: LaneSpanSpec[] = [
   { lane: 'planning', file: 'dispatch', functionNames: ['runPlanningLane'] },
   { lane: 'target', file: 'dispatch', functionNames: ['finalizeTargetBuild', 'runTargetLane'] },
   { lane: 'batch', file: 'dispatch', functionNames: ['runDispatch'] },
-  { lane: 'conductor', file: 'conductor', functionNames: ['runConduct', 'runCluster'] },
 ];
 
 function extractNamedSpan(src: string, functionName: string, forLane: LaneId, fileKey: string): string {
@@ -699,7 +702,6 @@ function buildRow(
 export function buildLaneMatrix(): LaneMatrix {
   const sources = {
     dispatch: readFileSync(LANE_SOURCE_FILES.dispatch, 'utf8'),
-    conductor: readFileSync(LANE_SOURCE_FILES.conductor, 'utf8'),
   };
   return buildLaneMatrixFromSources(sources);
 }
