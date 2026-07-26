@@ -12,8 +12,9 @@
  * Reader streams all segments in chronological order.
  */
 
-import { createReadStream, mkdirSync, writeFileSync, readdirSync, renameSync, rmdirSync, statSync } from 'node:fs';
+import { createReadStream, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { open, mkdir, rename, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join, basename } from 'node:path';
 import { LedgerEvent, validateEvent } from './schema.js';
@@ -52,18 +53,91 @@ function segmentFile(dir: string, type: string, date: Date): string {
  */
 const LOCK_SPIN_TIMEOUT_MS = 10_000;
 /**
- * STALE — how old a lock must be before another writer may assume the holder is DEAD and
- * reclaim it. 2 minutes is 2x the slowest beat interval (60 s dispatch) and 12x the spin
- * deadline, so no live beat's lock is ever reaped merely for being slow; reclaim now only
- * fires for the case it exists for (holder crashed/killed without releasing), while still
- * self-healing a wedged lane within two minutes rather than never.
- *
- * NOTE: mtime is the lock's CREATION time — nothing refreshes it while held — so staleness
- * still means "the holder started a while ago", not "the holder stopped making progress",
- * and the lock still carries no owner/PID token. See docs/limitations.md.
+ * STALE — the clock-based BACKSTOP, used only when the holder's pid can't be checked locally
+ * (see below): the cross-host case, or an owner token that is missing/unreadable. 2 minutes is
+ * 2x the slowest beat interval (60 s dispatch) and 12x the spin deadline, so no live beat's lock
+ * is ever reaped merely for being slow.
  */
 const LOCK_STALE_MS = 120_000;
 const LOCK_RETRY_MS = 50;
+/** Owner-token file inside the lock dir (WI-200): pid + wall-clock start time of the holder. */
+const LOCK_OWNER_FILE = 'owner.json';
+/**
+ * Tolerance when comparing a recorded owner start time against the OS's report of a live pid's
+ * actual start time. `ps -o lstart=` and process.uptime() both round to whole seconds in
+ * practice, so a couple of seconds of slop is expected between two independent readings of the
+ * SAME process — anything larger means the pid was recycled by a DIFFERENT process.
+ */
+const PID_START_TOLERANCE_MS = 3_000;
+
+interface LockOwner {
+  pid: number;
+  /** Wall-clock epoch ms the holder process started, derived from its own process.uptime(). */
+  startedAt: number;
+}
+
+/** This process's own best estimate of its wall-clock start time. */
+function ownProcessStartedAtMs(): number {
+  return Date.now() - Math.round(process.uptime() * 1000);
+}
+
+/** Stamp the lock dir with this process's owner token. Best-effort — see acquireLock callers. */
+function writeOwnerToken(lockPath: string): void {
+  const token: LockOwner = { pid: process.pid, startedAt: ownProcessStartedAtMs() };
+  try {
+    writeFileSync(join(lockPath, LOCK_OWNER_FILE), JSON.stringify(token), 'utf8');
+  } catch { /* the lock dir itself is still the real mutex; a missing token just falls back to staleness */ }
+}
+
+function readOwnerToken(lockPath: string): LockOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(lockPath, LOCK_OWNER_FILE), 'utf8'));
+    const owner = parsed as Partial<LockOwner>;
+    if (typeof owner.pid === 'number' && typeof owner.startedAt === 'number') {
+      return { pid: owner.pid, startedAt: owner.startedAt };
+    }
+  } catch { /* no token (older/foreign lock) or unreadable — caller falls back to staleness */ }
+  return null;
+}
+
+/**
+ * Best-effort, SAME-HOST-ONLY lookup of when `pid` actually started, via `ps`. Returns null
+ * (indeterminate) if `ps` is unavailable, the pid is gone, or its output doesn't parse — any of
+ * which means the caller cannot disprove the recorded owner locally and must fall back to the
+ * clock-based staleness backstop instead.
+ */
+function otherProcessStartedAtMs(pid: number): number | null {
+  try {
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
+    if (result.status !== 0 || !result.stdout) return null;
+    const parsedMs = Date.parse(result.stdout.trim());
+    return Number.isNaN(parsedMs) ? null : parsedMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is the recorded owner still the one running? true/false are FACTS proven on this host;
+ * null means "can't tell locally" (caller falls back to the staleness backstop).
+ *
+ *   - pid gone (ESRCH)                          → false, provably dead.
+ *   - pid alive, start time matches (±tolerance) → true, genuinely still the owner.
+ *   - pid alive, start time does NOT match       → false: a DIFFERENT process now holds that
+ *     pid number (recycled) — the true holder is gone, even though the pid itself answers.
+ *   - pid alive, actual start time undeterminable → null: cannot rule out recycling locally.
+ */
+function isOwnerStillRunning(owner: LockOwner): boolean | null {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    return null; // e.g. EPERM — pid exists but we can't be sure it's still the same process
+  }
+  const actualStartedAt = otherProcessStartedAtMs(owner.pid);
+  if (actualStartedAt === null) return null;
+  return Math.abs(actualStartedAt - owner.startedAt) <= PID_START_TOLERANCE_MS;
+}
 
 async function acquireLock(dir: string): Promise<string> {
   const lockPath = join(dir, '.ledger.lock');
@@ -71,20 +145,27 @@ async function acquireLock(dir: string): Promise<string> {
   while (Date.now() < deadline) {
     try {
       await mkdir(lockPath, { recursive: false });
+      writeOwnerToken(lockPath);
       return lockPath;
     } catch {
       await new Promise(r => setTimeout(r, LOCK_RETRY_MS));
     }
   }
-  // Spin gave up. Is the holder dead (reclaim) or just slow (respect it)?
+  // Spin gave up. Reclaim only on a FACT (the recorded owner is provably gone, same-host); fall
+  // back to clock-based staleness only when that fact can't be established locally at all.
   try {
-    const st = statSync(lockPath);
-    if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-      rmdirSync(lockPath);
+    const owner = readOwnerToken(lockPath);
+    const stillRunning = owner ? isOwnerStillRunning(owner) : null;
+    const reclaimable = stillRunning !== null
+      ? !stillRunning
+      : Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+    if (reclaimable) {
+      rmSync(lockPath, { recursive: true, force: true });
       await mkdir(lockPath, { recursive: false });
+      writeOwnerToken(lockPath);
       return lockPath;
     }
-  } catch { /* ignore */ }
+  } catch { /* ignore — falls through to the error below */ }
   throw new Error(`Could not acquire ledger lock at ${lockPath}`);
 }
 
