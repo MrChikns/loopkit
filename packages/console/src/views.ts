@@ -24,6 +24,7 @@ import {
   classifyAcceptanceTier,
   acceptanceClassifyFiles,
   hasEvidenceGap,
+  classifyReason,
   AcceptanceTier,
   AcceptanceTierClassifyConfig,
   touchesConflict,
@@ -328,14 +329,18 @@ function runControlActions(rec: ItemRecord, returnTo: string, allItems: ItemReco
  *  shown verbatim rather than guessed at. */
 type ParkClass = 'out-of-scope' | 'protected-path' | 'push-failed' | 'merge-conflict' | 'no-commit' | 'other';
 
-function classifyParkReason(reason: string): { kind: ParkClass; files: string[] } {
+/** no-commit detection defers to @loopkit/core's classifyReason — the one place that already
+ *  handles both the prefixed (`no-commit:`) and legacy-unprefixed (pre-WI-198) literals — so
+ *  this desk can't silently drift from core's classification the way the old local
+ *  `/^no-commit:/i` regex did (it missed the 22 archived legacy-literal events core catches). */
+export function classifyParkReason(reason: string): { kind: ParkClass; files: string[] } {
   let m = /^needs-decision: files outside declared Touches \([^)]*\): (.+)$/.exec(reason);
   if (m) return { kind: 'out-of-scope', files: m[1]!.split(',').map((s) => s.trim()).filter(Boolean) };
   m = /^needs-decision: touches spine \(([^)]*)\)/.exec(reason);
   if (m) return { kind: 'protected-path', files: m[1]!.split(',').map((s) => s.trim()).filter(Boolean) };
   if (/^push to origin failed/i.test(reason)) return { kind: 'push-failed', files: [] };
   if (/merge conflict/i.test(reason)) return { kind: 'merge-conflict', files: [] };
-  if (/^no-commit:/i.test(reason)) return { kind: 'no-commit', files: [] };
+  if (classifyReason(reason) === 'no-commit') return { kind: 'no-commit', files: [] };
   return { kind: 'other', files: [] };
 }
 
