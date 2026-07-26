@@ -1,8 +1,12 @@
 #!/bin/sh
 # Pre-push leak tripwire — scans the committed HEAD tree AND the commit-message
-# range about to be pushed (tree scans never see commit-subject-only residue —
+# range about to be pushed (tree scans never see commit-message-only residue —
 # see scripts/leak-scan.sh --range), and refuses to push under a non-noreply
 # author identity. Installed via `scripts/install-hooks.sh`.
+#
+# The range pass is also the ONLY tripwire a merge commit gets: git does not run
+# pre-commit for merges, so a merge's own message reaches history unscanned until
+# this hook sees it (`git rev-list <range>` includes merge commits).
 ROOT=$(git rev-parse --show-toplevel)
 if [ -x "$ROOT/scripts/leak-scan.sh" ]; then
   sh "$ROOT/scripts/leak-scan.sh" --head || {
@@ -18,10 +22,17 @@ if [ -x "$ROOT/scripts/leak-scan.sh" ]; then
     else
       RANGE="$remote_sha..$local_sha"
     fi
-    sh "$ROOT/scripts/leak-scan.sh" --range $RANGE || {
-      echo "pre-push BLOCKED by leak-scan (commit log for $local_ref). Override (after review) with: git push --no-verify" >&2
-      exit 1
-    }
+    STATUS=0
+    sh "$ROOT/scripts/leak-scan.sh" --range $RANGE || STATUS=$?
+    # Exit 3 = the range held 0 commits. That is a legitimate state here (a new
+    # ref whose tip already exists on another remote publishes no new messages),
+    # so it does not block — but it is ANNOUNCED, never silently read as clean.
+    case "$STATUS" in
+      0) ;;
+      3) echo "pre-push NOTE — 0 commit messages scanned for $local_ref (empty range); the HEAD-tree scan above still applies." >&2 ;;
+      *) echo "pre-push BLOCKED by leak-scan (commit log for $local_ref). Override (after review) with: git push --no-verify" >&2
+         exit 1 ;;
+    esac
   done
 fi
 EMAIL=$(git config user.email)
