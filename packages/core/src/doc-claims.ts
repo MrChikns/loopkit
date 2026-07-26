@@ -71,6 +71,28 @@
  * survived; both sentences were rewritten to what the code does. That order — fix the claim, then
  * pin it — is the whole discipline.
  *
+ * THE ROADMAP DOC (WI-206)
+ * ------------------------
+ * `operating-model.md` is the third doc and the awkward one: it is MOSTLY UNBUILT. It described
+ * `scope.claimed`, `plan.defined`, `loopkit attended start` and `loopkit reconcile` in the present
+ * indicative while none of them existed anywhere in `packages/core/src` — not a lie (its status
+ * line said the layers were roadmap) but exactly the shape a first-time reader mis-reads, in the
+ * doc a launch post points at.
+ *
+ * The fix was editorial first: every capability there now carries a ✅/⚪ status mark, reusing
+ * `plane-flows.md`'s vocabulary rather than inventing a second one, and planned material left the
+ * present indicative. Markers came second, and only on the ✅ subset — five claims, which is the
+ * whole shipped surface of that page. The doc states that rule about itself, so ✅ and "carries a
+ * marker" are one thing and a future ✅ arrives pinned. Marking a mostly-roadmap doc is only safe
+ * BECAUSE the unmarked sentences are visibly labelled ⚪: without the marks, an unmarked sentence
+ * would read as "checked and fine" (limit 2 below), which is worse than no markers at all.
+ *
+ * Two claims were false rather than merely early, both found by checking the doc's concrete nouns
+ * against source: "every event carries an optional `target`" (the envelope has no such field — it
+ * is stamped on `item.captured` and inherited through the fold) and "Touches, surfaces, risk
+ * patterns are path prefixes" (risk patterns are substring matches). Both sentences were rewritten
+ * to what the code does before anything was pinned to them.
+ *
  * WHAT THIS STILL CANNOT CATCH — read this before trusting a green run
  * -------------------------------------------------------------------
  * The point of the mechanism is that it earns a specific, narrow trust. Over-trusting it is the
@@ -183,6 +205,10 @@ export const SOURCE_PATHS = {
   touches: `${SRC}/touches.ts`,
   trajectory: `${SRC}/trajectory.ts`,
   routing: `${SRC}/routing.ts`,
+  // Added for operating-model.md's claims (WI-206): the attended-session claim verbs and the
+  // target manifest reader — the two shipped halves of a doc that is otherwise roadmap.
+  session: `${SRC}/session.ts`,
+  target: `${SRC}/target.ts`,
 } as const;
 export type SourceKey = keyof typeof SOURCE_PATHS;
 
@@ -190,6 +216,7 @@ export const DOC_PATHS = {
   'plane-flows': 'docs/plane-flows.md',
   'limitations': 'docs/limitations.md',
   'method': 'docs/method.md',
+  'operating-model': 'docs/operating-model.md',
 } as const;
 export type DocKey = keyof typeof DOC_PATHS;
 
@@ -200,8 +227,10 @@ export type DocKey = keyof typeof DOC_PATHS;
  * unpinned threshold that ever lands in the method doc. `limitations.md` is deliberately NOT
  * swept: it quotes numbers it is arguing *about* (sizes, versions, dates in prose) and a sweep
  * there would fire on sentences that are not thresholds — a check with false alarms gets disabled.
+ * `operating-model.md` joins on the same terms as `method.md` (WI-206): it bolds no bare number
+ * today, so the ratchet costs nothing now and refuses the first unpinned threshold that lands.
  */
-export const UNPINNED_SWEEP_DOCS: DocKey[] = ['plane-flows', 'method'];
+export const UNPINNED_SWEEP_DOCS: DocKey[] = ['plane-flows', 'method', 'operating-model'];
 
 /** All source text, read once. Injectable so the test can exercise the machinery hermetically. */
 export type SourceBundle = Record<SourceKey, string>;
@@ -1068,6 +1097,139 @@ export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
         file: 'dispatch',
         pattern: /chooseModel\(routingTable, carrierBucket, carrierIncumbent, routingCfg, routingRand\)/,
         proves: 'the build path calls the policy, so routing is live rather than an unused module',
+      },
+    ],
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // operating-model.md (WI-206). That doc is MOSTLY ROADMAP and used to state all of it in the
+  // present indicative ("appends `scope.claimed`") while `scope.*`, `plan.*`, `attended start`
+  // and `reconcile` appeared nowhere in src. The honesty pass marks every capability ✅ or ⚪ in
+  // the rendered text, and the doc states a rule about itself: where a ✅ names a symbol in
+  // packages/core/src, that sentence carries an existence marker. The five claims below ARE that
+  // set — the shipped subset of a roadmap doc. Their smallness is the finding, not a gap: a ⚪
+  // sentence has nothing to bind to, which is exactly what the mark tells the reader.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── What shipped INSTEAD of the doc's file-scope `scope.claimed`: leases on whole work items.
+  //    The sentence is about the away beats DEFERRING and an expired lease RETURNING the item, so
+  //    the deference read and the reaper are reference sites — a claim event nobody honoured would
+  //    leave the paragraph false with `item.claimed` still declared.
+  {
+    id: 'attendedItemClaimLease',
+    doc: 'operating-model',
+    symbol: 'item.claimed',
+    what: 'an attended session leases whole queued work items and the away beats defer to it while the lease is active',
+    file: 'schema',
+    declaration: /^ {2}'item\.claimed': ItemClaimedData;$/,
+    referencedBy: [
+      {
+        file: 'session',
+        pattern: /makeEvent\('cli', rec\.id, 'item\.claimed', \{ sessionId, ttlMinutes \}\)/,
+        proves: 'the operator verb really leases an item, with a ttl, rather than mutating queue state',
+      },
+      {
+        file: 'dispatch',
+        pattern: /!isClaimActive\(r, foldResult\.sessions, Date\.now\(\)\)/,
+        proves: 'the picker skips claimed items — the deference the section promises',
+      },
+      {
+        file: 'reactor',
+        pattern: /reapStaleClaims\(freshResult, freshResult\.sessions, now\)/,
+        proves: 'an expired lease is returned to the shared queue instead of blocking it forever',
+      },
+    ],
+  },
+
+  // ── "Race-safe by construction, not a check-then-act" (ADR-007). The decision function alone
+  //    proves nothing: the property holds only while the picker CALLS it and claims the survivors
+  //    in the same locked append, so both halves of that pass are pinned.
+  {
+    id: 'claimArbitrationLock',
+    doc: 'operating-model',
+    symbol: 'decideClaimArbitration()',
+    what: 'claim acquisition and dispatch admission are arbitrated in one re-folded pass under the ledger lock',
+    file: 'dispatch',
+    declaration: /^export function decideClaimArbitration\($/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /const decisions = await claimBeforePick\(/,
+        proves: 'the picker actually arbitrates before it spawns, closing the read-to-spawn window',
+      },
+      {
+        file: 'dispatch',
+        pattern: /makeEvent\('dispatch', d\.item, 'item\.claimed', \{ sessionId: dispatchSessionId, ttlMinutes: claimTtlMinutes \}\)/,
+        proves: 'surviving candidates are claimed in the SAME locked append — the check and the act are one step',
+      },
+    ],
+  },
+
+  // ── Contract 1. The doc previously said "every event carries an optional `target`"; the
+  //    envelope has no such field — it is stamped on the CAPTURE and inherited through the fold.
+  //    The corrected sentence is pinned on the field where it really lives, with the targeted
+  //    lane as proof the folded value is load-bearing rather than decorative.
+  {
+    id: 'envelopeTargetStamp',
+    doc: 'operating-model',
+    symbol: 'ItemCapturedData.target',
+    what: "a work item's target is stamped once at capture and inherited by downstream events through the fold",
+    file: 'schema',
+    declaration: /^ {2}target\?: string;$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /targetedQueued = queued\.filter\(r => r\.lane !== 'planning' && r\.target\)/,
+        proves: 'the folded target selects the item into its own target lane, so the stamp really routes work',
+      },
+    ],
+  },
+
+  // ── "Any folder is a target" — the half that exists. `target add` REGISTERS an existing git
+  //    repo with a manifest; the doc's `--init` (git init a plain folder) does not exist, and the
+  //    git check pinned here is what actively rejects it, so this claim also anchors the ⚪ next
+  //    to it.
+  {
+    id: 'targetAddRegistersRepo',
+    doc: 'operating-model',
+    symbol: 'readTargetManifest()',
+    what: 'target registration reads and validates a repo\'s manifest, and rejects a path that is not a git worktree',
+    file: 'target',
+    declaration: /^export function readTargetManifest\(repoPath: string\): TargetManifest \{$/,
+    referencedBy: [
+      {
+        file: 'cli',
+        pattern: /manifest = readTargetManifest\(toplevel\);/,
+        proves: 'the operator verb validates the manifest before any event is appended',
+      },
+      {
+        file: 'cli',
+        pattern: /spawnSync\('git', \['-C', repoPath, 'rev-parse', '--show-toplevel'\]/,
+        proves: 'a non-repo path fails loudly — which is why `--init` is roadmap and not a missing flag',
+      },
+    ],
+  },
+
+  // ── "Boundaries are path-shaped." The doc used to flatten Touches, surfaces AND risk patterns
+  //    into "path prefixes"; risk patterns are substring matches. Only the prefix half is pinned,
+  //    on the ONE matcher, so a second parser re-appearing is what breaks it.
+  {
+    id: 'touchesPrefixMatcher',
+    doc: 'operating-model',
+    symbol: 'matchesAnyTouchPrefix()',
+    what: 'Touches and the plane/surface split are matched as segment-boundary path prefixes by one shared matcher',
+    file: 'touches',
+    declaration: /^export function matchesAnyTouchPrefix\(f: string, prefixes: string\[\]\): boolean \{$/,
+    referencedBy: [
+      {
+        file: 'touches',
+        pattern: /return prefixes\.some\(pre => touchesSegmentMatch\(pre\.replace\(/,
+        proves: 'the match really is on segment boundaries, not a startsWith that spans path segments',
+      },
+      {
+        file: 'acceptance',
+        pattern: /const surfaceHit = files\.find\(f => matchesAnyPrefix\(f, cfg\.surfacePrefixes\)\);/,
+        proves: 'acceptance classifies surfaces through the same matcher, so one prefix means one thing',
       },
     ],
   },
