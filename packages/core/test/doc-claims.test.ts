@@ -1,5 +1,7 @@
 /**
- * doc-claims.test.ts — the CI tripwire for `docs/plane-flows.md` and `docs/limitations.md`.
+ * doc-claims.test.ts — the CI tripwire for `docs/plane-flows.md`, `docs/limitations.md` and
+ * `docs/method.md` (the method doc joined in WI-202; see doc-claims.ts's header for why it is
+ * covered by existence markers rather than numbers or citations).
  *
  * Sibling of `lane-matrix.test.ts`, same discipline and the same reason: the guard matrix is
  * derived-and-pinned, so it does not rot; the two narrative docs were not, so they did. This
