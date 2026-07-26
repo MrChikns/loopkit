@@ -44,6 +44,10 @@ export * from './hygiene.js';
 // Target-readiness audit (loopctl audit)
 export * from './audit/index.js';
 
+// Autonomy: THE plane kill-switch predicate — shared by both beat gates and the console's
+// execution-mode pill so the two can never disagree about what "armed" means.
+export * from './autonomy.js';
+
 // Config
 export * from './config.js';
 

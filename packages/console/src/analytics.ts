@@ -43,6 +43,7 @@ import {
   resolvePlaneHome,
   makeRegistry,
   makeFileHealthFns,
+  isPlaneArmed,
 } from '@loopkit/core';
 import type {
   CostSummary,
@@ -1385,6 +1386,8 @@ export function renderAnalytics(
   url: URL = new URL('http://localhost/analytics'),
   extras: AnalyticsExtras = {},
   theme?: string,
+  /** Process env for the beats indicator's autonomy half; absent ⇒ the fail-safe 'halted'. */
+  env?: NodeJS.ProcessEnv,
 ): string {
   const pageSpec = parseTimeWindow(url.searchParams.get('window'), PAGE_WINDOW_DEFAULT);
   const cacheSpec = parseTimeWindow(url.searchParams.get('cache'), CACHE_WINDOW_DEFAULT);
@@ -1432,6 +1435,7 @@ ${legendBlock()}
       activeNav: 'analytics',
       statusStrip: renderStatusStrip(result, events, now),
       theme,
+      planeHalted: !isPlaneArmed(env),
       provenance: {
         generatedAt: nowIso,
         eventCount: events.length,

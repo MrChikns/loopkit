@@ -300,6 +300,13 @@ export type PlaneObservabilityInput = {
   routing: PlaneRoutingData;
   /** Execution-config-by-model panel (feature-detected). null = CLI command absent. */
   executionConfig?: PlaneExecutionConfigData;
+  /**
+   * Is the plane's autonomy gate ON — i.e. will the reactor/dispatch beats take on NEW work?
+   * Resolved by the app boundary from the process environment (loopkit: core's `isPlaneArmed`,
+   * which mirrors the beat gates' fail-safe — an unset switch means OFF). Optional so an older
+   * caller still validates; absent renders as "unknown" rather than guessing "armed" (WI-204).
+   */
+  planeArmed?: boolean;
 };
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -333,6 +340,8 @@ export type PlaneObservabilityData = {
   cacheEfficiency: PlanesCacheEfficiencyData;
   /** Stage-transition pipeline latency (WI-315) — null when no item has merged in the window. */
   pipelineLatency: PlanesPipelineLatencyData;
+  /** Autonomy-gate state (WI-204). true = armed, false = halted, undefined = not reported. */
+  planeArmed?: boolean;
 };
 
 // ─── Validator ────────────────────────────────────────────────────────────────
@@ -680,6 +689,9 @@ export function planeObservabilityProjectionFromInput(
       quota:            quotaPanelFromCosts(raw.costs),
       cacheEfficiency:  cacheEfficiencyFromCosts(raw.costs),
       pipelineLatency:  pipelineLatencyFromCosts(raw.costs),
+      // Never defaulted to `true`: an absent reading is unknown, and claiming "armed" would be
+      // the same flattering guess this item exists to remove.
+      ...(typeof raw.planeArmed === 'boolean' ? { planeArmed: raw.planeArmed } : {}),
     },
     evidence: [
       { id: 'spend',       kind: 'metric-query', label: 'loopctl costs'           },

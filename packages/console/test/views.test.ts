@@ -1208,9 +1208,34 @@ test('renderSystem: provenance footer carries this page\'s event count and CLI e
 });
 
 
+// ---------------------------------------------------------------------------
+// Execution-state surfaces (WI-194 attribute closure · WI-204 the autonomy gate)
+// ---------------------------------------------------------------------------
+
+const MODE_NOW = new Date('2026-07-25T12:00:00Z');
+
+/** A ledger with a LIVE session (started, never ended, fresh heartbeat) — the only thing that
+ *  flips `planeMode` to 'attended'. The shared fixtures all fold to 'away', which is exactly how
+ *  the earlier regression test managed to pass with the attended branch's bug reintroduced. */
+function attendedLedger(): LedgerEvent[] {
+  return [
+    ...sampleLedger(),
+    makeEvent('cli', 'system', 'session.started', { sessionId: 'ses-mode-test' }, '2026-07-25T11:58:00Z'),
+    makeEvent('cli', 'system', 'session.heartbeat', { sessionId: 'ses-mode-test' }, '2026-07-25T11:59:30Z'),
+  ];
+}
+
+/** Pull the session pill's opening tag + visible label out of the strip by its modifier class. */
+function pillOf(html: string, cls: string): { tag: string; label: string } | undefined {
+  const re = new RegExp(`<span class="statusstrip__mode statusstrip__mode--${cls}"([^>]*)>([^<]*)<`);
+  const m = re.exec(html);
+  if (!m) return undefined;
+  return { tag: m[0] as string, label: m[2] as string };
+}
+
 /**
- * The execution-mode pill is a hand-built HTML string with a long `title=` attribute, and the
- * WI-194 conductor→router rename dropped its closing quote — the browser then parsed
+ * The pill is a hand-built HTML string with a long `title=` attribute, and the WI-194
+ * conductor→router rename dropped its closing quote — the browser then parsed
  * `>● Attended · session</span>` INTO the attribute value and the pill rendered empty. Nothing
  * caught it: no test touched `statusstrip__mode`, and an unterminated attribute is still valid
  * JavaScript, so `tsc` was green. Caught by a human reading the diff at the public-push gate.
@@ -1219,33 +1244,131 @@ test('renderSystem: provenance footer carries this page\'s event count and CLI e
  * as TEXT rather than being swallowed) rather than the exact prose, so a future copy edit does not
  * fail them while a future unterminated quote does.
  */
-test('status strip: the execution-mode pill closes its title attribute (both modes)', () => {
-  const now = new Date('2026-07-25T12:00:00Z');
-  // BOTH branches must be exercised. An earlier draft of this test used only the shared fixtures,
-  // which both fold to planeMode 'away' — so it PASSED with the attended branch's bug reintroduced.
-  // A live session (started, never ended, fresh heartbeat) is what flips planeMode to 'attended'.
-  const attendedEvents: LedgerEvent[] = [
-    ...sampleLedger(),
-    makeEvent('cli', 'system', 'session.started', { sessionId: 'ses-mode-test' }, '2026-07-25T11:58:00Z'),
-    makeEvent('cli', 'system', 'session.heartbeat', { sessionId: 'ses-mode-test' }, '2026-07-25T11:59:30Z'),
-  ];
-  const cases: Array<[string, LedgerEvent[]]> = [['away', sampleLedger()], ['attended', attendedEvents]];
+test('status strip: the session pill closes its title attribute (both branches)', () => {
   const seen = new Set<string>();
-  for (const [label, evs] of cases) {
-    const result = fold(evs);
-    const html = renderStatusStrip(result, evs, now);
-    const modeSpan = /<span class="statusstrip__mode[^>]*>/.exec(html);
-    assert.ok(modeSpan, `${label}: expected a mode pill in the status strip`);
+  for (const [session, evs] of [['away', sampleLedger()], ['attended', attendedLedger()]] as const) {
+    const html = renderStatusStrip(fold(evs), evs, MODE_NOW);
+    const pill = pillOf(html, session);
+    assert.ok(pill, `${session}: expected the --${session} pill in the status strip`);
     // Every double quote in the opening tag must pair up; an unterminated title= leaves an odd count.
-    const quotes = (modeSpan[0].match(/"/g) ?? []).length;
-    assert.equal(quotes % 2, 0, `${label}: unterminated attribute in mode pill: ${modeSpan[0].slice(0, 160)}`);
+    const quotes = (pill.tag.match(/"/g) ?? []).length;
+    assert.equal(quotes % 2, 0, `${session}: unterminated attribute in pill: ${pill.tag.slice(0, 160)}`);
     // And the visible label must survive as TEXT, not be swallowed into an attribute value.
-    const shown = /statusstrip__mode[^>]*>([●○]\s*(?:Attended|Away)[^<]*)</.exec(html);
-    assert.ok(shown, `${label}: mode pill label was swallowed into an attribute`);
-    seen.add(label === 'attended' ? 'Attended' : 'Away');
+    assert.match(pill.label, /\S/, `${session}: pill label was swallowed into an attribute`);
+    seen.add(session);
   }
-  // Guard the guard: if a future fixture change stops producing both modes, this test silently
-  // stops covering the branch that actually regressed. Fail loudly instead.
-  assert.deepEqual([...seen].sort(), ['Attended', 'Away'], 'both plane modes must be exercised');
+  // Guard the guard: if a future fixture change stops producing both branches, this test silently
+  // stops covering the one that actually regressed. Fail loudly instead.
+  assert.deepEqual([...seen].sort(), ['attended', 'away'], 'both session branches must be exercised');
+});
+
+/**
+ * WI-204, the defect. `planeMode` derives from SESSIONS ALONE, but the 'away' pill was labelled
+ * "Away · beats" and titled "the background reactor/dispatch beats handle the queue
+ * autonomously" — a claim about the autonomy gate, made by a projection that cannot see it. With
+ * the plane halted the first surface an operator checks asserted the queue was being handled
+ * while both beats no-opped at the gate on every fire.
+ *
+ * Attendance and autonomy are orthogonal, so the fix was to stop this pill speaking for the
+ * beats at all (the beats axis moved to where it is actionable — see the composer tests below).
+ * This pins that: NEITHER branch may claim the beats are working, and the pill must not change
+ * with the environment, because it does not read it.
+ */
+test('status strip: the session pill never speaks for the beats, in either branch', () => {
+  const CLAIMS_BEATS_WORK = /\bautonomously\b|beats handle|pick(s)? up new queued work/i;
+  const seen = new Set<string>();
+  for (const [session, evs] of [['away', sampleLedger()], ['attended', attendedLedger()]] as const) {
+    const html = renderStatusStrip(fold(evs), evs, MODE_NOW);
+    const pill = pillOf(html, session);
+    assert.ok(pill, `${session}: expected the --${session} pill`);
+    const title = /title="([^"]*)"/.exec(pill.tag)?.[1] ?? '';
+    assert.match(title, /\S/, `${session}: pill has no title`);
+    assert.doesNotMatch(title, CLAIMS_BEATS_WORK, `${session}: pill title claims beats behaviour: ${title}`);
+    assert.doesNotMatch(pill.label, /beats/i, `${session}: pill label names the beats: ${pill.label}`);
+    // Only the opposite branch's pill may be absent — never both, never both present.
+    assert.equal(pillOf(html, session === 'attended' ? 'away' : 'attended'), undefined,
+      `${session}: both session pills rendered`);
+    assert.match(pill.tag, session === 'attended' ? /data-state="success"/ : /data-state="neutral"/,
+      `${session}: pill operational state`);
+    seen.add(session);
+  }
+  assert.deepEqual([...seen].sort(), ['attended', 'away'], 'both session branches must be exercised');
+
+  // The strip takes no env at all any more, so it cannot drift with the gate: identical bytes
+  // whatever LOOPKIT_AUTONOMY says. Asserted rather than assumed, because the previous version
+  // of this pill was wrong precisely by implying something about that variable.
+  const evs = sampleLedger();
+  const saved = process.env['LOOPKIT_AUTONOMY'];
+  try {
+    process.env['LOOPKIT_AUTONOMY'] = 'on';
+    const armedHtml = renderStatusStrip(fold(evs), evs, MODE_NOW);
+    process.env['LOOPKIT_AUTONOMY'] = 'off';
+    const haltedHtml = renderStatusStrip(fold(evs), evs, MODE_NOW);
+    assert.equal(armedHtml, haltedHtml, 'the status strip must not vary with the autonomy gate');
+  } finally {
+    if (saved === undefined) delete process.env['LOOPKIT_AUTONOMY']; else process.env['LOOPKIT_AUTONOMY'] = saved;
+  }
+});
+
+/**
+ * WI-204, the fix. The halted warning belongs next to the intent box — halted is the state in
+ * which dropping an intent does not do what the operator expects (captured, then nothing picks
+ * it up), so the warning has to be where the action is, at the moment of acting. The legacy
+ * item-timeline page renders the shell composer via `page()`, so `planeHalted` must reach it.
+ *
+ * Asymmetry is asserted as hard as the warning itself: an ARMED plane must add NOTHING here.
+ */
+test('composer: the halted notice renders beside the intent box, and armed adds nothing', () => {
+  const evs = sampleLedger();
+  const result = fold(evs);
+  const render = (env: NodeJS.ProcessEnv | undefined) =>
+    renderItemTimeline('CONV-1', result.items.get('CONV-1'), evs, MODE_NOW, result, undefined,
+      new URL('http://localhost/item/CONV-1'), [], env);
+
+  const halted = render({ LOOPKIT_AUTONOMY: 'off' });
+  const armed = render({ LOOPKIT_AUTONOMY: 'on' });
+
+  assert.match(halted, /opsui-composer__halted/, 'halted must render the notice inside the composer');
+  assert.doesNotMatch(armed, /opsui-composer__halted/, 'armed must render NO notice — the normal state is quiet');
+  assert.doesNotMatch(armed, /\bBeats armed\b|kill switch/i, 'armed must not add chrome to a working surface');
+
+  // The notice must sit INSIDE the composer form, above the input — not floated elsewhere in the
+  // document, which is what "next to the intent box" means in practice.
+  const form = /<form[^>]*class="opsui-composer"[\s\S]*?<\/form>/.exec(halted);
+  assert.ok(form, 'expected the composer form in the rendered page');
+  assert.match(form[0], /opsui-composer__halted/, 'the notice must be inside the composer form');
+  assert.ok(
+    form[0].indexOf('opsui-composer__halted') < form[0].indexOf('opsui-composer__input'),
+    'the notice must precede the textarea, not follow it',
+  );
+});
+
+/**
+ * WI-204 fail-safe. The beat gates resolve `opts.autonomy ?? (env ?? 'off')`, so an UNSET
+ * LOOPKIT_AUTONOMY means OFF. A first-run reader of the public repo who has never touched the
+ * variable is exactly the person the surface must not mislead, so the unset case is asserted
+ * explicitly rather than inferred from the 'off' case.
+ */
+test('composer: an unset LOOPKIT_AUTONOMY warns, never stays silent (fail-safe)', () => {
+  const evs = sampleLedger();
+  const result = fold(evs);
+  const render = (env: NodeJS.ProcessEnv | undefined) =>
+    renderItemTimeline('CONV-1', result.items.get('CONV-1'), evs, MODE_NOW, result, undefined,
+      new URL('http://localhost/item/CONV-1'), [], env);
+
+  const seen = new Set<string>();
+  for (const [what, env] of [
+    ['unset (empty bag)', {}],
+    ['unset (no bag at all)', undefined],
+    ['explicit off', { LOOPKIT_AUTONOMY: 'off' }],
+  ] as Array<[string, NodeJS.ProcessEnv | undefined]>) {
+    assert.match(render(env), /opsui-composer__halted/, `${what}: must warn`);
+    seen.add(what);
+  }
+  assert.equal(seen.size, 3, 'every fail-safe case must be exercised');
+  // ...and the one value that is genuinely armed, so the assertions above cannot pass vacuously
+  // by the notice simply always rendering.
+  assert.doesNotMatch(render({ LOOPKIT_AUTONOMY: 'on' }), /opsui-composer__halted/,
+    'LOOPKIT_AUTONOMY=on must silence the notice');
 });
 

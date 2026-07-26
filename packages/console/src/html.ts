@@ -106,6 +106,13 @@ export interface PageOptions {
    *  (event count, generated-at, per-pane CLI equivalents); views that don't still get the
    *  generic trace statement — every page ends with the footer either way. */
   provenance?: ProvenanceInfo;
+  /** The plane's autonomy gate is off (`LOOPKIT_AUTONOMY` not 'on', including unset — the
+   *  fail-safe default). Forwarded to the shell-level composer modal, which renders the halted
+   *  notice above the input: halted is the state where dropping an intent does not do what the
+   *  operator expects, so the warning belongs at the door, not on a status page. There is no
+   *  armed counterpart — the normal state stays quiet and is reported on /observability only
+   *  (WI-204). Resolved from `process.env` at the server boundary; never from the fold. */
+  planeHalted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +346,7 @@ export function page(opts: PageOptions, bodyHtml: string): string {
     action: '/intent',
     capturedId: opts.capturedId,
     capturedHref: opts.capturedId ? `/item/${encodeURIComponent(opts.capturedId)}` : undefined,
+    planeHalted: opts.planeHalted,
   });
   // Every view ends with the provenance footer — views that pass fold metadata get the full
   // trace (event count, generated-at, CLI equivalents); the rest get the generic statement.

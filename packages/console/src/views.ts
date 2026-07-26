@@ -19,6 +19,7 @@ import {
   isHeldPark,
   isOpsPark,
   planeMode,
+  isPlaneArmed,
   computeAcceptanceDebt,
   classifyAcceptanceTier,
   acceptanceClassifyFiles,
@@ -546,6 +547,41 @@ function threadCard(
   return `<div class="thread-card">${heading}<div class="thread">${renderThreadMessages(pageItems)}</div>${pager}${replyForm(rec.id, opts.returnTo)}</div>`;
 }
 
+/**
+ * The session pill — is a human driving right now? ONE axis, and only that axis.
+ *
+ * It used to fuse two orthogonal facts: 'away' was labelled "Away · beats" and titled "the
+ * background reactor/dispatch beats handle the queue autonomously", which silently asserted the
+ * autonomy gate was on. This pill reads the fold, which knows nothing about that gate, so with
+ * the plane halted the strip cheerfully claimed the queue was being handled while both beats
+ * no-opped on every fire (WI-204). Attendance and autonomy are orthogonal — all four
+ * combinations are real — so neither branch here may speak for the beats.
+ *
+ * The beats axis now lives where each half of it is actionable, rather than beside this one:
+ * HALTED renders next to the intent box (`PageOptions.planeHalted` → IntentComposer), because
+ * that is the moment a dropped intent will not do what the operator expects; ARMED renders only
+ * on the ops observability page, because the normal state should be quiet.
+ *
+ * Colour comes from the design system's closed `OperationalState` vocabulary (`data-state`, the
+ * same six meanings StatusBadge uses), not a bespoke per-pill palette.
+ */
+type SessionState = 'attended' | 'away';
+
+const SESSION_PILLS: Record<SessionState, { state: OperationalState; label: string; title: string }> = {
+  attended: {
+    state: 'success',
+    label: '● Attended · session',
+    title: 'An operator session is live — CLI intents are picked up and built immediately by the attended session, and the beats defer to its claims (ADR-007).',
+  },
+  away: {
+    state: 'neutral',
+    // Deliberately NOT "Away · beats": naming the beats here is what turned a statement about
+    // attendance into a claim about autonomy.
+    label: '○ No session',
+    title: 'No live operator session — nothing is being driven by hand right now. This says nothing about the background beats; whether they are armed is shown on the ops observability page.',
+  },
+};
+
 /** Status-strip counts by state, plus the age of the most recent event — rendered under the top bar on every view. */
 export function renderStatusStrip(result: FoldResult, events: LedgerEvent[], now: Date): string {
   const counts = new Map<string, number>();
@@ -562,13 +598,12 @@ export function renderStatusStrip(result: FoldResult, events: LedgerEvent[], now
     .map((s) => `<span class="statusstrip__item"><span class="statusstrip__count">${esc(counts.get(s))}</span> ${esc(s)}</span>`)
     .join('');
   const lastEvent = `<span class="statusstrip__item">last event <span class="statusstrip__count">${esc(ageLabel(lastTs, now))}</span> ago</span>`;
-  // Execution-mode pill (attended vs. away): attended ⇒ an operator session is live and CLI intents are built
-  // immediately by that session; away ⇒ the background beats own the queue. Derived from the fold
-  // (planeMode), so it flips the instant a session starts/ends or its heartbeat goes stale.
-  const mode = planeMode(result.sessions, now.getTime());
-  const modeBadge = mode === 'attended'
-    ? `<span class="statusstrip__mode statusstrip__mode--attended" title="An operator session is live — CLI intents are picked up and built immediately by the attended session, not the background beats.">● Attended · session</span>`
-    : `<span class="statusstrip__mode statusstrip__mode--away" title="No live operator session — the background reactor/dispatch beats handle the queue autonomously.">○ Away · beats</span>`;
+  // Session pill only — fold state (planeMode), so it flips the instant a session starts/ends or
+  // its heartbeat goes stale. planeMode stays pure: no process.env anywhere near the fold, and
+  // nothing here speaks for the autonomy gate (WI-204).
+  const session: SessionState = planeMode(result.sessions, now.getTime());
+  const pill = SESSION_PILLS[session];
+  const modeBadge = `<span class="statusstrip__mode statusstrip__mode--${session}" data-state="${esc(pill.state)}" title="${esc(pill.title)}">${esc(pill.label)}</span>`;
   return `${modeBadge}${items}${lastEvent}`;
 }
 
@@ -708,6 +743,8 @@ export function renderMissions(
   url: URL = new URL('http://localhost/missions'),
   theme?: string,
   repoRoot: string = process.cwd(),
+  /** Process env for the execution-mode pill's autonomy half; absent ⇒ the fail-safe 'halted'. */
+  env?: NodeJS.ProcessEnv,
 ): string {
   const items = [...result.items.values()];
 
@@ -761,6 +798,7 @@ ${items.length === 0 ? Card({ title: 'The ledger is empty', body: emptyState('No
       activeNav: 'missions',
       statusStrip: renderStatusStrip(result, events, now),
       theme,
+      planeHalted: !isPlaneArmed(env),
       provenance: {
         generatedAt: now.toISOString(),
         eventCount: events.length,
@@ -1023,6 +1061,9 @@ export function renderItemTimeline(
   theme?: string,
   url: URL = new URL(`http://localhost/item/${encodeURIComponent(itemId)}`),
   artifacts: ArtifactEntry[] = [],
+  /** Process env for the beats indicator's autonomy half; absent ⇒ the fail-safe 'halted'.
+   *  This is the ONE live route still rendering the status strip, so server.ts passes ctx.env. */
+  env?: NodeJS.ProcessEnv,
 ): string {
   const statusStrip = result ? renderStatusStrip(result, events, now) : undefined;
 
@@ -1034,6 +1075,7 @@ export function renderItemTimeline(
         activeNav: 'missions',
         statusStrip,
         theme,
+        planeHalted: !isPlaneArmed(env),
         provenance: {
           generatedAt: now.toISOString(),
           eventCount: 0,
@@ -1104,6 +1146,7 @@ ${threadSection}`;
       activeNav: 'missions',
       statusStrip,
       theme,
+      planeHalted: !isPlaneArmed(env),
       provenance: {
         generatedAt: now.toISOString(),
         eventCount: itemEvents.length,
@@ -1245,6 +1288,8 @@ export function renderAcceptance(
   events: LedgerEvent[] = [],
   url: URL = new URL('http://localhost/acceptance'),
   theme?: string,
+  /** Process env for the beats indicator's autonomy half; absent ⇒ the fail-safe 'halted'. */
+  env?: NodeJS.ProcessEnv,
 ): string {
   const allMerged = [...result.items.values()].filter((r) => r.state === 'merged' && r.mergedAt);
 
@@ -1382,6 +1427,7 @@ ${merged.length ? waitingRegion + lowerPriorityRegion : Card({ title: 'Nothing a
       activeNav: 'acceptance',
       statusStrip: renderStatusStrip(result, events, now),
       theme,
+      planeHalted: !isPlaneArmed(env),
       provenance: {
         generatedAt: now.toISOString(),
         eventCount: events.length,

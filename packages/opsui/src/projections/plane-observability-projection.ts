@@ -983,6 +983,50 @@ function provenanceRegion(env: ProjectionEnvelope<PlaneObservabilityData>): stri
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
+/**
+ * Autonomy-gate state (WI-204) — the ARMED half of the beats axis lives here and ONLY here.
+ *
+ * Placement is deliberately asymmetric. Halted is warned about beside the intent box, because
+ * that is the moment a dropped intent silently fails to be picked up; armed is the normal,
+ * quiet state and belongs on the ops page as a fact, not as chrome on the operator's working
+ * surfaces. Reporting both here keeps this one page a complete readout of the switch.
+ *
+ * The copy is written for a first reader of the public repo, and is precise about the boundary:
+ * halting stops NEW work being taken on; it does not abort a beat or build already in flight,
+ * and it does not touch attended/CLI work. Nothing here implies the halt expires — there is no
+ * timeout and no auto-rearm by design.
+ */
+function autonomyRegion(planeArmed: boolean | undefined): string {
+  if (planeArmed === undefined) {
+    return Card({
+      title: 'Autonomy (kill switch)',
+      body: `<p class="opsui-plane-obs__unavailable">Autonomy state not reported by this caller.</p>`,
+    });
+  }
+  const badge = StatusBadge({
+    state: planeArmed ? 'success' : 'warning',
+    label: planeArmed ? 'armed' : 'halted',
+    size: 'sm',
+  });
+  const body = planeArmed
+    ? `<p class="opsui-plane-obs__autonomy">` +
+      `<code>LOOPKIT_AUTONOMY</code> is on. The reactor and dispatch beats run on their ` +
+      `schedule and pick up new queued work on their own.</p>`
+    : `<p class="opsui-plane-obs__autonomy">` +
+      `<code>LOOPKIT_AUTONOMY</code> is off — or unset, which is the fail-safe default, so a ` +
+      `plane nobody has armed reads halted. The beats still fire on schedule but no-op at the ` +
+      `autonomy gate, so <strong>no new work is taken on</strong>: intents you drop are ` +
+      `captured to the ledger and wait in the queue.</p>` +
+      `<ul class="opsui-plane-obs__autonomy-list">` +
+      `<li>Work already running continues — halting does not abort a beat or a build in flight.</li>` +
+      `<li>Attended CLI work is unaffected, and every projection stays readable.</li>` +
+      `<li>It holds until someone changes it: no timeout, no auto-rearm.</li>` +
+      `</ul>` +
+      `<p class="opsui-plane-obs__autonomy-fix">Set <code>LOOPKIT_AUTONOMY=on</code> in ` +
+      `<code>.ai/loops/config.env</code> to arm the plane.</p>`;
+  return Card({ title: 'Autonomy (kill switch)', headerAside: badge, body });
+}
+
 /** Render the plane-observability projection from its envelope.
  *  A `failed` envelope renders ProjectionFailure and nothing else. */
 export function PlaneObservabilityProjection(env: ProjectionEnvelope<PlaneObservabilityData>): string {
@@ -1005,6 +1049,7 @@ export function PlaneObservabilityProjection(env: ProjectionEnvelope<PlaneObserv
     `<div class="opsui-plane-obs" data-projection="plane-observability" data-state="${env.state}">` +
     safeRegion('How to read this page',   () => howToReadRegion()) +
     safeRegion('Ops observability',       () => glanceRegion(d.glance)) +
+    safeRegion('Autonomy (kill switch)',  () => autonomyRegion(d.planeArmed)) +
     safeRegion('Acceptance split',        () => acceptSplitRegion(d.acceptSplit, d.verdicts)) +
     safeRegion('Provider chain',          () => providerStatusRegion(d.providerStatus)) +
     safeRegion('Spend',                   () => spendRegion(d.costs, d.budget)) +
