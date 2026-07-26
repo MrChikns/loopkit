@@ -39,6 +39,7 @@ import { alreadyShippedCommit } from '../reality-check.js';
 import { fold, FoldResult, ItemRecord , isClaimActive, isItemTerminal } from '../fold.js';
 import { makeEvent, resolveAttachmentPaths, ItemQueuedData, ItemCapturedData, LedgerEvent, MERGE_EVIDENCE_FILES_CAP } from '../schema.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
+import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
 import { parseOutput, extractUsage } from '../providers/claudeCli.js';
@@ -3009,14 +3010,14 @@ export function collectDetachedBuilds(
 // ---------------------------------------------------------------------------
 
 export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult> {
-  // Autonomy gate — fail-safe: an unset LOOPKIT_AUTONOMY defaults to OFF (not on).
-  // The launchd shims source .ai/loops/config.env which sets it explicitly, so production
-  // behaviour is unchanged. Bare/cron/test invocations without the env set are safe-by-default.
-  const envVal = process.env['LOOPKIT_AUTONOMY'];
-  if (opts.autonomy === undefined && envVal === undefined) {
-    process.stderr.write('[loopkit] LOOPKIT_AUTONOMY unset — defaulting to OFF (fail-safe); set it in .ai/loops/config.env\n');
-  }
-  const autonomy = opts.autonomy ?? (envVal ?? 'off');
+  // Autonomy gate — resolved by THE shared allowlist in ../autonomy.ts (WI-207), never inline
+  // here: `on`/`off` (any case, trimmed) are the only recognised values, and unset/empty/
+  // unrecognised all fail-safe to OFF with a loud stderr line. The launchd shims source
+  // .ai/loops/config.env which sets it explicitly, so production behaviour is unchanged.
+  const autonomyDecision = resolveAutonomyDecision(process.env[AUTONOMY_ENV_VAR], opts.autonomy);
+  const autonomyWarn = autonomyWarning(autonomyDecision);
+  if (autonomyWarn) process.stderr.write(autonomyWarn);
+  const autonomy = autonomyDecision.autonomy;
   // Resolved run-state root for this plane — computed ONCE here and used for every
   // run-state site below (lock, artifacts, regression-guard watermarks, health markers).
   const resolvedRunDir = resolveRunDir(opts);
@@ -3027,7 +3028,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     mkdirSync(lastrunDir, { recursive: true });
     writeFileSync(join(lastrunDir, 'lastrun'), String(Math.floor(Date.now() / 1000)), 'utf8');
   } catch { /* non-fatal */ }
-  if (autonomy === 'off') {
+  if (autonomy === AUTONOMY_OFF) {
     return {
       dryRun: opts.dryRun ?? false,
       dispatched: [],

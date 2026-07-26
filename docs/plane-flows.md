@@ -100,10 +100,10 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2210`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2211`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2669`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2670`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery.
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
@@ -196,20 +196,20 @@ flowchart TD
 **Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
 claimed in that window, and claims every survivor in the same locked append before spawning anything
-(`packages/core/src/beats/dispatch.ts:458`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
+(`packages/core/src/beats/dispatch.ts:459`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
 Both picking lanes — engineering and target — go through that one terminal, under one per-beat
 pseudo-session, so the reservation cannot drift between them (WI-186).
 That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3196`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3197`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
 **Provider health is a chain, not a single provider.** The registry walks the configured chain; an
 auth failure marks the current provider unhealthy and falls over to the next
-(`packages/core/src/beats/dispatch.ts:3356`<!--cite:providerFallback-->), and a later successful beat
+(`packages/core/src/beats/dispatch.ts:3357`<!--cite:providerFallback-->), and a later successful beat
 clears the marker. With no healthy provider for an item's sensitivity tier, the item parks rather than
 routing to a disallowed one.
 
@@ -224,7 +224,7 @@ routing to a disallowed one.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3316`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3317`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - 🔵 Builds spawned in one beat are collected by a later one via on-disk exit files, so a long build
   does not pin the beat that started it ([ADR-008](decisions/ADR-008-detached-dispatch-staging.md)).
@@ -260,13 +260,13 @@ flowchart TD
 
 - **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
   it automatically the moment the blocker **merges**
-  (`packages/core/src/beats/reactor.ts:2158`<!--cite:blockedVictimRelease-->). The plane creates these
+  (`packages/core/src/beats/reactor.ts:2162`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
 - **A blocker that never merges does not strand the victim silently.** After
   **24**<!--pin:blockedWaitTimeoutHours--> hours parked, the victim is re-parked as a `decision` with
   the blocker's state attached, so it reaches your desk instead of waiting forever
-  (`packages/core/src/beats/reactor.ts:2182`<!--cite:blockedVictimTimeout-->).
+  (`packages/core/src/beats/reactor.ts:2186`<!--cite:blockedVictimTimeout-->).
 - A `Touches`-less item is a wildcard and serialises the whole lane. Declaring a footprint is what
   buys parallelism.
 - The attempt budget here is dispatch's pick guard of **5**<!--pin:BUILDER_BREAKER_N--> —
@@ -311,13 +311,13 @@ behind it.
 
 **Two different scopes, easily confused.** What dispatch is willing to **commit** is the union of the
 item's declared `Touches` prefixes and the exact paths the worker reported in its manifest
-(`packages/core/src/beats/dispatch.ts:1467`<!--cite:planScopedCommit-->) — anything else stays
+(`packages/core/src/beats/dispatch.ts:1468`<!--cite:planScopedCommit-->) — anything else stays
 uncommitted and is reported as residue. What counts as an **overstep** is narrower: a changed file
 outside the declared prefixes, minus a test-file exemption and minus paths you previously approved
-(`packages/core/src/beats/dispatch.ts:1424`<!--cite:checkTouchesOverstep-->). The worker may also propose
+(`packages/core/src/beats/dispatch.ts:1425`<!--cite:checkTouchesOverstep-->). The worker may also propose
 the commit subject; dispatch uses it verbatim when present.
 
-**The spine guard** (`packages/core/src/beats/dispatch.ts:1346`<!--cite:checkSpine-->) parks any diff
+**The spine guard** (`packages/core/src/beats/dispatch.ts:1347`<!--cite:checkSpine-->) parks any diff
 touching the plane's own configured spine pattern for your decision. It is an engineering-lane guard
 — a target repo has no plane-spine concept.
 
@@ -356,7 +356,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4008`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4009`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -394,12 +394,12 @@ flowchart TD
 
 - The invariant: **no build reaches master without a gate covering every commit that landed since its
   branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4442`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4443`<!--cite:postIntegrationRegate-->).
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, hard-resets the primary tree onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4628`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:4629`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4654`<!--cite:pushRaceRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4655`<!--cite:pushRaceRegate-->).
 - Every failure here is a park, never a force. A conflict or a red re-gate stops the item; nothing is
   merged past a disagreement.
 - 🟠 This whole plate is engineering-lane only. See [limitations](limitations.md) for the target
@@ -451,12 +451,12 @@ counter, so by the time a park happened the budget was already spent.
 
 - **The plane files its own bugs.** When the pathologist classifies a park as a plane infrastructure
   bug it allocates a new work item, queues it, and blocks the victim on it
-  (`packages/core/src/beats/reactor.ts:2404`<!--cite:repairItemCapture-->). That never reaches your desk
+  (`packages/core/src/beats/reactor.ts:2408`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every reactor beat: orphaned-build detection, crashed-worker reaping, stale
-  session-claim reaping (`packages/core/src/beats/reactor.ts:3537`<!--cite:staleClaimReap-->), and a
+  session-claim reaping (`packages/core/src/beats/reactor.ts:3541`<!--cite:staleClaimReap-->), and a
   leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
@@ -464,11 +464,11 @@ counter, so by the time a park happened the budget was already spent.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3155`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3156`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:2950`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:2951`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
@@ -510,7 +510,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4028`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4032`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -521,7 +521,7 @@ how often you have found something wrong.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:3681`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:3685`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier is
   never withheld: there is nothing to test, so plane health protects nothing for it.
 - **Your unanswered reply.** An item with an open reply or an unresolved proposal is held rather than

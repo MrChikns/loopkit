@@ -34,6 +34,7 @@ import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
 import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets } from '../schema.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
+import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, isPlaneArmed, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
 import {
@@ -278,7 +279,10 @@ export function dispatchKickArgs(uid: number, label: string): string[] {
 }
 
 function kickDispatch(label: string): void {
-  if (!label || process.env['LOOPKIT_AUTONOMY'] === 'off') return;
+  // Same allowlist as the beat gates (WI-207) — deliberately env-only, ignoring opts.autonomy,
+  // since this fires from within already-guarded steps. A bare `=== 'off'` here would have kicked
+  // dispatch awake for `OFF`/`banana` while the gates above treat those as halted.
+  if (!label || !isPlaneArmed(process.env)) return;
   try {
     const uid = process.getuid ? process.getuid() : 501;
     spawnSync('launchctl', dispatchKickArgs(uid, label), {
@@ -4674,14 +4678,14 @@ async function stepArmed(
 // ---------------------------------------------------------------------------
 
 export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
-  // Autonomy gate — fail-safe: an unset LOOPKIT_AUTONOMY defaults to OFF (not on).
-  // The launchd shims source .ai/loops/config.env which sets it explicitly, so production
-  // behaviour is unchanged. Bare/cron/test invocations without the env set are safe-by-default.
-  const envVal = process.env['LOOPKIT_AUTONOMY'];
-  if (opts.autonomy === undefined && envVal === undefined) {
-    process.stderr.write('[loopkit] LOOPKIT_AUTONOMY unset — defaulting to OFF (fail-safe); set it in .ai/loops/config.env\n');
-  }
-  const autonomy = opts.autonomy ?? (envVal ?? 'off');
+  // Autonomy gate — resolved by THE shared allowlist in ../autonomy.ts (WI-207), never inline
+  // here: `on`/`off` (any case, trimmed) are the only recognised values, and unset/empty/
+  // unrecognised all fail-safe to OFF with a loud stderr line. The launchd shims source
+  // .ai/loops/config.env which sets it explicitly, so production behaviour is unchanged.
+  const autonomyDecision = resolveAutonomyDecision(process.env[AUTONOMY_ENV_VAR], opts.autonomy);
+  const autonomyWarn = autonomyWarning(autonomyDecision);
+  if (autonomyWarn) process.stderr.write(autonomyWarn);
+  const autonomy = autonomyDecision.autonomy;
   // Resolved run-state root for this plane — computed ONCE here and used for every
   // run-state site below (lock, regression-guard watermarks, health markers).
   const runDir = resolveRunDir(opts);
@@ -4692,7 +4696,7 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     mkdirSync(lastrunDir, { recursive: true });
     writeFileSync(join(lastrunDir, 'lastrun'), String(Math.floor(Date.now() / 1000)), 'utf8');
   } catch { /* non-fatal */ }
-  if (autonomy === 'off') {
+  if (autonomy === AUTONOMY_OFF) {
     return {
       dryRun: opts.dryRun ?? false,
       steps: [{ step: 'autonomy-gate', ok: true, eventsWritten: 0, mdWritten: false, detail: 'LOOPKIT_AUTONOMY=off — no-op' }],
