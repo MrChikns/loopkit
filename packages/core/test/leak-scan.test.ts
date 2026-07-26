@@ -11,6 +11,13 @@
  *   - plus-concat (quote + '+') and template-literal (backtick + '${') variants block.
  *   - the `leak-scan:allow-decision-id` inline marker suppresses a flagged line,
  *     so a legitimate synthetic example doesn't need a whole-file exclude.
+ *
+ * Plus the commit-MESSAGE channel (`--range`), which tree scans structurally
+ * cannot see:
+ *   - an agent session trailer in a message (clean diff) blocks, naming the commit.
+ *   - the PCRE-backed classes really run in range mode (they silently matched
+ *     nothing while the range corpus went through BSD `grep -P`).
+ *   - a clean range exits 0; an empty range exits 3; a bogus range exits 2.
  */
 
 import { test } from 'node:test';
@@ -41,6 +48,188 @@ function runLeakScan(dir: string): { status: number | null; stdout: string; stde
   const res = spawnSync('sh', [scriptPath, '--staged'], { cwd: dir, encoding: 'utf8' });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+
+function runLeakScanRange(dir: string, range: string): { status: number | null; stderr: string } {
+  const res = spawnSync('sh', [scriptPath, '--range', ...range.split(' ')], {
+    cwd: dir,
+    encoding: 'utf8',
+  });
+  return { status: res.status, stderr: res.stderr };
+}
+
+/**
+ * A fixture repo whose COMMIT MESSAGES carry the payload while every diff stays
+ * innocuous — the exact shape a tree scan cannot see. Returns the shas in commit
+ * order so a test can assert the hit names the right one.
+ */
+function makeCommitFixtureRepo(messages: string[]): {
+  dir: string;
+  shas: string[];
+  cleanup: () => void;
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'leak-scan-log-fixture-'));
+  const g = (args: string[]) => spawnSync('git', args, { cwd: dir, stdio: 'pipe', encoding: 'utf8' });
+  g(['init', '-q', '-b', 'main']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  g(['config', 'commit.gpgsign', 'false']);
+  const shas: string[] = [];
+  messages.forEach((msg, i) => {
+    writeFileSync(join(dir, `f${i}.txt`), `harmless content ${i}\n`);
+    g(['add', `f${i}.txt`]);
+    g(['commit', '-q', '--no-verify', '-m', msg]);
+    shas.push(g(['rev-parse', 'HEAD']).stdout.trim());
+  });
+  return { dir, shas, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+// The trailer this whole class exists for, assembled as a literal so the test
+// exercises the real shape. The inline marker keeps THIS file scannable.
+const SESSION_TRAILER =
+  'Claude-Session: https://claude.ai/code/session_EXAMPLEONLYnotarealsession'; // leak-scan:allow-agent-session
+
+test('leak-scan --range: an agent session trailer in a commit MESSAGE blocks, and names the commit', () => {
+  const { dir, shas, cleanup } = makeCommitFixtureRepo([
+    'feat: first clean commit',
+    `fix: an innocent subject\n\nbody text\n\n${SESSION_TRAILER}`,
+    'chore: another clean commit',
+  ]);
+  try {
+    // the tree itself is spotless — this is the whole point
+    assert.equal(
+      spawnSync('sh', [scriptPath, '--head'], { cwd: dir, encoding: 'utf8' }).status,
+      0,
+      'tree scan should be clean: the residue is message-only',
+    );
+    const res = runLeakScanRange(dir, 'HEAD~2..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: PCRE-backed classes really run over commit messages', () => {
+  // Regression guard: the range corpus used to be piped through the system
+  // `grep -P`, which BSD/macOS grep does not support — so every PCRE class
+  // (email, decision id) matched nothing at all, silently.
+  const { dir, cleanup } = makeCommitFixtureRepo([
+    'feat: base',
+    'fix: revert per D-000 as agreed', // leak-scan:allow-decision-id
+  ]);
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: a clean range exits 0', () => {
+  const { dir, cleanup } = makeCommitFixtureRepo([
+    'feat: base',
+    'feat: add the thing',
+    'test: cover the thing',
+  ]);
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~2..HEAD');
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: an empty range is loud (exit 3), never a silent green', () => {
+  const { dir, cleanup } = makeCommitFixtureRepo(['feat: base', 'feat: more']);
+  try {
+    const res = runLeakScanRange(dir, 'HEAD..HEAD');
+    assert.equal(res.status, 3, res.stderr);
+    assert.match(res.stderr, /NOTHING SCANNED/);
+    assert.match(res.stderr, /0 commits/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: an unresolvable rev-range fails as a usage error (exit 2)', () => {
+  const { dir, cleanup } = makeCommitFixtureRepo(['feat: base']);
+  try {
+    const res = runLeakScanRange(dir, 'no-such-ref..HEAD');
+    assert.equal(res.status, 2, res.stderr);
+    assert.match(res.stderr, /not a valid rev-range/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: a missing rev-range argument is a usage error, not a no-op', () => {
+  const { dir, cleanup } = makeCommitFixtureRepo(['feat: base']);
+  try {
+    const res = spawnSync('sh', [scriptPath, '--range'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(res.status, 2, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: the standard AI co-author trailer is not a leak', () => {
+  // A no-reply address identifies nobody and rides on every agent commit; if it
+  // blocked, the tripwire would be overridden as a matter of routine.
+  const { dir, cleanup } = makeCommitFixtureRepo([
+    'feat: base',
+    'feat: something\n\nCo-Authored-By: Claude <noreply@anthropic.com>',
+  ]);
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan: an agent session id in FILE content blocks too', () => {
+  const { dir, cleanup } = makeFixtureRepo(
+    'const url = "https://claude.ai/code/session_EXAMPLEONLYnotarealsession";\n', // leak-scan:allow-agent-session
+  );
+  try {
+    const res = runLeakScan(dir);
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /BLOCKED/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan: leak-scan:allow-agent-session marker suppresses a flagged line', () => {
+  const { dir, cleanup } = makeFixtureRepo(
+    'const example = "session_EXAMPLEONLYnotarealsession"; // leak-scan:allow-agent-session\n',
+  );
+  try {
+    const res = runLeakScan(dir);
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan: ordinary session-shaped identifiers do not false-positive', () => {
+  const { dir, cleanup } = makeFixtureRepo(
+    [
+      'const SESSION_SECRET_KEY = process.env.SESSION_SECRET_KEY;',
+      'const session_storage_prefix = "session_storage_key";',
+      'const docs = "https://claude.ai/download";',
+      'function newSession(sessionId: string) { return { sessionId }; }',
+    ].join('\n') + '\n',
+  );
+  try {
+    const res = runLeakScan(dir);
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
 
 test('leak-scan: clean tree passes', () => {
   const { dir, cleanup } = makeFixtureRepo("export const greeting = 'hello world';\n");

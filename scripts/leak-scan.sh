@@ -2,7 +2,15 @@
 # leak-scan.sh — tripwire for the PUBLIC repo. Fails (exit 1) if a scan target
 # contains secrets, credentials, or operator-private residue.
 #
-# Four pattern sources:
+# Five pattern sources:
+#   0. AGENTSESSION below — an AI-agent session/conversation handle: a
+#      `X-Session: <url>` commit trailer, an account-scoped agent console URL,
+#      or a bare `session_<opaque>` id. Not a secret — a *tooling artifact* — but
+#      it links published history to one operator's private agent account, and the
+#      agent commit convention re-acquires it on every single commit, so it lands
+#      in bulk. It is committed here (unlike the venture-specific terms in
+#      `.leakpatterns.local`) precisely so every clone and CI runner inherits it.
+#      Per-line escape hatch: `leak-scan:allow-agent-session`.
 #   1. GENERIC classes below — safe to publish (no real names), catch the usual
 #      leak shapes: private keys, cloud/CI/chat tokens, and `secret = "…"` literals.
 #   2. DECISIONID below — a concrete `D-NNN` operator-private decision-log citation
@@ -31,9 +39,20 @@
 # Modes:  --staged  scan the git index (pre-commit)   [default: --worktree]
 #         --head    scan the committed HEAD tree (pre-push)
 #         --worktree scan tracked files in the working tree
-#         --range <rev-range>  scan `git log` SUBJECT+BODY text for the given
+#         --range <rev-range>  scan COMMIT MESSAGES (subject+body) for the given
 #                  range (e.g. `origin/main..HEAD`, or `HEAD --not --remotes`)
 #                  — tree scans never see commit-message-only residue.
+#                  The range is ALWAYS explicit: there is no inferred default,
+#                  because a wrong default that scans nothing looks identical to
+#                  a clean result. Merge commits ARE included (the pre-commit
+#                  hook never runs for them, so this is their only tripwire).
+#
+# Exit:   0  clean — a corpus was scanned and nothing matched
+#         1  hit — sensitive residue found (details on stderr)
+#         2  usage error: unknown mode, missing/invalid rev-range, or a
+#            required regex engine is unavailable
+#         3  NOTHING SCANNED — `--range` resolved to zero commits. Deliberately
+#            NOT 0: "I scanned nothing" must never read as "it's clean".
 #
 # Usage:  scripts/leak-scan.sh [--staged|--head|--worktree]
 #         scripts/leak-scan.sh --range <rev-range...>
@@ -51,6 +70,19 @@ fi
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
+# --- agent session/conversation handles (publishable — no private data) -------
+# The class that reaches history through COMMIT MESSAGES, not diffs: coding-agent
+# commit conventions append a session trailer, so one un-scrubbed convention puts
+# an account-scoped handle on every commit an agent makes. Three shapes, each
+# high-signal (prose that merely *names* the class, e.g. "a Claude-Session
+# trailer", does not match — a URL or a long opaque id is required):
+#   1. a `<Something>-Session:` trailer whose value is a URL
+#   2. a deep link into an agent console, carrying an opaque handle
+#   3. a bare `session_<16+ alphanumerics>` id, wherever it appears
+AGENTSESSION='[A-Za-z][A-Za-z0-9]*-session:[[:space:]]*https?://
+https?://(claude\.ai|chatgpt\.com|chat\.openai\.com)/[A-Za-z0-9._/-]*[A-Za-z0-9_-]{16,}
+session_[A-Za-z0-9]{16,}'
+
 # --- generic pattern classes (publishable — contain no private data) ----------
 # Precision over recall: each line is a high-signal leak shape, not a broad guess.
 GENERIC='-----BEGIN [A-Z ]*PRIVATE KEY-----
@@ -64,7 +96,13 @@ glpat-[0-9A-Za-z_-]{20,}
 
 # Real email addresses, minus obvious placeholders: reserved/demo TLDs
 # (.local/.invalid/.example/.test) and example/noreply/your- sender domains.
-EMAIL='[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}'
+# The leading `(?<!…)(?!no-?reply@)` completes an intent the domain-side lookahead
+# already expressed but could not reach: a no-reply address identifies nobody, and
+# the standard AI co-author trailer (`… <noreply@…>`) is on every agent commit, so
+# without this the commit-message corpus below flags every single one and the
+# tripwire gets routinely overridden. The lookbehind pins the match to the START of
+# a local part, so `no-reply@…` can't be re-matched from a later offset.
+EMAIL='(?<![A-Za-z0-9._%+-])(?!no-?reply@)[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}'
 
 # Concrete private decision-log citation: `D-NNN` (optionally `D-NNN-SUFFIX`, e.g.
 # `D-042-H-CHAT`), word-bounded so `ADR-NNN` never matches, and not immediately
@@ -98,6 +136,9 @@ DECISIONID_CONCAT_ARG="$DECISIONID_CONCAT"
 # BOTH decision-id checks above. Opt-in and per-line — unlike a whole-file
 # EXCLUDES entry, a real leak can't hide behind "this file is just examples".
 DECISIONID_ALLOW_MARKER='leak-scan:allow-decision-id'
+# Same per-line idiom for the agent-session class, kept as a SEPARATE marker so
+# neither escape hatch silently widens the other's reach.
+AGENTSESSION_ALLOW_MARKER='leak-scan:allow-agent-session'
 
 # operator-private denylist (git-ignored, optional)
 LOCAL_PATTERNS=""
@@ -111,70 +152,97 @@ fi
 # convention (the decision-log markdown parser, the `linkifyDecisionRefs` helper) with
 # synthetic ids — none of these three cite a real private decision.
 EXCLUDES=":!LICENSE :!*.lock :!*.png :!*.gif :!scripts/leak-scan.sh :!docs/knowledge.md :!packages/console/test/server.test.ts :!packages/ui/test/components.test.ts"
+
+TMP=""
+cleanup() { if [ -n "$TMP" ]; then rm -rf "$TMP"; fi; }
+trap cleanup EXIT HUP INT TERM
+
 case "$MODE" in
   --staged)   GREP="git grep -I -nE --cached";   GREP_P="git grep -I -nP --cached"; REV="" ;;
   --head)     GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="HEAD" ;;
   --worktree) GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="" ;;
-  --range)    GREP="";                           GREP_P="";                        REV="" ;;
+  --range)
+    # Materialise the commit-message corpus as ONE FILE PER COMMIT, named by its
+    # sha, then scan it with the very same `git grep` passes the tree modes use.
+    # Two reasons this is not a plain `grep` over `git log` output:
+    #   1. one regex engine everywhere. BSD/macOS `grep` has no `-P`, so piping
+    #      the log through `grep -P` made the email and decision-id classes match
+    #      NOTHING here — silently, because the error went to /dev/null.
+    #   2. a hit is reported as `<sha>:<line-in-message>:<text>` — the same
+    #      `path:line:text` shape as a tree hit, and it names the commit.
+    if ! SHAS=$(git rev-list $RANGE 2>&1); then
+      echo "leak-scan: --range '$RANGE' is not a valid rev-range:" >&2
+      printf '%s\n' "$SHAS" >&2
+      exit 2
+    fi
+    if [ -z "$SHAS" ]; then NCOMMITS=0; else NCOMMITS=$(printf '%s\n' "$SHAS" | wc -l | tr -d ' '); fi
+    if [ "$NCOMMITS" -eq 0 ]; then
+      echo "leak-scan: NOTHING SCANNED — --range '$RANGE' resolved to 0 commits." >&2
+      echo "  This is NOT a clean result. Check the range: typo, wrong remote, or" >&2
+      echo "  already-pushed commits. Exit 3 (not 0) so green can't mean empty." >&2
+      exit 3
+    fi
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/leak-scan.XXXXXX")
+    printf '%s\n' "$SHAS" | while IFS= read -r sha; do
+      [ -n "$sha" ] || continue
+      git log -1 --format='%s%n%b' "$sha" > "$TMP/$sha"
+    done
+    echo "leak-scan: --range '$RANGE' — scanning $NCOMMITS commit message(s)." >&2
+    GREP="git grep --no-index -I -nE"; GREP_P="git grep --no-index -I -nP"; REV=""
+    EXCLUDES="."          # no tree paths to exclude; the corpus IS the message set
+    cd "$TMP"
+    ;;
   *) echo "leak-scan: unknown mode '$MODE'" >&2; exit 2 ;;
 esac
 
+# Engine guard. Every PCRE pass below routes its own errors to /dev/null (a
+# no-match is an error-free exit 1), which is exactly how a missing `-P` went
+# undetected for the whole life of --range. Probe once, loudly, up front.
+PCRE_ERR=$($GREP_P 'leak-scan-pcre-engine-probe' $REV -- $EXCLUDES 2>&1 >/dev/null || true)
+if [ -n "$PCRE_ERR" ]; then
+  echo "leak-scan: PCRE engine unavailable — the email/decision-id classes cannot run:" >&2
+  printf '%s\n' "$PCRE_ERR" >&2
+  exit 2
+fi
+
+# --- the passes. ONE block for every mode: the corpus (`$GREP`/`$REV`/`$EXCLUDES`)
+# is whatever the case above selected, so a pattern class can never apply to the
+# tree but not to commit messages, which is how the message channel went unwatched.
 HITS=""
-if [ "$MODE" = "--range" ]; then
-  # Commit SUBJECT+BODY text for the range — tree scans never see this. No path
-  # excludes here (there is no "tree" to path-exclude); a subject line quoting the
-  # doc/test exclusions above verbatim is vanishingly unlikely and still worth a look.
-  LOG=$(git log --format='%H %s%n%b' $RANGE 2>/dev/null || true)
-  if [ -n "$LOG" ]; then
-    G=$(printf '%s\n' "$LOG" | grep -inE "$@" 2>/dev/null || true)
-    [ -n "$G" ] && HITS="$HITS$G
+# generic multi-pattern pass
+G=$($GREP -i "$@" $REV -- $EXCLUDES 2>/dev/null || true)
+[ -n "$G" ] && HITS="$HITS$G
 "
-    E=$(printf '%s\n' "$LOG" | grep -inP "$EMAIL_ARG" 2>/dev/null || true)
-    [ -n "$E" ] && HITS="$HITS$E
+# agent session/conversation pass — one regex at a time (see the denylist pass
+# below for why the pipe→`while read` shape), with its own per-line escape hatch
+A=$(printf '%s\n' "$AGENTSESSION" | while IFS= read -r pat; do
+  [ -n "$pat" ] || continue
+  $GREP -i -e "$pat" $REV -- $EXCLUDES 2>/dev/null || true
+done | sort -u | grep -vF "$AGENTSESSION_ALLOW_MARKER" 2>/dev/null || true)
+[ -n "$A" ] && HITS="$HITS$A
 "
-    D=$(printf '%s\n' "$LOG" | grep -inP "$DECISIONID_ARG" 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
-    [ -n "$D" ] && HITS="$HITS$D
+# email pass (PCRE)
+E=$($GREP_P "$EMAIL_ARG" $REV -- $EXCLUDES 2>/dev/null || true)
+[ -n "$E" ] && HITS="$HITS$E
 "
-    C=$(printf '%s\n' "$LOG" | grep -inP "$DECISIONID_CONCAT_ARG" 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
-    [ -n "$C" ] && HITS="$HITS$C
+# decision-id pass (PCRE)
+D=$($GREP_P "$DECISIONID_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
+[ -n "$D" ] && HITS="$HITS$D
 "
-    if [ -n "$LOCAL_PATTERNS" ]; then
-      LOCAL_HITS=$(printf '%s\n' "$LOCAL_PATTERNS" | while IFS= read -r pat; do
-        [ -n "$pat" ] || continue
-        printf '%s\n' "$LOG" | grep -inE -e "$pat" 2>/dev/null || true
-      done)
-      [ -n "$LOCAL_HITS" ] && HITS="$HITS$LOCAL_HITS
+# decision-id-via-concatenation pass (PCRE) — same escape hatch
+C=$($GREP_P "$DECISIONID_CONCAT_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
+[ -n "$C" ] && HITS="$HITS$C
 "
-    fi
-  fi
-else
-  # generic multi-pattern pass
-  G=$($GREP -i "$@" $REV -- $EXCLUDES 2>/dev/null || true)
-  [ -n "$G" ] && HITS="$HITS$G
+# operator-private denylist pass, one regex at a time (case-insensitive).
+# Pipe→`while IFS= read` so only the read splits on newline — inside the body IFS stays
+# default, or `$GREP`/`$EXCLUDES` word-splitting collapses into one bogus command word.
+if [ -n "$LOCAL_PATTERNS" ]; then
+  LOCAL_HITS=$(printf '%s\n' "$LOCAL_PATTERNS" | while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    $GREP -i -e "$pat" $REV -- $EXCLUDES 2>/dev/null || true
+  done)
+  [ -n "$LOCAL_HITS" ] && HITS="$HITS$LOCAL_HITS
 "
-  # email pass (PCRE)
-  E=$($GREP_P "$EMAIL_ARG" $REV -- $EXCLUDES 2>/dev/null || true)
-  [ -n "$E" ] && HITS="$HITS$E
-"
-  # decision-id pass (PCRE)
-  D=$($GREP_P "$DECISIONID_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
-  [ -n "$D" ] && HITS="$HITS$D
-"
-  # decision-id-via-concatenation pass (PCRE) — same escape hatch
-  C=$($GREP_P "$DECISIONID_CONCAT_ARG" $REV -- $EXCLUDES 2>/dev/null | grep -vF "$DECISIONID_ALLOW_MARKER" 2>/dev/null || true)
-  [ -n "$C" ] && HITS="$HITS$C
-"
-  # operator-private denylist pass, one regex at a time (case-insensitive).
-  # Pipe→`while IFS= read` so only the read splits on newline — inside the body IFS stays
-  # default, or `$GREP`/`$EXCLUDES` word-splitting collapses into one bogus command word.
-  if [ -n "$LOCAL_PATTERNS" ]; then
-    LOCAL_HITS=$(printf '%s\n' "$LOCAL_PATTERNS" | while IFS= read -r pat; do
-      [ -n "$pat" ] || continue
-      $GREP -i -e "$pat" $REV -- $EXCLUDES 2>/dev/null || true
-    done)
-    [ -n "$LOCAL_HITS" ] && HITS="$HITS$LOCAL_HITS
-"
-  fi
 fi
 
 HITS=$(printf '%s' "$HITS" | sed '/^$/d')

@@ -14,8 +14,12 @@ The canonical checklist lives with the operator's agent tooling
 2. `leak-scan.sh --worktree` — working tree, exit 0.
 3. `leak-scan.sh --range <old>..<new>` (or `<sha> --not --remotes` for a new
    ref) — commit SUBJECT+BODY text for the push range, exit 0. Tree scans
-   (1–2) never see this: a decision id or private term can leak straight into
-   a commit message even when the diff itself is clean.
+   (1–2) never see this: a decision id, a private term, or an **agent session
+   trailer** can leak straight into a commit message even when the diff itself
+   is clean. Treat only exit 0 as a pass — exit **3** means the range held zero
+   commits and *nothing was scanned*, which is a broken invocation, not a clean
+   one. This layer also covers merge commits, which the pre-commit hook skips
+   entirely. It does not cover branch/tag names, reflog, or git notes.
 4. Per-pattern, word-bounded grep of the full push-range diff against the
    local denylist (`.leakpatterns.local`, git-ignored — the denylist itself
    must never be committed).
