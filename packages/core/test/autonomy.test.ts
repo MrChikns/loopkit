@@ -15,7 +15,10 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, isPlaneArmed, resolveAutonomy } from '../src/autonomy.js';
+import {
+  AUTONOMY_ENV_VAR, AUTONOMY_OFF, AUTONOMY_ON, autonomyWarning, isPlaneArmed, resolveAutonomy,
+  resolveAutonomyDecision,
+} from '../src/autonomy.js';
 import { makeEvent } from '../src/schema.js';
 import { appendEvents } from '../src/ledger.js';
 import { runReactor } from '../src/beats/reactor.js';
@@ -28,7 +31,8 @@ test('resolveAutonomy: an explicit override wins, else env, else the fail-safe o
   assert.equal(resolveAutonomy('off', 'on'), 'on', 'override wins over env');
   assert.equal(resolveAutonomy('on', undefined), 'on', 'no override ⇒ env');
   assert.equal(resolveAutonomy(undefined, undefined), AUTONOMY_OFF, 'unset ⇒ off (fail-safe)');
-  assert.equal(AUTONOMY_OFF, 'off', 'the gate compares against the literal "off"');
+  assert.equal(AUTONOMY_OFF, 'off');
+  assert.equal(AUTONOMY_ON, 'on');
   assert.equal(AUTONOMY_ENV_VAR, 'LOOPKIT_AUTONOMY');
 });
 
@@ -41,20 +45,79 @@ test('isPlaneArmed: UNSET is halted, never armed — the fail-safe the beat gate
   assert.equal(isPlaneArmed({ LOOPKIT_AUTONOMY: 'on' }), true, 'on ⇒ armed');
 });
 
-test('isPlaneArmed: only the literal "off" halts — matching the gate exactly, quirks included', () => {
-  // `runReactor`/`runDispatch` gate on `autonomy === 'off'`, so ANY other non-undefined value
-  // runs the beats. That is arguably too loose, but the pill's job is to report what the gate
-  // will actually do, not what it ought to do — a pill that disagrees is worse than no pill.
-  // If the gate is ever tightened, this test fails and the pill gets tightened with it.
-  for (const val of ['on', 'ON', 'true', '1', 'yes', 'banana', 'Off', ' off', '']) {
+/**
+ * WI-207. The gate used to be a bare `=== 'off'` against a lowercase literal, so `off` halted,
+ * UNSET halted, and EVERYTHING ELSE ARMED — `OFF`, `Off`, `''` and `banana` included. An operator
+ * who wrote `LOOPKIT_AUTONOMY=OFF` got a plane that kept picking up work, building and merging.
+ *
+ * The allowlist is stated here as an explicit table rather than as `resolveAutonomy(val) !==
+ * AUTONOMY_OFF` (which the old version of this test did): mirroring the implementation's own
+ * expression made the assertion true by construction, so it would have kept passing through
+ * exactly the defect it was supposed to describe. Every row below is authored by hand.
+ */
+const ALLOWLIST_TABLE: Array<{ val: string; armed: boolean; warns: boolean }> = [
+  // Recognised — the only two that resolve without complaint.
+  { val: 'on', armed: true, warns: false },
+  { val: 'ON', armed: true, warns: false },
+  { val: 'On', armed: true, warns: false },
+  { val: ' on ', armed: true, warns: false },
+  { val: 'off', armed: false, warns: false },
+  { val: 'OFF', armed: false, warns: false },   // THE bug: this used to ARM the plane.
+  { val: 'Off', armed: false, warns: false },   // ditto
+  { val: ' off ', armed: false, warns: false },
+  // Unrecognised — halt, and say so with the value. Someone who meant to arm loses one edit;
+  // someone who meant to halt loses nothing. Only the second mistake is unrecoverable.
+  { val: '', armed: false, warns: true },
+  { val: 'banana', armed: false, warns: true },
+  { val: 'true', armed: false, warns: true },
+  { val: '1', armed: false, warns: true },
+  { val: 'yes', armed: false, warns: true },
+  { val: 'no', armed: false, warns: true },
+  { val: 'offf', armed: false, warns: true },
+  { val: '   ', armed: false, warns: true },
+];
+
+test('resolveAutonomy: a STRICT allowlist — only on/off are recognised, everything else halts (WI-207)', () => {
+  for (const row of ALLOWLIST_TABLE) {
+    const decision = resolveAutonomyDecision(row.val);
     assert.equal(
-      isPlaneArmed({ LOOPKIT_AUTONOMY: val }),
-      resolveAutonomy(val) !== AUTONOMY_OFF,
-      `isPlaneArmed must track the gate's own chain for ${JSON.stringify(val)}`,
+      decision.autonomy, row.armed ? AUTONOMY_ON : AUTONOMY_OFF,
+      `${JSON.stringify(row.val)} must resolve ${row.armed ? 'ON' : 'OFF'}`,
+    );
+    assert.equal(
+      decision.reason, row.warns ? 'unrecognised' : 'recognised',
+      `${JSON.stringify(row.val)} reason`,
+    );
+    assert.equal(
+      isPlaneArmed({ [AUTONOMY_ENV_VAR]: row.val }), row.armed,
+      `isPlaneArmed disagrees with the allowlist for ${JSON.stringify(row.val)}`,
     );
   }
-  assert.equal(isPlaneArmed({ LOOPKIT_AUTONOMY: 'Off' }), true, 'the gate is case-SENSITIVE — so is the pill');
-  assert.equal(isPlaneArmed({ LOOPKIT_AUTONOMY: '' }), true, 'empty-but-set is not undefined, so the gate runs');
+});
+
+test('autonomyWarning: an unrecognised value is reported LOUDLY, naming the value (WI-207)', () => {
+  // Silence is what made the original defect invisible: the operator had no signal at all that
+  // the value they set meant nothing. The value must appear in the line so the fix is one edit.
+  for (const row of ALLOWLIST_TABLE) {
+    const warning = autonomyWarning(resolveAutonomyDecision(row.val));
+    if (!row.warns) {
+      assert.equal(warning, null, `${JSON.stringify(row.val)} is recognised — nothing to warn about`);
+      continue;
+    }
+    assert.ok(warning, `${JSON.stringify(row.val)} must warn`);
+    assert.match(warning!, /is not recognised/, 'the warning must say the value was not recognised');
+    assert.match(warning!, /defaulting to OFF/, 'the warning must state which way it failed');
+    assert.ok(
+      warning!.includes(JSON.stringify(row.val)),
+      `the warning must NAME the offending value; got: ${warning}`,
+    );
+  }
+
+  // The unset case keeps its own, long-standing wording — it is a different operator situation
+  // (nothing was ever configured) and the existing shims/docs quote this line.
+  const unset = autonomyWarning(resolveAutonomyDecision(undefined));
+  assert.ok(unset);
+  assert.match(unset!, /LOOPKIT_AUTONOMY unset — defaulting to OFF \(fail-safe\)/);
 });
 
 // ---------------------------------------------------------------------------
@@ -90,15 +153,18 @@ function makeTestConfig(): LoopkitConfig {
 }
 
 /** Run one beat with LOOPKIT_AUTONOMY set to `val` (or deleted when undefined) and report
- *  whether it returned the autonomy-gate no-op. `opts.autonomy` is deliberately NOT passed, so
- *  the beat resolves the env exactly as it does in production. */
-async function beatsNoOpped(val: string | undefined): Promise<{ reactor: boolean; dispatch: boolean }> {
+ *  whether it returned the autonomy-gate no-op, plus everything it wrote to stderr.
+ *  `opts.autonomy` is deliberately NOT passed, so the beat resolves the env exactly as it does
+ *  in production — the warning captured here is the real one an operator would see. */
+async function beatsNoOpped(val: string | undefined): Promise<{ reactor: boolean; dispatch: boolean; stderr: string }> {
   const saved = process.env[AUTONOMY_ENV_VAR];
   if (val === undefined) delete process.env[AUTONOMY_ENV_VAR];
   else process.env[AUTONOMY_ENV_VAR] = val;
-  // The unset case writes a fail-safe warning to stderr; swallow it so the test output stays clean.
+  // Capture rather than discard: the fail-safe warnings are part of the contract under test, and
+  // capturing also keeps the test output clean.
   const origWrite = process.stderr.write.bind(process.stderr);
-  (process.stderr as unknown as { write: (s: string) => boolean }).write = () => true;
+  let captured = '';
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => { captured += s; return true; };
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
@@ -111,6 +177,7 @@ async function beatsNoOpped(val: string | undefined): Promise<{ reactor: boolean
     return {
       reactor: r.steps[0]?.step === 'autonomy-gate' && r.steps[0]?.detail?.includes('LOOPKIT_AUTONOMY=off') === true,
       dispatch: d.detail === 'LOOPKIT_AUTONOMY=off — no-op',
+      stderr: captured,
     };
   } finally {
     (process.stderr as unknown as { write: (s: string) => boolean }).write = origWrite;
@@ -129,7 +196,9 @@ async function beatsNoOpped(val: string | undefined): Promise<{ reactor: boolean
  * surface predicate has to be changed with it.
  */
 test('isPlaneArmed agrees with the REAL reactor/dispatch gates for every env value', async () => {
-  const values: Array<string | undefined> = [undefined, '', 'off', 'on', 'ON', 'Off', 'true', 'banana'];
+  // The whole allowlist table plus the unset case, driven through the real beats. `'OFF'` and
+  // `' off '` are the rows that matter most: both used to ARM both beats.
+  const values: Array<string | undefined> = [undefined, ...ALLOWLIST_TABLE.map(r => r.val)];
   const seenArmed = new Set<boolean>();
   for (const val of values) {
     const armed = isPlaneArmed(val === undefined ? {} : { [AUTONOMY_ENV_VAR]: val });
@@ -142,4 +211,30 @@ test('isPlaneArmed agrees with the REAL reactor/dispatch gates for every env val
   // Guard the guard: if every value in the matrix came out the same way, the equivalence above
   // holds vacuously and would keep passing while the predicate rotted. Both outcomes must occur.
   assert.deepEqual([...seenArmed].sort(), [false, true], 'the matrix must exercise BOTH armed and halted');
+});
+
+/**
+ * WI-207: the halt must be AUDIBLE. A plane that silently refuses the value you set is a nicer
+ * failure than one that silently arms, but it is still a bad one — so both beats are asserted to
+ * emit the naming line themselves, not merely to resolve correctly in a pure function.
+ */
+test('the REAL beats warn on stderr for every unrecognised value, and stay quiet for recognised ones', async () => {
+  for (const row of ALLOWLIST_TABLE) {
+    const { stderr } = await beatsNoOpped(row.val);
+    if (!row.warns) {
+      assert.equal(stderr, '', `${JSON.stringify(row.val)} is recognised — the beats must not warn`);
+      continue;
+    }
+    // Once per beat: an operator running either beat alone must still be told.
+    const hits = stderr.split('\n').filter(l => l.includes('is not recognised')).length;
+    assert.equal(hits, 2, `both beats must warn for ${JSON.stringify(row.val)}; got: ${JSON.stringify(stderr)}`);
+    assert.ok(
+      stderr.includes(JSON.stringify(row.val)),
+      `the beats' warning must NAME the offending value; got: ${JSON.stringify(stderr)}`,
+    );
+  }
+
+  const unsetRun = await beatsNoOpped(undefined);
+  assert.match(unsetRun.stderr, /LOOPKIT_AUTONOMY unset — defaulting to OFF \(fail-safe\)/);
+  assert.doesNotMatch(unsetRun.stderr, /is not recognised/, 'unset is not the same situation as a typo');
 });
