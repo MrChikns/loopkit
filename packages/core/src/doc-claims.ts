@@ -1,6 +1,6 @@
 /**
  * doc-claims.ts — pins the NUMBERS, the `file:line` CITATIONS, and the EXISTENCE CLAIMS in
- * `docs/plane-flows.md` and `docs/limitations.md` to the source they describe.
+ * `docs/plane-flows.md`, `docs/limitations.md` and `docs/method.md` to the source they describe.
  *
  * Why this exists: both documents drifted. `plane-flows.md` said a breaker tripped on the
  * "third attempt" while `BUILDER_BREAKER_N` had been 5 for months; `limitations.md` advertised
@@ -48,6 +48,28 @@
  * Same anti-theatre properties as the other two kinds — one authored side (the registry states a
  * PATTERN, never the symbol's existence, which is derived from source text every run), bijection
  * with the markers, and a probe that throws rather than defaults.
+ *
+ * THE METHOD DOC (WI-202)
+ * -----------------------
+ * `method.md` was the OTHER half of that same incident — it said "with acceptance criteria" on the
+ * same day `plane-flows.md` did — and it was covered by nothing at all, because `DOC_PATHS` never
+ * named it. It is also the doc an outsider reads to decide whether the method is worth anything,
+ * so a false claim there costs the most and is discoverable by the fewest readers.
+ *
+ * It pins ALMOST ENTIRELY THROUGH EXISTENCE MARKERS, and that is a property of the document rather
+ * than a shortcut: a principles doc states capabilities ("the remainder is auto-captured", "the
+ * flag defaults off") and cites other DOCS, not source lines. It carries no thresholds and no
+ * `file.ts:NNN` citations, so the numeric and citation halves have nothing to bite on here — the
+ * honest coverage is the third kind. The unpinned-bold sweep still runs over it (see
+ * `UNPINNED_SWEEP_DOCS`) so the first threshold that ever arrives in it arrives pinned.
+ *
+ * The marker pass found two sentences that had gone false under it, both of the class the header
+ * warns about — a live symbol with stale framing (limit 5). Deferred work was described as
+ * "evidence, not a work item" after WI-177 started auto-capturing it as a child item, and
+ * decomposition was described as routing queueing a planning child when routing in fact parks
+ * first and the child follows the operator's approval. Neither was re-anchored onto whatever
+ * survived; both sentences were rewritten to what the code does. That order — fix the claim, then
+ * pin it — is the whole discipline.
  *
  * WHAT THIS STILL CANNOT CATCH — read this before trusting a green run
  * -------------------------------------------------------------------
@@ -154,14 +176,32 @@ export const SOURCE_PATHS = {
   judge: `${SRC}/judge.ts`,
   criteria: `${SRC}/criteria.ts`,
   verdicts: `${SRC}/verdicts.ts`,
+  // Added for method.md's claims (WI-202): the intake verb, the operator CLI, the disjointness
+  // predicate, the felt-reliability projection and the model-routing policy.
+  verbs: `${SRC}/verbs.ts`,
+  cli: `${SRC}/cli.ts`,
+  touches: `${SRC}/touches.ts`,
+  trajectory: `${SRC}/trajectory.ts`,
+  routing: `${SRC}/routing.ts`,
 } as const;
 export type SourceKey = keyof typeof SOURCE_PATHS;
 
 export const DOC_PATHS = {
   'plane-flows': 'docs/plane-flows.md',
   'limitations': 'docs/limitations.md',
+  'method': 'docs/method.md',
 } as const;
 export type DocKey = keyof typeof DOC_PATHS;
+
+/**
+ * Docs the "bold a threshold ⇒ pin it" sweep runs over. `plane-flows.md` states the convention
+ * about itself; `method.md` joins it (WI-202) while it contains ZERO bolded numbers, which is the
+ * cheapest moment to adopt a ratchet — the sweep costs nothing today and refuses the first
+ * unpinned threshold that ever lands in the method doc. `limitations.md` is deliberately NOT
+ * swept: it quotes numbers it is arguing *about* (sizes, versions, dates in prose) and a sweep
+ * there would fire on sentences that are not thresholds — a check with false alarms gets disabled.
+ */
+export const UNPINNED_SWEEP_DOCS: DocKey[] = ['plane-flows', 'method'];
 
 /** All source text, read once. Injectable so the test can exercise the machinery hermetically. */
 export type SourceBundle = Record<SourceKey, string>;
@@ -687,6 +727,350 @@ export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
       },
     ],
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // method.md (WI-202). The method doc states CAPABILITIES and cites other docs; it carries no
+  // thresholds and no file:line citations, so existence is the whole of its coverage.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── "One door in": the doc's opening promise is that transport is incidental. That is only
+  //    true if every transport lands the SAME event and one fold reads it — a second intake
+  //    shape (a queue write that skips capture) would falsify the section without renaming a
+  //    thing, so both halves are reference sites.
+  {
+    id: 'oneDoorCapture',
+    doc: 'method',
+    symbol: "item.captured",
+    what: 'every intent, whatever its transport, lands as one item.captured event and routes identically',
+    file: 'schema',
+    declaration: /^ {2}'item\.captured': ItemCapturedData;$/,
+    referencedBy: [
+      {
+        file: 'verbs',
+        pattern: /makeEvent\(actor, wiId, 'item\.captured', \{/,
+        proves: 'the capture verb every transport calls emits exactly that event, not a private shape',
+      },
+      {
+        file: 'fold',
+        pattern: /^ +case 'item\.captured':$/,
+        proves: 'one fold case is where a captured item becomes board state — the single routing path',
+      },
+    ],
+  },
+
+  // ── "The orchestrator holds no context." The section's whole argument is that coordination
+  //    state is re-derived, never remembered. A fold that existed but was called once at boot and
+  //    cached would make the paragraph false with the symbol untouched, so the references are the
+  //    per-beat re-reads in BOTH beats.
+  {
+    id: 'foldOrchestrator',
+    doc: 'method',
+    symbol: 'fold(events)',
+    what: 'the orchestrator is a fold over the ledger, reconstructed from events on every beat',
+    file: 'fold',
+    declaration: /^export function fold\(events: LedgerEvent\[\]/,
+    referencedBy: [
+      {
+        file: 'reactor',
+        pattern: /const foldResult = fold\(allEvents\);/,
+        proves: 'the reactor rebuilds its whole view from events inside the beat, holding nothing across beats',
+      },
+      {
+        file: 'dispatch',
+        pattern: /fold\(await tx\.loadAll\(\)\)/,
+        proves: 'dispatch re-folds under the ledger lock before it writes, rather than trusting a carried view',
+      },
+    ],
+  },
+
+  // ── "Two in-flight builds may never share a Touches set" — the claim that lets the synthesizer
+  //    disappear. One predicate, applied to the in-flight set AND to the group being assembled;
+  //    losing either reference re-opens two-workers-one-file while `touchesConflict` still exists.
+  {
+    id: 'touchesDisjointInflight',
+    doc: 'method',
+    symbol: 'touchesConflict(a, b)',
+    what: 'no two in-flight builds may share a Touches set — enforced before the work, deterministically',
+    file: 'touches',
+    declaration: /^export function touchesConflict\(a: string \| undefined, b: string \| undefined\): boolean \{$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /if \(inflightTouches && touchesConflict\(rec\.touches, inflightTouches\)\) continue;/,
+        proves: 'the picker skips any candidate overlapping work already in flight',
+      },
+      {
+        file: 'dispatch',
+        pattern: /groups\.some\(g => touchesConflict\(rec\.touches, groupTouches\(g\)\)\)/,
+        proves: 'candidates are also held disjoint from every group being assembled this beat',
+      },
+    ],
+  },
+
+  // ── The trade paragraph. This sentence WAS false: it said a deferral is "evidence, not a work
+  //    item" long after WI-177 started auto-capturing a child from the manifest's `deferred`
+  //    field. The corrected sentence is pinned on both halves — that a child is captured at all,
+  //    and that what it emits is a CAPTURE (intake), never a queue event.
+  {
+    id: 'deferralChildCapture',
+    doc: 'method',
+    symbol: 'captureDeferralChildren()',
+    what: "a worker's stated remainder is auto-captured at merge as one child item on the intake, never queued",
+    file: 'dispatch',
+    declaration: /^export async function captureDeferralChildren\($/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /await captureDeferralChildren\(opts\.ledgerDir, \[\{/,
+        proves: 'the merge path really calls it, so a partial build cannot close leaving no trace on the board',
+      },
+      {
+        file: 'dispatch',
+        pattern: /events\.push\(makeEvent\('dispatch', childId, 'item\.captured', \{/,
+        proves: 'the child is CAPTURED and nothing else — a worker can propose, it can never queue a build',
+      },
+    ],
+  },
+
+  // ── "Decomposition happens at intake, not mid-flight." Also rewritten: routing PARKS an
+  //    oversized intent and the planning child follows the operator's approval. The references
+  //    pin both the lane the child is queued into and the routing site that emits it.
+  {
+    id: 'decompositionAtIntake',
+    doc: 'method',
+    symbol: 'makeDecompositionChildEvents()',
+    what: 'an oversized intent parks, and once approved a planning-lane child is queued to split it before any builder runs',
+    file: 'reactor',
+    declaration: /^function makeDecompositionChildEvents\($/,
+    referencedBy: [
+      {
+        file: 'reactor',
+        pattern: /^ {8}lane: 'planning',$/,
+        proves: 'the child is queued into the planning lane, which is what splits the epic before a build',
+      },
+      {
+        file: 'reactor',
+        pattern: /maybeEmitDecompositionChild\(rec\.id, reason\);/,
+        proves: 'the routing step emits the child on the approved-reroute path rather than stranding the park',
+      },
+    ],
+  },
+
+  // ── Tiered acceptance, half one: classification reads the REAL diff. "not the item's own
+  //    declared metadata" is the load-bearing clause — if the reactor went back to classifying
+  //    from declared touches, a code change could launder itself as "nothing changed" while
+  //    `acceptanceClassifyFiles` still existed.
+  {
+    id: 'mergeDiffTiering',
+    doc: 'method',
+    symbol: 'acceptanceClassifyFiles(evidenceFiles, declaredTouches)',
+    what: 'a merged item is tiered from what it actually changed at merge time, not from its declared touches',
+    file: 'acceptance',
+    declaration: /^export function acceptanceClassifyFiles\($/,
+    referencedBy: [
+      {
+        file: 'reactor',
+        pattern: /acceptanceClassifyFiles\(rec\.mergeChangedFiles, rec\.touches\)/,
+        proves: 'the acceptance step feeds the merge-time diff first and declared touches only as fallback',
+      },
+    ],
+  },
+
+  // ── Tiered acceptance, half two: the ceiling. "money, auth, or migrations … waits for a human,
+  //    forever" is two separate facts — that risk paths classify as `must`, and that `must` is
+  //    never swept up by the auto-accept loop. Co-anchored in plane-flows via the
+  //    `mustNeverAutoAccepts` citation on the same line the second reference names.
+  {
+    id: 'mustTierWaitsForHuman',
+    doc: 'method',
+    symbol: "AcceptanceTier 'must'",
+    what: 'a risk-flagged or judge-failed change waits for a human and never auto-accepts',
+    file: 'acceptance',
+    declaration: /^export type AcceptanceTier = 'auto' \| 'optional' \| 'review' \| 'must';$/,
+    referencedBy: [
+      {
+        file: 'acceptance',
+        pattern: /reason: `touches risk-flagged paths/,
+        proves: 'a diff hitting a configured risk path classifies as must, rather than being a policy in prose',
+      },
+      {
+        file: 'reactor',
+        pattern: /if \(tier === 'must'\) continue;/,
+        proves: "the auto-accept loop skips 'must' outright — the wait is unbounded, not a longer window",
+      },
+    ],
+  },
+
+  // ── "Staged flags — the rollback is written before the flip." The claim is specifically that an
+  //    UNSET flag is today's behaviour, which needs the default AND the read site: a `?? true` at
+  //    the read would make the doc false while the config default still said false.
+  {
+    id: 'stagedFlagDefaultsOff',
+    doc: 'method',
+    symbol: 'execution.detachedDispatch',
+    what: 'the staged dispatch flag defaults off, so an unset flag is byte-for-byte the shipped behaviour',
+    file: 'config',
+    declaration: /^ {4}detachedDispatch\?: boolean;$/,
+    referencedBy: [
+      {
+        file: 'config',
+        pattern: /^ {4}detachedDispatch: false,$/,
+        proves: 'the shipped default really is off, not merely documented as off',
+      },
+      {
+        file: 'dispatch',
+        pattern: /cfg\.execution\?\.detachedDispatch \?\? false/,
+        proves: 'the read site fails closed, so a missing config section cannot arm the flag',
+      },
+    ],
+  },
+
+  // ── ADR-009's completion path. The paragraph's point is that the nudge stopped being a nudge
+  //    into the void — which is true only while the operator verb and the fold case both exist.
+  {
+    id: 'portabilityCompletion',
+    doc: 'method',
+    symbol: 'item.certification-amended',
+    what: 'the portability nudge has a real completion path — an operator verb that appends an event the fold applies',
+    file: 'schema',
+    declaration: /^ {2}'item\.certification-amended': ItemCertificationAmendedData;$/,
+    referencedBy: [
+      {
+        file: 'cli',
+        pattern: /^ {4}case 'portability':$/,
+        proves: 'the operator verb exists on the CLI, so the reply has somewhere to be typed',
+      },
+      {
+        file: 'fold',
+        pattern: /^ +case 'item\.certification-amended': \{$/,
+        proves: 'the fold applies the amendment, so a confirmed reply changes the board and not just the thread',
+      },
+    ],
+  },
+
+  // ── "Failures become evidence-carrying work items." The sentence names three incidents; each is
+  //    pinned separately, because "handled once" and "pinned by a mechanism" are the distinction
+  //    the whole section is about.
+  {
+    id: 'noCommitParkEvidence',
+    doc: 'method',
+    symbol: 'noCommitParkReason()',
+    what: 'a fabricated "done" with no commit is detected and parked with an evidence log',
+    file: 'dispatch',
+    declaration: /^export function noCommitParkReason\(detail: string\): string \{$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /noCommitParkReason\(`agent produced no commit\$\{denialNote\}\$\{residueNote\} \(log: \$\{logPath\}\)`\)/,
+        proves: 'the park reason is produced at the real no-commit site and carries the run log that evidences it',
+      },
+    ],
+  },
+  {
+    id: 'oversizedEventClipped',
+    doc: 'method',
+    symbol: 'shrinkEventToFit()',
+    what: 'an oversized event is clipped and marked rather than crashing the appender',
+    file: 'ledger',
+    declaration: /^export function shrinkEventToFit\(event: LedgerEvent, maxBytes: number = MAX_EVENT_BYTES\): LedgerEvent \{$/,
+    referencedBy: [
+      {
+        file: 'ledger',
+        pattern: /toWrite = shrinkEventToFit\(event, MAX_EVENT_BYTES\);/,
+        proves: 'the append path itself clips — a helper nobody called would leave the crash class open',
+      },
+    ],
+  },
+  {
+    id: 'orphanLockReclaim',
+    doc: 'method',
+    symbol: 'beatLockOwnerAlive()',
+    what: 'a lock orphaned by a crashed beat is reclaimed instead of wedging the plane',
+    file: 'dispatch',
+    declaration: /^export function beatLockOwnerAlive\(lockPath: string\): boolean \| null \{$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /const ownerAlive = beatLockOwnerAlive\(lockPath\);/,
+        proves: 'the acquire path consults liveness before it blocks, which is where the reclaim happens',
+      },
+      {
+        file: 'reactor',
+        pattern: /const ownerAlive = beatLockOwnerAlive\(lockPath\);/,
+        proves: 'the other beat reuses the SAME predicate — one parser, never a second copy that disagrees',
+      },
+    ],
+  },
+
+  // ── "Measure operator felt-reliability." Only the attention half is a projection today, so only
+  //    the attention half is pinned — the clean/minor/major/blocker read is stated in the doc as
+  //    the operator's own, deliberately unpinned rather than pinned to something adjacent.
+  {
+    id: 'attentionCostMetric',
+    doc: 'method',
+    symbol: 'attentionCostShare',
+    what: "the attention an item cost is a real projection the operator can read, not a feeling",
+    file: 'trajectory',
+    declaration: /^ {2}attentionCostShare: number;$/,
+    referencedBy: [
+      {
+        file: 'trajectory',
+        pattern: /const attentionCostShare = attentionEligible\.length > 0 \?/,
+        proves: 'it is computed from the ledger window rather than declared on an interface and never filled',
+      },
+      {
+        file: 'cli',
+        pattern: /agg\.attentionCostShare \* 100/,
+        proves: 'the operator surface actually renders it, so the metric reaches the person it is about',
+      },
+    ],
+  },
+
+  // ── The usage claim under the same section: "every provider call lands its usage in the ledger"
+  //    is what makes model economics a projection instead of an anecdote.
+  {
+    id: 'usageInLedger',
+    doc: 'method',
+    symbol: 'cost.usage',
+    what: 'provider usage lands in the ledger as events, so model spend is a projection you can read',
+    file: 'schema',
+    declaration: /^ {2}'cost\.usage': CostUsageData;$/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /makeEvent\('dispatch', recs\[0\]\.id, 'cost\.usage', \{/,
+        proves: 'every terminal build path emits usage attributed to the work item that spent it',
+      },
+      {
+        file: 'fold',
+        pattern: /^ +case 'cost\.usage':$/,
+        proves: 'the fold reads those events, so spend is derivable rather than write-only',
+      },
+    ],
+  },
+
+  // ── Eval-driven routing. The doc used to say routing "optimizes for trust per token"; the code
+  //    ranks on measured first-pass merge rate, so the sentence now names that and pins it.
+  {
+    id: 'evalDrivenRouting',
+    doc: 'method',
+    symbol: 'chooseModel()',
+    what: 'model routing picks on measured first-pass merge rate rather than speed',
+    file: 'routing',
+    declaration: /^export function chooseModel\($/,
+    referencedBy: [
+      {
+        file: 'routing',
+        pattern: /const rateDiff = b\.firstPassRate - a\.firstPassRate;/,
+        proves: 'the ranking really is by first-pass rate — the quantity the sentence names',
+      },
+      {
+        file: 'dispatch',
+        pattern: /chooseModel\(routingTable, carrierBucket, carrierIncumbent, routingCfg, routingRand\)/,
+        proves: 'the build path calls the policy, so routing is live rather than an unused module',
+      },
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -797,19 +1181,19 @@ export function checkDocClaims(sources: SourceBundle, docs: DocBundle): DocClaim
     }
   }
 
-  // ── Unpinned bolded numbers in plane-flows.md ───────────────────────────
+  // ── Unpinned bolded numbers (see UNPINNED_SWEEP_DOCS) ───────────────────
   // The convention the doc states about itself: bold a threshold, pin it. Without this the
   // easy way to "fix" a drifted number is to stop tagging it.
-  BOLD_NUMBER_RE.lastIndex = 0;
-  {
-    const text = docs['plane-flows'];
+  for (const docKey of UNPINNED_SWEEP_DOCS) {
+    BOLD_NUMBER_RE.lastIndex = 0;
+    const text = docs[docKey];
     let m: RegExpExecArray | null;
     while ((m = BOLD_NUMBER_RE.exec(text)) !== null) {
       if (m[2]) continue; // has a pin marker
       unpinned.push({
         claim: `**${m[1]}**`,
         detail:
-          `${DOC_PATHS['plane-flows']}:${lineOf(text, m.index)} bolds the number ${m[1]} with no ` +
+          `${DOC_PATHS[docKey]}:${lineOf(text, m.index)} bolds the number ${m[1]} with no ` +
           `\`<!--pin:...-->\` marker. Either pin it to a real constant (add a claim in doc-claims.ts) ` +
           `or stop stating it as a number — an unpinned threshold is exactly what drifted last time.`,
       });

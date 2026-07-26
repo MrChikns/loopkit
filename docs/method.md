@@ -21,8 +21,8 @@ Intent has one door. A feature, a fix, a change of mind — all arrive the same 
 "<text>"`), get event-modeled, queued, built, and gated through one pipeline. There is no separate
 ticket ritual, no branch ceremony, no "which system do I file this in" — the transport is
 incidental (terminal, a console box, a chat bridge), and every intent lands as the same
-`item.captured` event and routes identically. The [README](../README.md) opens on exactly this:
-one sentence in, a merged and tested commit out.
+`item.captured` event and routes identically<!--exists:oneDoorCapture-->. The
+[README](../README.md) opens on exactly this: one sentence in, a merged and tested commit out.
 
 Attention has one window. The operator does not chase status across chat threads, dashboards, and
 log files; they watch one board — a projection of the ledger — that shows what shipped, what's
@@ -77,8 +77,9 @@ Two divergences from the reference carry the whole method.
 **Workers return commits, not text — so the synthesizer stops being a model.** In the reference
 workflow, parallel calls produce overlapping opinions about the same artifact, and an LLM
 aggregator is needed to reconcile them. Here, disjointness is enforced *before* the work: two
-in-flight builds may never share a `Touches` set, so no two workers can produce two answers to the
-same file. Each worker side-effects into its own branch and hands up a verdict, not prose.
+in-flight builds may never share a `Touches` set<!--exists:touchesDisjointInflight-->, so no two
+workers can produce two answers to the same file. Each worker side-effects into its own branch and
+hands up a verdict, not prose.
 Combining is then git's job and judging is the gate's job — both mechanical, both replayable. The
 aggregator does not get replaced by a better aggregator; it **disappears**, because scheduling
 already did its work. Where genuine multi-perspective judgment *is* wanted, it is applied to
@@ -90,18 +91,22 @@ one that makes the difference between a session and a plane. In the reference wo
 orchestrator is a live LLM whose *context window is the coordination state* — it remembers what it
 delegated and adapts as results come back. loopkit's orchestrator is a **fold over the append-only
 ledger** ([event model](event-model.md)): it holds nothing between beats and is reconstructed from
-events every time it runs. Coordination state is not in anyone's head or anyone's context; it is on
-disk, immutable, and re-derivable.
+events every time it runs<!--exists:foldOrchestrator-->. Coordination state is not in anyone's head
+or anyone's context; it is on disk, immutable, and re-derivable.
 
 The trade is explicit, and stating it honestly is the more important half. **Decomposition happens
-at intake, not mid-flight.** Routing classifies an oversized intent and queues a planning-lane
-child that splits it *before* any builder runs. Once a build worker is running it cannot re-plan:
-it has no channel to re-queue work, so it ships the smallest safe slice and records what it
-deferred in its manifest — and that deferral is *evidence, not a work item*. *Anything left over
-needs the operator to notice and re-capture it.* A live in-context orchestrator would have heard
-that worker and adapted; this one cannot, and claiming otherwise would be exactly the kind of
-aspiration this document refuses. It is a real cost, recorded in [limitations](limitations.md)
-rather than argued away.
+at intake, not mid-flight.** Routing classifies an oversized intent as one that needs decomposition
+and **parks it instead of building it**; once the operator approves, a planning-lane child is
+queued to split it<!--exists:decompositionAtIntake--> — always *before* any builder runs. Once a
+build worker is running it cannot re-plan: it has no channel to re-queue work, so it ships the
+smallest safe slice and states the remainder in its manifest. At merge that remainder is
+auto-captured as one child item on the same intake every operator intent lands
+in<!--exists:deferralChildCapture--> — *captured, never queued*: a worker may put a **proposal** on
+the board, never a **build** on the queue. Whether the remainder is real work is still settled
+afterwards, by the operator or by routing; the worker that raised it is never answered. A live
+in-context orchestrator would have heard that worker and adapted; this one cannot, and claiming
+otherwise would be exactly the kind of aspiration this document refuses. It is a real cost,
+recorded in [limitations](limitations.md) rather than argued away.
 
 What the trade buys is everything a context-window orchestrator cannot survive: process death,
 machine restart, and two operators working at once. A context window is lost when its process is;
@@ -123,10 +128,11 @@ boundary is explicit, configurable policy, not a vibe.
 
 That boundary is the tiered-acceptance model in the [README](../README.md#how-it-works): every
 merged item is classified by *what it actually changed* — the real diff at merge time, not the
-item's own declared metadata, so a change that touched real code can never launder itself as
-"nothing changed." Framework-internal, gate-proven work ships silently; a declared product surface
-**surfaces for your test**; anything touching money, auth, or migrations, or anything a quality
-judge failed, **waits for a human, forever**. Trust is two orthogonal axes, not one list —
+item's own declared metadata<!--exists:mergeDiffTiering-->, so a change that touched real code can
+never launder itself as "nothing changed." Framework-internal, gate-proven work ships silently; a
+declared product surface **surfaces for your test**; anything touching money, auth, or migrations,
+or anything a quality judge failed, **waits for a human, forever**<!--exists:mustTierWaitsForHuman-->.
+Trust is two orthogonal axes, not one list —
 *merge-trust* (what may auto-merge) and *test-visibility* (what you want to eyeball) are declared
 separately, because collapsing them into a single list is precisely how changes ship unseen.
 
@@ -140,9 +146,9 @@ its posture is actually needed, and *nothing claims to exist before it survives 
 The certification's fourth line — *does this pattern apply anywhere else?* — used to be a nudge
 into the void: the reactor asked, but no event ever closed the loop, so a typed reply just sat
 unparsed in the thread. ADR-009 gives it a real completion path (`loopctl portability`, an
-appended `item.certification-amended`), the same verb-appends-an-event shape as every other
-operator write — so "harvest portable patterns at boundaries" is now a deterministic write, not a
-hope that someone reads the thread.
+appended `item.certification-amended`)<!--exists:portabilityCompletion-->, the same
+verb-appends-an-event shape as every other operator write — so "harvest portable patterns at
+boundaries" is now a deterministic write, not a hope that someone reads the thread.
 
 ## Parks and intent-format escalations
 
@@ -177,8 +183,9 @@ get back.
 [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) is the worked example. Moving dispatch
 from synchronous-in-beat to detached execution is a genuine architecture change to the plane's hot
 path — so it ships staged, never one-shot: a config flag (`execution.detachedDispatch`) that
-**defaults off**, so an unset flag is byte-for-byte the behaviour shipping today; eligibility is
-fail-closed, keeping the blast radius to exactly one build shape; and the rollback is stated in the
+**defaults off**, so an unset flag is byte-for-byte the behaviour shipping
+today<!--exists:stagedFlagDefaultsOff-->; eligibility is fail-closed, keeping the blast radius to
+exactly one build shape; and the rollback is stated in the
 ADR itself before the flag is ever flipped. [ADR-007](decisions/ADR-007-claim-arbitration.md)
 carries the same signature — a mechanism that lands *dormant* ("this slice changes ZERO live
 behavior while the switch is off"), with an explicit consequences-and-rollback section, re-armed
@@ -196,8 +203,10 @@ An incident is not something you survive and forget; it is **raw material for a 
 regression.** When something breaks, the fix is not a one-off patch — it is a work item that
 carries the reproduction, lands the fix, and **pins the class with a test** so that failure mode
 cannot recur silently. A fabricated "done" with no commit is detected and parked with an evidence
-log; an oversized event is clipped and marked rather than crashing the appender; an orphaned lock
-is reclaimed — and each of these is *pinned by a test*, not just handled once.
+log<!--exists:noCommitParkEvidence-->; an oversized event is clipped and marked rather than crashing
+the appender<!--exists:oversizedEventClipped-->; an orphaned lock is
+reclaimed<!--exists:orphanLockReclaim--> — and each of these is *pinned by a test*, not just handled
+once.
 
 The [hardening-audit](hardening-audit.md) is this principle applied deliberately rather than
 reactively: a **10-class incident catalog** distilled from prior operational near-misses, run
@@ -216,22 +225,29 @@ busy it looked. Those are **vanity metrics** — they go up when the plane is th
 when it is delivering. The metric that matters is the operator's **felt reliability**: of the work
 that reached me, how much was *clean* (shipped, nothing wrong), *minor* (a small fix), *major* (a
 real rework), or a *blocker* (it stopped me) — and how much of my **attention** did the whole thing
-cost.
+cost. Half of that is mechanical today and half is not, which is worth saying rather than blurring:
+the attention side is derived from the ledger and rendered on the operator's own
+surfaces<!--exists:attentionCostMetric--> (alongside first-pass rate and park class), while the
+clean/minor/major/blocker read stays the operator's judgement — the plane does not infer it from
+events, and a doc that implied otherwise would be selling a projection nobody built.
 
 This reframes success as *attention saved per accepted slice*, not *throughput*. The
 [trust-boundaries](trust-boundaries.md) routing model earns its keep by this measure: every
-provider call lands its usage in the ledger, so "which model is actually earning its keep" is a
-projection you can read, not a feeling — and eval-driven routing optimizes for **trust per token**,
-not raw speed. The [vision](vision.md) states the doctrine directly: *unattended, optimize for
+provider call lands its usage in the ledger<!--exists:usageInLedger-->, so "which model is actually
+earning its keep" is a projection you can read, not a feeling — and eval-driven routing picks the
+model with the highest measured first-pass merge rate<!--exists:evalDrivenRouting-->, not the
+fastest one. The [vision](vision.md) states the doctrine directly: *unattended, optimize for
 trust per token; attended, get out of the way.* A plane that merged a hundred items but handed you
 three blockers and a rework had a bad day, however green its dashboards — and the honest metric is
 the one that says so. Machine counts are diagnostics; the operator's felt experience is the score.
 
 ## What this method is not
 
-Not a workflow engine — a plan is a fixed DAG of ordinary work items, not a programmable
-orchestrator. Not transcript-inferred safety — a chat log shows past turns, not present ownership;
-the boundary is explicit claims and explicit tiers, enforced in code. Not a replacement for
+Not a workflow engine — where a plan layer lands, a plan is a fixed DAG of ordinary work items and
+not a programmable orchestrator (the shape is committed in [operating-model](operating-model.md);
+no `plan` verb or event exists in the code today, and this doc does not pretend otherwise). Not
+transcript-inferred safety — a chat log shows past turns, not present ownership; the boundary is
+explicit claims and explicit tiers, enforced in code. Not a replacement for
 judgment — the whole apparatus exists to route the *right* decisions to a human, not to remove the
 human. And not a set of aspirations pinned to a wall: every principle above is either mechanical in
 this repo already, or the way you are meant to operate the plane by hand until it is.
