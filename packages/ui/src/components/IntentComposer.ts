@@ -23,6 +23,52 @@ export interface IntentComposerProps {
    *  composer alongside the new global entry point, and duplicate element ids are
    *  invalid HTML. */
   idPrefix?: string;
+  /**
+   * The plane's autonomy gate is OFF (the app resolves this; in loopkit it is
+   * `LOOPKIT_AUTONOMY` not 'on' — including unset, which is the fail-safe default). Renders the
+   * halted notice directly above the input.
+   *
+   * This warning lives HERE, at the one door in, rather than on a status page, because halted is
+   * exactly the state in which dropping an intent does not do what the operator expects: it is
+   * captured and then nothing picks it up. A warning about that belongs where the action is, at
+   * the moment of acting. The opposite state is deliberately silent — an armed plane is the
+   * normal case and is reported on the ops observability surface only (WI-204).
+   */
+  planeHalted?: boolean;
+}
+
+/**
+ * The halted notice. It must teach, not alarm: because the gate fails safe, an unset autonomy
+ * switch means the very first thing a new reader may see is this state. So it states, in the
+ * operator's terms and in this order:
+ *   1. what happens to what they are about to type (captured, then it waits),
+ *   2. that work already running is NOT aborted — the gate is checked once at the top of each
+ *      beat and a build runs inside its beat, so halting only stops NEW work being taken on,
+ *   3. that the operator is not blocked — attended/CLI work is unaffected,
+ *   4. how to change it. Arming is a CLI/config act by design; there is no button here.
+ * Nothing here implies the halt expires: it holds until someone changes it.
+ */
+function haltedNotice(): string {
+  return (
+    `<div class="opsui-composer__halted" role="status">` +
+    `<p class="opsui-composer__halted-head">` +
+    `<span class="opsui-composer__halted-mark" aria-hidden="true">⏸</span>` +
+    `<strong>The plane is halted — nothing will pick this up.</strong></p>` +
+    `<p class="opsui-composer__halted-body">` +
+    `Your intent is still recorded: it is captured to the ledger and waits in the queue. ` +
+    `What is switched off is the autonomy gate, so the background beats take on no new work.` +
+    `</p>` +
+    `<ul class="opsui-composer__halted-list">` +
+    `<li>Work already running <strong>continues</strong> — halting does not abort a beat or a build in flight.</li>` +
+    `<li>You are not blocked: attended CLI work still runs normally, and every page stays readable.</li>` +
+    `<li>It stays halted until you change it. There is no timer, and nothing re-arms on its own.</li>` +
+    `</ul>` +
+    `<p class="opsui-composer__halted-fix">` +
+    `To arm the plane, set <code>LOOPKIT_AUTONOMY=on</code> in <code>.ai/loops/config.env</code> ` +
+    `and let the beats fire. This is deliberately not a button — arming the plane is a shell act.` +
+    `</p>` +
+    `</div>`
+  );
 }
 
 export function IntentComposer(props: IntentComposerProps): string {
@@ -47,6 +93,7 @@ export function IntentComposer(props: IntentComposerProps): string {
     : '';
   return (
     `<form class="opsui-composer" method="post" enctype="multipart/form-data" action="${esc(props.action)}">` +
+    `${props.planeHalted ? haltedNotice() : ''}` +
     `<label class="opsui-composer__label" for="${intentId}">Drop intent</label>` +
     `<textarea class="opsui-composer__input" id="${intentId}" name="intent" rows="3" required ` +
     `placeholder="${esc(placeholder)}"></textarea>` +

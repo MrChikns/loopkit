@@ -32,6 +32,7 @@ import {
   mergeRoutingConfig,
   buildRoutingTableWithSpecs,
   ROUTING_CONFIG_DEFAULTS,
+  isPlaneArmed,
 } from '@loopkit/core';
 import type { LoopkitConfig, FoldResult, LedgerEvent, VerdictSummary, SloRow as CoreSloRow } from '@loopkit/core';
 
@@ -179,10 +180,21 @@ function opsPalette(): string {
  *  multi-target selector: with >1 registered, a bare capture must name which plane it's for
  *  (core captureIntent throws otherwise); with 0 or 1, the server stamps the sole target and
  *  no selector shows. */
-function composerModal(next: string, targetNames: string[] = []): string {
+function composerModal(next: string, targetNames: string[] = [], env: NodeJS.ProcessEnv = process.env): string {
   return IntentComposerModal({
     action: `/intent?next=${next}`,
     ...(targetNames.length > 1 ? { targets: targetNames } : {}),
+    // WI-204: the halted warning rides the composer itself, so it appears at the one door in on
+    // EVERY ops page rather than on a status surface the operator may never visit. Halted is
+    // precisely the state where a dropped intent is captured and then nothing picks it up, so
+    // the warning has to be where the action is, at the moment of acting. There is deliberately
+    // no armed counterpart here — the normal state stays quiet, and is reported as a state on
+    // the ops observability page. Resolved through core's `isPlaneArmed`, which mirrors the beat
+    // gates' fail-safe exactly: an unset LOOPKIT_AUTONOMY means OFF, so a plane nobody has armed
+    // warns rather than flattering itself. `env` defaults to `process.env` because most
+    // projectionShell callers carry no OpsPageContext; ctx-bearing pages pass `ctx.env`, which
+    // server.ts sets to the very same bag.
+    planeHalted: !isPlaneArmed(env),
   });
 }
 
@@ -773,7 +785,7 @@ export function renderCommandPage(
   const shell = AppShell({
     rail, topBar, contextBar, workspace, bottomNav,
     palette: opsPalette(),
-    composerModal: composerModal('/command', targetNamesFrom(data)),
+    composerModal: composerModal('/command', targetNamesFrom(data), ctx.env),
     railExpanded: true,
   });
   return projectionDocument('Command · loopkit ops', shell);
@@ -846,7 +858,7 @@ export function renderWorkPage(data: OpsData, ctx: OpsPageContext, theme?: strin
   const shell = AppShell({
     rail, topBar, contextBar, workspace, bottomNav,
     palette: opsPalette(),
-    composerModal: composerModal('/work', targetNamesFrom(data)),
+    composerModal: composerModal('/work', targetNamesFrom(data), ctx.env),
     railExpanded: true,
   });
   return projectionDocument('Missions · loopkit ops', shell, theme === 'light' ? 'light' : 'dark');
@@ -938,6 +950,9 @@ export function renderObservabilityPage(data: OpsData, ctx: OpsPageContext, them
     ledgerHygiene,
     routing,
     executionConfig,
+    // WI-204: the ARMED half of the beats axis is reported here and nowhere else — the operator's
+    // working surfaces stay quiet when nothing is wrong. Same predicate the beat gates apply.
+    planeArmed: isPlaneArmed(ctx.env),
   };
 
   const envelope = planeObservabilityProjectionFromInput(input, {

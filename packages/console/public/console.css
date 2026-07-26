@@ -86,8 +86,12 @@ h2 {
 .statusstrip__item { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
 .statusstrip__count { font-weight: 640; color: var(--text); font-variant-numeric: tabular-nums; }
 
-/* Execution-mode pill (attended vs. away) — leads the status strip so the operator always knows whether CLI
-   intents run attended (live coordinator, fast) or away (background beats). */
+/* Session pill — leads the status strip and reports ONE axis: is a human driving right now.
+   It says nothing about the autonomy gate; conflating the two is what let it claim the beats
+   were handling the queue while they no-opped on every fire (WI-204). The beats axis is
+   asymmetric by design and lives elsewhere: halted next to the intent box (where a dropped
+   intent would silently sit), armed on the ops observability page only. Colour follows the
+   design system's closed OperationalState vocabulary. */
 .statusstrip__mode {
   display: inline-flex;
   align-items: center;
@@ -98,7 +102,9 @@ h2 {
   border: 1px solid transparent;
   white-space: nowrap;
 }
+/* success — a live operator is at the machine */
 .statusstrip__mode--attended { color: var(--success-fg); background: var(--success-bg); border-color: var(--success-border); }
+/* neutral — nobody attached; deliberately says nothing about whether the plane is working */
 .statusstrip__mode--away { color: var(--text-3); background: var(--sunken); border-color: var(--border); }
 
 /* ---- Tables (system segments/event-type breakdown) -------------------------------------- */

@@ -954,6 +954,18 @@
 .opsui-composer__chip { display: inline-flex; align-items: center; gap: 4px; background: var(--sunken); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--text-2); }
 .opsui-composer__chip-remove { background: none; border: none; padding: 0 0 0 2px; cursor: pointer; color: var(--text-3); font-size: 14px; line-height: 1; }
 .opsui-composer--drag-over { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* Halted notice — shown INSIDE the composer, above the input, only when the plane's autonomy
+   gate is off. Warning tokens (the same trio StatusBadge's `warning` state uses): visibly
+   non-green, because a dropped intent will not be picked up, but not `critical` — a halted
+   plane is a deliberate operator state, not a fault. Deliberately asymmetric: there is no
+   armed counterpart here, because the normal state should be quiet (WI-204). */
+.opsui-composer__halted { border: 1px solid var(--warning-border); background: var(--warning-bg); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.opsui-composer__halted-head { margin: 0; display: flex; align-items: baseline; gap: 8px; color: var(--warning-fg); font-size: 13px; }
+.opsui-composer__halted-mark { font-size: 14px; line-height: 1; }
+.opsui-composer__halted-body { margin: 0; font-size: 13px; color: var(--text-2); }
+.opsui-composer__halted-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-2); display: flex; flex-direction: column; gap: 3px; }
+.opsui-composer__halted-fix { margin: 0; font-size: 12px; color: var(--text-3); }
+.opsui-composer__halted-fix code { background: var(--sunken); border-radius: 4px; padding: 1px 5px; }
 
 /* ── IntentComposer modal — global "drop intent" entry point (WI-262) ──────── */
 .opsui-composer-modal {

@@ -1597,11 +1597,20 @@ export function isSessionActive(
 }
 
 /**
- * THE plane execution mode (attended vs. away dual-mode), derived — never stored. 'attended' iff any session
+ * THE plane attendance mode (attended vs. away dual-mode), derived — never stored. 'attended' iff any session
  * is live (isSessionActive): an operator is at the machine, so CLI intents are handled by the
- * attended session and the away beats defer to its claims. Otherwise 'away': the background
- * reactor/dispatch beats run autonomously. Mode-switching is just session events (start/end +
- * the dead-man), so this reads the current truth straight off the fold with no config knob.
+ * attended session and the away beats defer to its claims. Otherwise 'away': no operator is
+ * attached. Mode-switching is just session events (start/end + the dead-man), so this reads
+ * the current truth straight off the fold with no config knob.
+ *
+ * NOTE — attendance and autonomy are ORTHOGONAL, not two points on one scale. 'away' says only
+ * that nobody is attached; it does NOT say the beats are working, and 'attended' does NOT say
+ * they aren't (an attended session and armed beats coexist — claims arbitrate, ADR-007). Whether
+ * the beats run is the autonomy gate's business: process state, not ledger truth. Deriving a
+ * fused mode here would flatten a 2x2 into a line and hide the difference an operator actually
+ * feels (does unclaimed queued work get picked up beside me, or not?), so the two facts are
+ * carried, and rendered, separately — see `isPlaneArmed` in autonomy.ts for the other axis.
+ * Keep this function pure (fold input only) — it must never read `process.env`.
  */
 export function planeMode(sessions: Map<string, SessionRecord>, nowMs: number): 'attended' | 'away' {
   for (const ses of sessions.values()) if (isSessionActive(ses, nowMs)) return 'attended';

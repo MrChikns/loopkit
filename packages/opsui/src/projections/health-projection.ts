@@ -112,10 +112,20 @@ const HEAL_KIND_DOT: Record<HealActivityEntry['kind'], SloStatus> = {
   escalated: 'breached',
 };
 
+/**
+ * NAME COLLISION, disambiguated in the copy (WI-204). `OPS_AUTONOMY` is the SELF-HEAL mode —
+ * how far the plane may go in repairing itself (watch / propose / heal). It is NOT
+ * `LOOPKIT_AUTONOMY`, the plane kill switch that decides whether the beats run at all; that one
+ * is reported on the observability page's "Autonomy (kill switch)" card and warned about beside
+ * the intent box. Two different switches sharing the word "autonomy" on adjacent ops surfaces is
+ * the same wrong-map trap the old `conductor` name set, so every label here says "self-heal" out
+ * loud, and none of them says "autonomous" — a reader must never take this badge for the
+ * kill switch. (The identifiers keep their names; the operator-facing strings carry the fix.)
+ */
 const OPS_AUTONOMY_LABEL: Record<OpsAutonomyMode, string> = {
-  watch: 'watch · heal disabled',
-  propose: 'propose · dry-run',
-  heal: 'heal · autonomous',
+  watch: 'self-heal: watch · repairs disabled',
+  propose: 'self-heal: propose · dry-run',
+  heal: 'self-heal: repair automatically',
 };
 
 const OPS_AUTONOMY_STATE: Record<OpsAutonomyMode, OperationalState> = {

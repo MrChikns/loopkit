@@ -1236,7 +1236,9 @@ async function handleRequest(
     if (itemMatch) {
       const itemId = itemMatch[1] as string;
       const artifacts = await listArtifacts(runsDir);
-      return send(res, 200, renderItemTimeline(itemId, result.items.get(itemId), events, now, result, readCookie(req.headers.cookie, 'theme'), url, artifacts));
+      // ctx.env carries the beats indicator's autonomy half (WI-204) — the same OpsPageContext
+      // env bag readOpsAutonomy already reads; omit it and the strip fails safe to 'halted'.
+      return send(res, 200, renderItemTimeline(itemId, result.items.get(itemId), events, now, result, readCookie(req.headers.cookie, 'theme'), url, artifacts, ctx.env));
     }
 
     // OpsData is already loaded at this point (line ~846) — render the 404 on the same shared
