@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, readFileSync, writeFileSync, statSync, utimesSync, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { appendEvent, appendEvents, withLock, loadAllEvents } from '../src/ledger.js';
@@ -399,6 +400,104 @@ test('ledger lock: a holder alive PAST the spin deadline but under the staleness
     );
     assert.equal(ran, false, 'the transaction body must not run without the lock');
     assert.ok(existsSync(join(dir, '.ledger.lock')), "the live holder's lock dir must survive");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// acquireLock: pid + start-time owner-token reclaim is FACT-based, not clock-based (WI-200)
+//
+// Once a recorded owner can be proven alive or dead on this host, that fact decides reclaim —
+// the clock-based staleness backstop above is only a fallback for when it can't be. These tests
+// pin lock ages that would give the OPPOSITE answer under the clock-only rule, so a regression
+// to clock-based reclaim (ignoring the owner token) fails them.
+// ---------------------------------------------------------------------------
+
+/** ledger.ts's owner-token filename is module-private; mirrored here, same as the lock constants above. */
+const LEDGER_LOCK_OWNER_FILE = 'owner.json';
+
+/** Pre-create a held `.ledger.lock` stamped with an explicit owner token and mtime. */
+function heldLockWithOwner(dir: string, owner: { pid: number; startedAt: number }, mtimeMs: number): void {
+  const lockPath = join(dir, '.ledger.lock');
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, LEDGER_LOCK_OWNER_FILE), JSON.stringify(owner), 'utf8');
+  const pinned = new Date(mtimeMs);
+  utimesSync(lockPath, pinned, pinned);
+}
+
+/** A pid guaranteed to be dead: a trivial subprocess that has already exited by the time it returns. */
+function deadPid(): number {
+  const result = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(typeof result.pid === 'number', 'test fixture: spawnSync must report the child pid');
+  return result.pid!;
+}
+
+/** The OS's own report of when `pid` started — the same lookup ledger.ts's reclaim check uses. */
+function actualStartedAtMs(pid: number): number {
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
+  const parsedMs = Date.parse(result.stdout.trim());
+  assert.ok(!Number.isNaN(parsedMs), 'test fixture: ps must resolve a start time for the live test process');
+  return parsedMs;
+}
+
+test('ledger lock: a dead pid\'s lock is reclaimed immediately even with a fresh lock timestamp', async () => {
+  const dir = join(WORK_DIR, 'lock-dead-pid');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const now = Date.now();
+    // mtime is FRESH — nowhere near LOCK_STALE_MS — so a clock-only rule would refuse to
+    // reclaim. A dead recorded owner must override that: the pid is a FACT, the clock is not.
+    heldLockWithOwner(dir, { pid: deadPid(), startedAt: now }, now);
+    let ran = false;
+    const result = await withStubbedNow(now - LEDGER_LOCK_SPIN_TIMEOUT_MS, now,
+      () => withLock(dir, async () => { ran = true; return 'reclaimed'; }));
+    assert.equal(result, 'reclaimed', "a lock whose recorded owner is provably dead must be reclaimed on FACT, regardless of the lock's age");
+    assert.equal(ran, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger lock: an alive pid whose start time matches the token is respected even with a very old lock', async () => {
+  const dir = join(WORK_DIR, 'lock-alive-matching-pid');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const ownStartedAt = actualStartedAtMs(process.pid);
+    // mtime is far older than LOCK_STALE_MS — a clock-only rule would reclaim it outright.
+    // The genuinely-alive, start-time-matching owner must still be respected.
+    const mtimeMs = Date.now() - (LEDGER_LOCK_STALE_MS * 10);
+    heldLockWithOwner(dir, { pid: process.pid, startedAt: ownStartedAt }, mtimeMs);
+    const checkNow = Date.now();
+    let ran = false;
+    await assert.rejects(
+      withStubbedNow(checkNow - LEDGER_LOCK_SPIN_TIMEOUT_MS, checkNow,
+        () => withLock(dir, async () => { ran = true; })),
+      /Could not acquire ledger lock/,
+      'a live holder whose recorded start time matches must never be reclaimed, no matter how old the lock looks',
+    );
+    assert.equal(ran, false, 'the transaction body must not run without the lock');
+    assert.ok(existsSync(join(dir, '.ledger.lock')), "the live holder's lock dir must survive");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger lock: an alive but recycled pid (different start time) is reclaimed', async () => {
+  const dir = join(WORK_DIR, 'lock-recycled-pid');
+  mkdirSync(dir, { recursive: true });
+  try {
+    const ownStartedAt = actualStartedAtMs(process.pid);
+    // Recorded owner claims a start time well outside PID_START_TOLERANCE_MS from the pid's
+    // actual (current) start time — the pid answers, but it is a DIFFERENT process than the
+    // one that took the lock. mtime is FRESH, so only the start-time mismatch can explain reclaim.
+    const now = Date.now();
+    heldLockWithOwner(dir, { pid: process.pid, startedAt: ownStartedAt - 3_600_000 }, now);
+    let ran = false;
+    const result = await withStubbedNow(now - LEDGER_LOCK_SPIN_TIMEOUT_MS, now,
+      () => withLock(dir, async () => { ran = true; return 'reclaimed'; }));
+    assert.equal(result, 'reclaimed', 'a pid that answers but whose start time no longer matches the token must be treated as a recycled pid and reclaimed');
+    assert.equal(ran, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
