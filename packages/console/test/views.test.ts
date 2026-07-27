@@ -1329,8 +1329,17 @@ test('composer: the halted notice renders beside the intent box, and armed adds 
   const armed = render({ LOOPKIT_AUTONOMY: 'on' });
 
   assert.match(halted, /opsui-composer__halted/, 'halted must render the notice inside the composer');
+  assert.match(halted, /opsui-topbar__status/, 'halted must remain visible in the page header');
+  assert.match(halted, /opsui-status--critical/, 'the header halt tag is a critical stop condition');
+  assert.match(halted, />Plane halted</, 'the header tag must name the state');
   assert.doesNotMatch(armed, /opsui-composer__halted/, 'armed must render NO notice — the normal state is quiet');
+  assert.doesNotMatch(armed, /opsui-topbar__status|Plane halted/, 'armed must render no header halt tag');
   assert.doesNotMatch(armed, /\bBeats armed\b|kill switch/i, 'armed must not add chrome to a working surface');
+
+  const titleAt = halted.indexOf('opsui-topbar__title');
+  const statusAt = halted.indexOf('opsui-topbar__status');
+  const searchAt = halted.indexOf('opsui-topbar__palette');
+  assert.ok(titleAt < statusAt && statusAt < searchAt, 'halted tag sits between the page title and Search');
 
   // The notice must sit INSIDE the composer form, above the input — not floated elsewhere in the
   // document, which is what "next to the intent box" means in practice.
@@ -1371,4 +1380,3 @@ test('composer: an unset LOOPKIT_AUTONOMY warns, never stays silent (fail-safe)'
   assert.doesNotMatch(render({ LOOPKIT_AUTONOMY: 'on' }), /opsui-composer__halted/,
     'LOOPKIT_AUTONOMY=on must silence the notice');
 });
-

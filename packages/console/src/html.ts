@@ -258,6 +258,9 @@ function topBarFor(opts: PageOptions): string {
   return TopBar({
     title,
     breadcrumbs: [{ label: 'Console', href: '/command' }],
+    ...(opts.planeHalted
+      ? { status: { state: 'critical' as const, label: 'Plane halted', emphasis: 'blocking' as const, size: 'sm' as const } }
+      : {}),
   });
 }
 

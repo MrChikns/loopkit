@@ -1004,9 +1004,10 @@ function autonomyRegion(planeArmed: boolean | undefined): string {
     });
   }
   const badge = StatusBadge({
-    state: planeArmed ? 'success' : 'warning',
+    state: planeArmed ? 'success' : 'critical',
     label: planeArmed ? 'armed' : 'halted',
     size: 'sm',
+    ...(planeArmed ? {} : { emphasis: 'blocking' as const }),
   });
   const body = planeArmed
     ? `<p class="opsui-plane-obs__autonomy">` +

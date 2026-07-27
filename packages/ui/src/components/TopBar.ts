@@ -3,12 +3,16 @@
 // toggle. Palette open and theme persistence are handled by the client module.
 
 import { esc } from '../render/html.ts';
+import { StatusBadge } from './StatusBadge.ts';
+import type { StatusBadgeProps } from './StatusBadge.ts';
 import type { Breadcrumb } from './types.ts';
 
 export type TopBarProps = {
   title: string;
   /** Optional trail rendered before the title; the last hop is the title itself. */
   breadcrumbs?: Breadcrumb[];
+  /** Optional operational status rendered between the page title and global actions. */
+  status?: StatusBadgeProps;
 };
 
 function crumb(item: Breadcrumb): string {
@@ -39,10 +43,14 @@ export function TopBar(props: TopBarProps): string {
   const themeToggle =
     `<button type="button" class="opsui-topbar__theme" data-opsui-shell="theme-toggle"` +
     ` aria-label="Toggle colour theme"><span aria-hidden="true">◐</span></button>`;
+  const status = props.status
+    ? `<div class="opsui-topbar__status">${StatusBadge(props.status)}</div>`
+    : '';
   return (
     `<header class="opsui-topbar" role="banner">` +
     `<div class="opsui-topbar__lead">${trail}` +
     `<h1 class="opsui-topbar__title">${esc(props.title)}</h1></div>` +
+    status +
     `<div class="opsui-topbar__actions">${paletteTrigger}${composerTrigger}${themeToggle}</div>` +
     `</header>`
   );

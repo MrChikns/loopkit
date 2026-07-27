@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { IntentComposer, IntentComposerModal } from '../src/components/IntentComposer.ts';
+import { TopBar } from '../src/components/TopBar.ts';
 import { PlaneObservabilityProjection } from '../src/projections/plane-observability-projection.ts';
 import { planeObservabilityProjectionFromInput } from '../src/projections/plane-observability-adapter.ts';
 
@@ -88,6 +89,24 @@ test('IntentComposer: the notice sits above the input, and rides the modal too',
   );
 });
 
+test('TopBar: halted is a critical blocking tag between the title and Search; armed stays quiet', () => {
+  const halted = TopBar({
+    title: 'Command',
+    status: { state: 'critical', label: 'Plane halted', emphasis: 'blocking', size: 'sm' },
+  });
+  assert.match(halted, /opsui-topbar__status/);
+  assert.match(halted, /opsui-status--critical/);
+  assert.match(halted, /opsui-status--blocking/);
+  assert.ok(
+    halted.indexOf('opsui-topbar__title') <
+      halted.indexOf('opsui-topbar__status') &&
+      halted.indexOf('opsui-topbar__status') <
+      halted.indexOf('data-opsui-shell="palette-open"'),
+    'the halted tag must sit between title and Search',
+  );
+  assert.doesNotMatch(TopBar({ title: 'Command' }), /opsui-topbar__status|Plane halted/);
+});
+
 // ---------------------------------------------------------------------------
 // The armed half — reported on the ops page, and ONLY there
 // ---------------------------------------------------------------------------
@@ -115,9 +134,8 @@ test('observability: the autonomy gate is reported as a state — armed, halted,
 
   const halted = observabilityHtml(false);
   assert.match(halted, />halted</, 'halted: expected the halted label');
-  // Non-green, but not an error: a halted plane is a deliberate operator state, not a fault.
-  assert.match(halted, /opsui-status--warning/, 'halted: must be warning, i.e. visibly non-green');
-  assert.doesNotMatch(halted, /opsui-status--critical/, 'halted: must not be dressed up as a fault');
+  assert.match(halted, /opsui-status--critical/, 'halted: must use the same critical stop-state as the global header');
+  assert.match(halted, /opsui-status--blocking/, 'halted: must not rely on colour alone');
   // It explains itself here too, and with the same precision about the boundary.
   assert.match(halted, /no new work is taken on/i, 'halted: must say new work is not taken on');
   assert.match(halted, /already running continues/i, 'halted: must say running work continues');

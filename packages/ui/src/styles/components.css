@@ -265,9 +265,9 @@
   position: sticky;
   top: 0;
   z-index: 20;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 10px 16px;
   /* viewport-fit=cover: extend the surface under the status bar. */
@@ -275,12 +275,13 @@
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.opsui-topbar__lead { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.opsui-topbar__lead { grid-column: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .opsui-topbar__crumb { font-size: 12px; color: var(--text-3); text-decoration: none; }
 .opsui-topbar__crumb[href]:hover { color: var(--text-2); }
 .opsui-topbar__sep { font-size: 12px; color: var(--text-3); margin: 0 2px; }
 .opsui-topbar__title { margin: 0; font-size: 15px; font-weight: 620; color: var(--text); }
-.opsui-topbar__actions { display: flex; align-items: center; gap: 8px; }
+.opsui-topbar__status { grid-column: 2; display: flex; align-items: center; }
+.opsui-topbar__actions { grid-column: 3; display: flex; align-items: center; gap: 8px; }
 .opsui-topbar__palette,
 .opsui-topbar__intent {
   display: inline-flex;
@@ -369,6 +370,12 @@
     border-top: 1px solid var(--line);
   }
   .opsui-shell__workspace { padding: 12px; }
+}
+@media (max-width: 640px), (max-height: 500px) {
+  .opsui-topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .opsui-topbar__lead { grid-column: 1; grid-row: 1; }
+  .opsui-topbar__actions { grid-column: 2; grid-row: 1; }
+  .opsui-topbar__status { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
 }
 .opsui-bottomnav__item {
   display: flex;
@@ -936,12 +943,11 @@
 .opsui-composer__chip-remove { background: none; border: none; padding: 0 0 0 2px; cursor: pointer; color: var(--text-3); font-size: 14px; line-height: 1; }
 .opsui-composer--drag-over { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 /* Halted notice — shown INSIDE the composer, above the input, only when the plane's autonomy
-   gate is off. Warning tokens (the same trio StatusBadge's `warning` state uses): visibly
-   non-green, because a dropped intent will not be picked up, but not `critical` — a halted
-   plane is a deliberate operator state, not a fault. Deliberately asymmetric: there is no
-   armed counterpart here, because the normal state should be quiet (WI-204). */
-.opsui-composer__halted { border: 1px solid var(--warning-border); background: var(--warning-bg); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
-.opsui-composer__halted-head { margin: 0; display: flex; align-items: baseline; gap: 8px; color: var(--warning-fg); font-size: 13px; }
+   gate is off. Critical tokens match the persistent header badge: no new work will be picked
+   up, so this is a stop condition even when deliberately operator-set. Deliberately
+   asymmetric: there is no armed counterpart because the normal state stays quiet. */
+.opsui-composer__halted { border: 1px solid var(--critical-border); background: var(--critical-bg); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.opsui-composer__halted-head { margin: 0; display: flex; align-items: baseline; gap: 8px; color: var(--critical-fg); font-size: 13px; }
 .opsui-composer__halted-mark { font-size: 14px; line-height: 1; }
 .opsui-composer__halted-body { margin: 0; font-size: 13px; color: var(--text-2); }
 .opsui-composer__halted-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-2); display: flex; flex-direction: column; gap: 3px; }

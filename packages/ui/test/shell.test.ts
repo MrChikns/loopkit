@@ -70,6 +70,22 @@ test('TopBar renders the drop-intent trigger as a Search-peer pill between Searc
   assert.ok(paletteIdx < composerIdx && composerIdx < themeIdx, 'intent trigger sits between Search and theme toggle');
 });
 
+test('TopBar renders an optional critical status between the title and Search, and stays quiet by default', () => {
+  const halted = TopBar({
+    title: 'Command',
+    status: { state: 'critical', label: 'Plane halted', emphasis: 'blocking', size: 'sm' },
+  });
+  const titleIdx = halted.indexOf('opsui-topbar__title');
+  const statusIdx = halted.indexOf('opsui-topbar__status');
+  const searchIdx = halted.indexOf('data-opsui-shell="palette-open"');
+  assert.ok(titleIdx < statusIdx && statusIdx < searchIdx, 'status sits between page title and Search');
+  assert.match(halted, /opsui-status--critical/);
+  assert.match(halted, /opsui-status--blocking/);
+  assert.match(halted, />Plane halted</);
+
+  assert.doesNotMatch(TopBar({ title: 'Command' }), /opsui-topbar__status|Plane halted/);
+});
+
 test('ContextBar reuses StatusBadge and announces politely', () => {
   const html = ContextBar({
     state: 'warning',

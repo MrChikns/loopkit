@@ -205,6 +205,19 @@ function targetNamesFrom(data: OpsData): string[] {
   return [...data.result.targets.values()].map((t) => t.name);
 }
 
+/** One fail-safe autonomy read feeds both the persistent header badge and the composer notice.
+ *  Halted is the exceptional state and renders as a critical blocking badge; armed stays quiet. */
+function opsTopBar(title: string, env: NodeJS.ProcessEnv = process.env): string {
+  const planeHalted = !isPlaneArmed(env);
+  return TopBar({
+    title,
+    breadcrumbs: [{ label: 'Ops', href: '/command' }],
+    ...(planeHalted
+      ? { status: { state: 'critical' as const, label: 'Plane halted', emphasis: 'blocking' as const, size: 'sm' as const } }
+      : {}),
+  });
+}
+
 function projectionDocument(title: string, shellHtml: string, theme: 'dark' | 'light' = 'dark'): string {
   return (
     `<!doctype html><html lang="en" data-theme="${theme}"><head>` +
@@ -237,10 +250,11 @@ function projectionShell(
   stateLabel: string,
   theme?: string | null,
   targetNames: string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   const destinations = opsDestinations();
   const rail = NavigationRail({ destinations, activeId, expanded: true });
-  const topBar = TopBar({ title, breadcrumbs: [{ label: 'Ops', href: '/command' }] });
+  const topBar = opsTopBar(title, env);
   const visual = state === 'failed' ? 'critical' : state === 'stale' ? 'warning' : 'success';
   const freshness = state === 'failed'
     ? 'Source unavailable'
@@ -251,7 +265,7 @@ function projectionShell(
   const shell = AppShell({
     rail, topBar, contextBar, workspace, bottomNav,
     palette: opsPalette(),
-    composerModal: composerModal(composerNext, targetNames),
+    composerModal: composerModal(composerNext, targetNames, env),
     railExpanded: true,
   });
   return projectionDocument(`${title} · loopkit ops`, shell, theme === 'light' ? 'light' : 'dark');
@@ -777,7 +791,7 @@ export function renderCommandPage(
     ...(windowOpt ? { window: windowOpt } : {}),
   });
   const rail = NavigationRail({ destinations, activeId: 'command', expanded: true });
-  const topBar = TopBar({ title: sectionTitle('command'), breadcrumbs: [{ label: 'Ops', href: '/command' }] });
+  const topBar = opsTopBar(sectionTitle('command'), ctx.env);
   const opsHealth = envelope.state === 'failed' ? 'critical' : envelope.data.opsHealth.state;
   const freshness = envelope.state === 'failed'
     ? 'Fold unavailable'
@@ -806,7 +820,7 @@ export function renderAcceptancePage(data: OpsData, theme?: string | null, filte
   const destinations = opsDestinations();
   const workspace = AcceptanceProjection(envelope);
   const rail = NavigationRail({ destinations, activeId: 'acceptance', expanded: true });
-  const topBar = TopBar({ title: sectionTitle('acceptance'), breadcrumbs: [{ label: 'Ops', href: '/command' }] });
+  const topBar = opsTopBar(sectionTitle('acceptance'));
   const pending = envelope.state === 'failed' ? 0 : envelope.data.queue.length;
   const state = envelope.state === 'failed' ? 'critical' : pending ? 'warning' : 'success';
   const freshness = envelope.state === 'failed'
@@ -842,7 +856,7 @@ export function renderWorkPage(data: OpsData, ctx: OpsPageContext, theme?: strin
   const destinations = opsDestinations();
   const workspace = WorkProjection(envelope);
   const rail = NavigationRail({ destinations, activeId: 'work', expanded: true });
-  const topBar = TopBar({ title: sectionTitle('work'), breadcrumbs: [{ label: 'Ops', href: '/command' }] });
+  const topBar = opsTopBar(sectionTitle('work'), ctx.env);
   const active = envelope.state === 'failed' ? 0 : envelope.data.active.length;
   const glance = envelope.state === 'failed' ? [] : envelope.data.glance;
   const opState = envelope.state === 'failed' ? 'critical'
@@ -887,7 +901,7 @@ export function renderHealthPage(data: OpsData, ctx: OpsPageContext, theme?: str
   const stateLabel = envelope.state === 'failed' ? 'Board unavailable'
     : breached ? `${breached} breached` : envelope.data.rollup.label;
   return projectionShell('health', sectionTitle('health'), HealthProjection(envelope), envelope.state,
-    envelope.generatedAt, stateLabel, theme, targetNamesFrom(data));
+    envelope.generatedAt, stateLabel, theme, targetNamesFrom(data), ctx.env);
 }
 
 /** Analytics top strip — quota utilization, spend, first-pass rate, acceptance split,
@@ -969,7 +983,7 @@ export function renderObservabilityPage(data: OpsData, ctx: OpsPageContext, them
 
   return projectionShell('plane-observability', sectionTitle('plane-observability'),
     PlaneObservabilityProjection(envelope),
-    envelope.state, envelope.generatedAt, stateLabel, theme, targetNamesFrom(data));
+    envelope.state, envelope.generatedAt, stateLabel, theme, targetNamesFrom(data), ctx.env);
 }
 
 /**
@@ -1416,6 +1430,7 @@ export function renderItemHubPage(data: OpsData, ctx: OpsPageContext, itemId: st
     stateLabel,
     theme,
     targetNamesFrom(data),
+    ctx.env,
   );
 }
 
