@@ -5,12 +5,8 @@ name: CI
 # own `npm test` (build + node --test), matching the commands documented in AGENTS.md.
 #
 # Node version note: packages/ui and packages/opsui run `node --test test/*.test.ts` directly,
-# relying on Node's native TypeScript type-stripping (unflagged from Node 23.6+, backported to
-# later Node 22.x). Each package.json declares "engines": { "node": ">=20" }, but that floor is
-# unverified against a real Node 20 runtime — Node 20 has no native .ts execution and no
-# ts-node/tsx dependency is present to cover the gap. This workflow therefore pins Node 22
-# (the version actually proven to run the suite), not 20, until that engines floor is either
-# verified or corrected.
+# relying on Node's native TypeScript type-stripping in current Node 22 releases. Every
+# publishable workspace declares "engines": { "node": ">=22" }, so CI pins the same proven floor.
 
 on:
   push:
