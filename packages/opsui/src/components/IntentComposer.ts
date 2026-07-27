@@ -64,8 +64,11 @@ function haltedNotice(): string {
     `<li>It stays halted until you change it. There is no timer, and nothing re-arms on its own.</li>` +
     `</ul>` +
     `<p class="opsui-composer__halted-fix">` +
-    `To arm the plane, set <code>LOOPKIT_AUTONOMY=on</code> in <code>.ai/loops/config.env</code> ` +
-    `and let the beats fire. This is deliberately not a button — arming the plane is a shell act.` +
+    `To arm the plane, set <code>LOOPKIT_AUTONOMY=on</code> in the environment used by the ` +
+    `scheduler that launches the beats. For a standalone plane, set <code>LOOPKIT_HOME</code> ` +
+    `there too; loopkit reads configuration from <code>$LOOPKIT_HOME/config/loopkit.json</code>. ` +
+    `Reload the scheduler so the beats inherit that environment. This is deliberately not a ` +
+    `button — arming the plane is an operator environment change.` +
     `</p>` +
     `</div>`
   );

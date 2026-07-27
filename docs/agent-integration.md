@@ -13,17 +13,26 @@ Two different kinds of AI touch a loopkit installation. Keep them distinct:
 Workers are configured in the **plane-home**, not in target repos:
 
 - **Provider registry** (plane config): named providers (`claude-cli`, `codex-cli`, `ollama`)
-  with per-role models. The dispatch beat resolves a provider per build, honoring the
+  and ordered chains per sensitivity tier. Models have separate router/builder defaults and
+  scout/judge/pathology settings, but providers are not independently assignable per stage.
+  The dispatch beat resolves a provider per build, honoring the
   **sensitivity allowlists** — every work item carries `public` / `internal` / `private`, and
   a provider serves a tier only if allowlisted for it (`private` → local model). Resolution is
   fail-closed: unknown sensitivity counts as `private`; no allowed healthy provider means the
-  item waits or parks.
+  item waits or parks. The exercised autonomous worker is Claude CLI; the Codex and Ollama
+  adapters are experimental, and dispatch scout/judge calls reuse the builder provider.
 - **Tool permissions:** headless workers run with an explicit allowed-tools list passed by the
   dispatch lane (a worker that silently lacks write permission fails on every edit — the plane
   passes the list for you). A target repo may additionally carry `.claude/settings.json` to
   grant project-scoped permissions to workers running inside it.
-- **Prompts:** worker prompt skeletons ship with the framework and are copied into the
-  plane-home (`.ai/loops/prompts/`); a target may override via the manifest's `promptsDir`.
+- **Prompts:** router and planner prompt files are copied into the plane-home
+  (`.ai/loops/prompts/`); worker/scout/judge/pathology prompts are assembled by the engine.
+  The target manifest's `promptsDir` field is parsed but reserved for future use — the runtime
+  does not consume a per-target prompt override today.
+- **Repository instructions:** workers run with the target worktree as their current directory,
+  and the generated builder prompt tells them to follow repository guidance if present. Loopkit
+  does not parse, pin, or inject `AGENTS.md` / `CLAUDE.md`; discovery of those files is
+  provider-native. Their presence is guidance, not an engine-enforced instruction boundary.
 - The gate is the arbiter: whatever the worker claims, the item merges only when the target's
   own `gateCommand` passes in the worktree.
 
@@ -50,8 +59,8 @@ it. The contract:
 - Worktrees with the manifest's `worktreePrefix` next to the repo belong to in-flight builds —
   leave them alone.
 
-**Ready-made skills.** This repo ships the interactive side of the contract as Claude Code
-slash commands in [`.claude/commands/`](../.claude/commands/): **`/drive`** — attended
+**Handwritten Claude Code commands (not a portable skills pack).** This repo includes three
+interactive commands in [`.claude/commands/`](../.claude/commands/): **`/drive`** — attended
 coordinator mode (session + claims per
 [ADR-007](decisions/ADR-007-claim-arbitration.md), build via parallel subagent builders,
 everything landing as ledger events); **`/plane-check`** — deterministic
@@ -61,10 +70,11 @@ operator explicitly wants it done in-session": it is not a second delivery mecha
 plane — it claims through the same lease kernel and lands its merges as evidence-carrying ledger
 events on the same board (the coordinator path writes a single `item.merged` with
 diff/gate/session evidence; the beats write the full `build.dispatched → gate.* → item.merged`
-trail). The skills load
+trail). The commands load
 automatically in any Claude Code session opened in this repo; to get the same verbs in a target
 repo, copy them into its `.claude/commands/` and adapt both the `$LOOPCTL` path **and** the
-`docs/` links (they are written repo-relative to this repo).
+`docs/` links (they are written repo-relative to this repo). `loopctl` does not install them,
+and there is no provider-neutral skills registry today.
 
 ### Copy-paste snippet for a target repo's `AGENTS.md` / `CLAUDE.md`
 

@@ -182,11 +182,12 @@ export type PlaneAcceptSplit = {
   provisionalAccepted: number;
 };
 
-/** Provider chain status row — from loopctl slo --json `provider` row. */
+/** Provider circuit-breaker marker row — from loopctl slo --json `provider` row.
+ *  This is not an authentication, network, quota, or live API readiness probe. */
 export type PlaneProviderStatus = {
-  /** 'met' = primary healthy · 'at-risk' = running on fallback · 'breached' = no healthy provider */
+  /** 'met' = primary marker clear · 'at-risk' = fallback selected · 'breached' = chain markers blocked */
   status: 'met' | 'at-risk' | 'breached' | 'unknown';
-  /** Display value emitted by loopctl (e.g. "primary healthy", "running on fallback"). */
+  /** Raw marker-state value emitted by loopctl. Renderers must not present it as auth readiness. */
   value: string;
 };
 
@@ -270,6 +271,27 @@ export type PlaneExecutionConfigData = {
   rows: PlaneExecutionConfigRow[];
 } | null;
 
+/** Resolved configuration for one agent stage. This is deliberately NOT an execution row:
+ *  it carries no item id, timestamp, or claim that the effective default actually ran. */
+export type PlaneAgentRuntimeRow = {
+  stage: 'router' | 'planner' | 'scout' | 'builder' | 'judge' | 'pathologist';
+  enabled: boolean;
+  providerRule: string;
+  effectiveDefault: string;
+  modelSource: string;
+  modelValue: string;
+  reasoningStatus: 'configured' | 'requested' | 'not-recorded';
+  reasoningDetail: string;
+  promptSource: string;
+  instructionDiscovery: string;
+};
+
+/** Current resolved/default agent configuration. Historical execution is intentionally kept
+ *  separate because the ledger does not yet record every field in this contract. */
+export type PlaneAgentRuntimeData = {
+  rows: PlaneAgentRuntimeRow[];
+} | null;
+
 // ─── Input type ───────────────────────────────────────────────────────────────
 
 /** Wire input — the host app maps its reader outputs into this shape. */
@@ -288,7 +310,7 @@ export type PlaneObservabilityInput = {
   // ── WI-237 additions ──────────────────────────────────────────────────────
   /** Human vs provisional accept split (from summary + verdicts). */
   acceptSplit: PlaneAcceptSplit | null;
-  /** Provider chain status (from loopctl slo --json `provider` row). */
+  /** Provider circuit-breaker marker state (from loopctl slo --json `provider` row). */
   providerStatus: PlaneProviderStatus | null;
   /** Salvage files found under .ai/runs/loopkit/ (fs-derived). */
   salvageFiles: PlaneSalvageFile[];
@@ -300,6 +322,8 @@ export type PlaneObservabilityInput = {
   routing: PlaneRoutingData;
   /** Execution-config-by-model panel (feature-detected). null = CLI command absent. */
   executionConfig?: PlaneExecutionConfigData;
+  /** Current/default agent-stage configuration. Not historical execution telemetry. */
+  agentRuntime?: PlaneAgentRuntimeData;
   /**
    * Is the plane's autonomy gate ON — i.e. will the reactor/dispatch beats take on NEW work?
    * Resolved by the app boundary from the process environment (loopkit: core's `isPlaneArmed`,
@@ -332,6 +356,8 @@ export type PlaneObservabilityData = {
   routing: PlaneRoutingData;
   /** Execution-config-by-model panel — null = CLI command absent (feature-detected). */
   executionConfig: PlaneExecutionConfigData;
+  /** Current/default agent-stage configuration — never presented as execution history. */
+  agentRuntime: PlaneAgentRuntimeData;
   /** Codex consult/operator-manual tile (WI-311) — null when no Codex usage recorded yet. */
   codex: PlaneCodexData;
   /** Unified Claude + Codex quota panel (WI-314) — null when no quota.snapshot recorded yet. */
@@ -359,7 +385,16 @@ export function isPlaneObservabilityInput(v: unknown): v is PlaneObservabilityIn
     Array.isArray(r['tokenRows']) &&
     Array.isArray(r['trendPoints']) &&
     Array.isArray(r['transcriptSizes']) &&
-    Array.isArray(r['salvageFiles'])
+    Array.isArray(r['salvageFiles']) &&
+    (
+      r['agentRuntime'] === undefined ||
+      r['agentRuntime'] === null ||
+      (
+        typeof r['agentRuntime'] === 'object' &&
+        r['agentRuntime'] !== null &&
+        Array.isArray((r['agentRuntime'] as Record<string, unknown>)['rows'])
+      )
+    )
   );
 }
 
@@ -536,9 +571,14 @@ function buildGlance(
       open:     { kind: 'evidence', id: 'repairs' },
     },
     {
-      label:    'Provider chain',
-      value:    providerStatus ? providerStatus.value : '—',
-      footnote: providerStatus ? `status: ${providerStatus.status}` : 'loopctl unavailable',
+      label:    'Breaker markers',
+      value:    providerStatus
+        ? providerStatus.status === 'met' ? 'primary clear'
+          : providerStatus.status === 'at-risk' ? 'fallback selected'
+          : providerStatus.status === 'breached' ? 'chain blocked'
+          : 'unknown'
+        : '—',
+      footnote: providerStatus ? 'marker state only · auth unverified' : 'loopctl unavailable',
       state:    providerState,
       open:     { kind: 'evidence', id: 'provider' },
     },
@@ -645,7 +685,7 @@ export function planeObservabilityProjectionFromInput(
         tokenRows: [], trendPoints: [], transcriptSizes: [],
         acceptSplit: null, providerStatus: null, salvageFiles: [],
         manifestCoverage: null, ledgerHygiene: null, routing: null,
-        executionConfig: null, codex: null, quota: null,
+        executionConfig: null, agentRuntime: null, codex: null, quota: null,
         cacheEfficiency: null, pipelineLatency: null,
       },
       evidence: [
@@ -685,6 +725,7 @@ export function planeObservabilityProjectionFromInput(
       ledgerHygiene:    raw.ledgerHygiene ?? null,
       routing:          raw.routing ?? null,
       executionConfig:  raw.executionConfig ?? null,
+      agentRuntime:     raw.agentRuntime ?? null,
       codex:            codexTileFromCosts(raw.costs),
       quota:            quotaPanelFromCosts(raw.costs),
       cacheEfficiency:  cacheEfficiencyFromCosts(raw.costs),
@@ -701,6 +742,7 @@ export function planeObservabilityProjectionFromInput(
       { id: 'trajectory',  kind: 'metric-query', label: 'loopctl trajectory'      },
       { id: 'token-rows',  kind: 'metric-query', label: 'Claude transcript usage' },
       { id: 'provider',    kind: 'metric-query', label: 'loopctl slo (provider)'  },
+      { id: 'agent-runtime', kind: 'metric-query', label: 'resolved loopkit configuration' },
       { id: 'salvage',     kind: 'artifact',     label: 'salvage patches'         },
       { id: 'routing',     kind: 'metric-query', label: 'loopctl routing'         },
       { id: 'execution-config', kind: 'metric-query', label: 'loopctl execution-config' },

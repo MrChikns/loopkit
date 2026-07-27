@@ -101,6 +101,7 @@ import type {
   PlaneRoutingData,
   PlaneExecutionConfigData,
   PlaneExecutionConfigRow,
+  PlaneAgentRuntimeData,
   DecisionCard,
 } from '@loopkit/opsui';
 
@@ -919,6 +920,106 @@ function buildAnalyticsStrip(data: OpsData): GlanceMetric[] {
   } catch { return []; }
 }
 
+/**
+ * Resolve the configured/default agent-stage contract shown on Analytics.
+ *
+ * This is intentionally configuration only: it does not claim that a stage ran, nor does it
+ * reconstruct per-item provider/model/effort decisions that the ledger does not fully record.
+ * Configured filesystem paths are represented by semantic labels so private host paths never
+ * cross the console boundary.
+ */
+export function buildAgentRuntimeConfig(cfg: LoopkitConfig): NonNullable<PlaneAgentRuntimeData> {
+  const internalChain = cfg.chains.internal ?? [];
+  const chainLabel = internalChain.length > 0 ? internalChain.join(' → ') : 'none configured';
+  const defaultProvider = internalChain[0];
+  const defaultEffort = defaultProvider ? cfg.providers[defaultProvider]?.effort : undefined;
+  const configuredReasoning = defaultEffort
+    ? {
+        reasoningStatus: 'configured' as const,
+        reasoningDetail: `internal provider config: ${defaultEffort}; current registry construction does not preserve it, and execution history does not record applied effort`,
+      }
+    : {
+        reasoningStatus: 'not-recorded' as const,
+        reasoningDetail: 'no provider default configured; per-item requests and applied effort are not recorded here',
+      };
+  const effectiveInternalDefault = `internal chain: ${chainLabel}`;
+  const providerInstructions = 'Provider-native discovery from the stage working directory, when supported.';
+
+  return {
+    rows: [
+      {
+        stage: 'router',
+        enabled: true,
+        providerRule: 'Per-item sensitivity chain; first healthy tool-capable provider, then tool-less degraded fallback.',
+        effectiveDefault: effectiveInternalDefault,
+        modelSource: 'models.router',
+        modelValue: cfg.models.router,
+        ...configuredReasoning,
+        promptSource: 'configured promptsDir/router.md',
+        instructionDiscovery: `Target repo working directory. ${providerInstructions}`,
+      },
+      {
+        stage: 'planner',
+        enabled: true,
+        providerRule: 'Per-item sensitivity chain; first healthy tool-capable provider; fail closed.',
+        effectiveDefault: effectiveInternalDefault,
+        modelSource: 'models.builderDefault',
+        modelValue: cfg.models.builderDefault,
+        ...configuredReasoning,
+        promptSource: 'configured promptsDir/planner.md',
+        instructionDiscovery: `Plane repo working directory. ${providerInstructions}`,
+      },
+      {
+        stage: 'scout',
+        enabled: cfg.scout?.enabled ?? true,
+        providerRule: 'Reuses the builder/group provider selected for the work item.',
+        effectiveDefault: `inherits builder/group provider (${effectiveInternalDefault})`,
+        modelSource: 'scout.model',
+        modelValue: cfg.scout?.model ?? 'haiku',
+        ...configuredReasoning,
+        promptSource: 'built-in buildScoutPrompt',
+        instructionDiscovery: `Isolated worktree. ${providerInstructions}`,
+      },
+      {
+        stage: 'builder',
+        enabled: true,
+        providerRule: 'Group most-restrictive sensitivity; first healthy tool-capable provider.',
+        effectiveDefault: effectiveInternalDefault,
+        modelSource: 'item/routing choice; fallback models.builderDefault',
+        modelValue: `fallback ${cfg.models.builderDefault}`,
+        reasoningStatus: 'not-recorded',
+        reasoningDetail: 'router may request per-item EFFORT; no item is selected and history does not preserve it here',
+        promptSource: cfg.playbook?.enabled ?? true
+          ? 'built-in buildPrompt + configured playbook'
+          : 'built-in buildPrompt; playbook disabled',
+        instructionDiscovery: `Isolated worktree. ${providerInstructions}`,
+      },
+      {
+        stage: 'judge',
+        enabled: cfg.judge?.enabled ?? true,
+        providerRule: 'Reuses builder/group provider; backstop resolves per-item sensitivity without tools.',
+        effectiveDefault: `inherits builder/group provider (${effectiveInternalDefault})`,
+        modelSource: 'judge.model',
+        modelValue: cfg.judge?.model ?? 'sonnet',
+        ...configuredReasoning,
+        promptSource: 'built-in buildJudgePrompt',
+        instructionDiscovery: 'None — self-contained prompt; no tools or repository access.',
+      },
+      {
+        stage: 'pathologist',
+        enabled: cfg.pathology?.enabled ?? true,
+        providerRule: 'Per-item sensitivity chain; first healthy allowed provider; no tools required.',
+        effectiveDefault: effectiveInternalDefault,
+        modelSource: 'pathology.model',
+        modelValue: cfg.pathology?.model ?? 'opus',
+        ...configuredReasoning,
+        promptSource: 'built-in buildPathologyPrompt',
+        instructionDiscovery: 'None — self-contained prompt; no tools or repository access.',
+      },
+    ],
+  };
+}
+
 /** Real build artifacts (gate logs, diffs, salvage patches) folded into System as a region. */
 function buildArtifactsData(runsDir: string): ArtifactsData {
   const { artifacts, truncated } = readArtifacts(runsDir, 50);
@@ -947,6 +1048,7 @@ export function renderObservabilityPage(data: OpsData, ctx: OpsPageContext, them
   const providerStatus = extractProviderStatus(sloRows);
   const routing = buildRoutingData(data);
   const executionConfig = mapExecutionConfigJson(projectExecutionConfig(data.events, { days: 30 }));
+  const agentRuntime = buildAgentRuntimeConfig(data.cfg);
 
   const input: PlaneObservabilityInput = {
     generatedAt: data.fold.generatedAt ?? new Date().toISOString(),
@@ -968,6 +1070,7 @@ export function renderObservabilityPage(data: OpsData, ctx: OpsPageContext, them
     ledgerHygiene,
     routing,
     executionConfig,
+    agentRuntime,
     // WI-204: the ARMED half of the beats axis is reported here and nowhere else — the operator's
     // working surfaces stay quiet when nothing is wrong. Same predicate the beat gates apply.
     planeArmed: isPlaneArmed(ctx.env),

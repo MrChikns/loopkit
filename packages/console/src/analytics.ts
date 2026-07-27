@@ -1003,9 +1003,9 @@ export function providerStatusToSlo(status: ProviderHealthStatus | undefined): R
 }
 
 const PROVIDER_STATUS_LABEL: Record<ProviderHealthStatus, string> = {
-  'primary-healthy': 'primary healthy',
-  'fallback-active': 'running on fallback',
-  'all-unhealthy': 'no healthy provider',
+  'primary-healthy': 'primary marker clear',
+  'fallback-active': 'fallback selected',
+  'all-unhealthy': 'chain marked blocked',
 };
 
 /**
@@ -1051,8 +1051,8 @@ function providerChainCard(probe: ProviderProbeResult | null): string {
   let aside: string;
   if (!probe) {
     body =
-      intervalCaption('Interval: live — resolved from on-disk provider health markers at render time.') +
-      emptyState('Provider health unknown', 'No provider chain could be resolved — plane config is not reachable from this process.');
+      intervalCaption('Interval: live — resolved from on-disk circuit-breaker markers at render time.') +
+      emptyState('Breaker marker state unknown', 'No provider chain could be resolved — plane config is not reachable from this process.');
     aside = StatusBadge({ state: 'neutral', label: 'unknown' });
   } else {
     const opState = sloStatusToOperational(providerStatusToSlo(probe.status));
@@ -1063,19 +1063,22 @@ function providerChainCard(probe: ProviderProbeResult | null): string {
     if (probe.activeProvider) detailParts.push(`active: <strong>${esc(probe.activeProvider)}</strong>`);
     const row =
       `<div class="analytics-slo-row">` +
-      `<span class="analytics-slo-label">LLM provider chain</span>` +
+      `<span class="analytics-slo-label">Provider breaker markers</span>` +
       `<span class="analytics-slo-value">${detailParts.length ? detailParts.join(' · ') : '<span class="analytics-muted">no provider resolved</span>'}</span>` +
-      `<span class="analytics-slo-target">circuit-breaker: primary → fallback chain</span>` +
+      `<span class="analytics-slo-target">marker walk: primary → fallback chain</span>` +
       StatusBadge({ state: opState, label, size: 'sm' }) +
       `</div>`;
     body =
-      intervalCaption('Interval: live — resolved from on-disk provider health markers at render time.') +
+      intervalCaption('Interval: live — resolved from on-disk circuit-breaker markers at render time.') +
       row +
-      `<p class="analytics-muted">A degraded chain is visible here before builds start failing: fallback-active means the primary tripped its breaker and work is running on a fallback provider; no-healthy-provider means the chain is exhausted.</p>`;
+      `<p class="analytics-muted">This is marker state only: fallback selected means the primary ` +
+      `has an unhealthy marker and a configured fallback marker is clear; chain marked blocked ` +
+      `means no configured marker is clear. It does not test authentication, quota, network ` +
+      `access, or live provider API readiness.</p>`;
   }
   return Card({
-    title: 'Provider chain',
-    subtitle: 'LLM provider health for the reference routing lane',
+    title: 'Provider breaker markers',
+    subtitle: 'On-disk circuit-breaker state for the reference routing lane',
     headerAside: aside,
     body,
   });
@@ -1332,7 +1335,7 @@ function legendBlock(): string {
     ['Trajectory', 'aggregate velocity/quality across build attempts — fixed trailing window.'],
     ['Execution config', 'which model configuration produces accepted outcomes; small samples show counts only.'],
     ['Routing', 'model-routing calibration by spec-size bucket; the tag says whether routing is advisory or active.'],
-    ['Provider chain', 'live circuit-breaker readout: primary healthy, running on fallback, or no healthy provider.'],
+    ['Provider breaker markers', 'live on-disk circuit-breaker marker state; authentication, quota, network and provider API readiness are not checked.'],
     ['Acceptance split', 'human accepts vs provisional plane self-accepts — the trust metric, all-time.'],
     ['Manifest coverage', 'worker completion self-reports joined to build attempts — live, from run artifacts.'],
     ['Scout warm-start coverage', 'fraction of dispatched builds started from a scout brief — fixed trailing window.'],
@@ -1346,7 +1349,7 @@ function legendBlock(): string {
     ['interactive', 'an operator’s own sessions — reported usage outside the autonomy plane.'],
   ];
   const controls: [string, string][] = [
-    ['LOOPKIT_AUTONOMY', 'the autonomy kill-switch — the plane refuses to run agents unless this env var is \'on\'; set in .ai/loops/config.env.'],
+    ['LOOPKIT_AUTONOMY', 'the autonomy kill-switch — set it in the scheduler environment that launches the beats. In standalone mode, set LOOPKIT_HOME there too; config is read from $LOOPKIT_HOME/config/loopkit.json.'],
   ];
   const dl = (rows: [string, string][]): string =>
     `<dl class="analytics-legend__list">${rows.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join('')}</dl>`;
@@ -1445,7 +1448,7 @@ ${legendBlock()}
           { label: 'Quota utilization', command: 'loopctl quota' },
           { label: 'Judge verdicts', command: 'loopctl verdicts' },
           { label: 'Repairs · Acceptance split', command: 'loopctl summary' },
-          { label: 'Pipeline latency · Provider chain', command: 'loopctl slo' },
+          { label: 'Pipeline latency · Provider breaker markers', command: 'loopctl slo' },
           { label: 'Trajectory', command: 'loopctl trajectory' },
           { label: 'Execution config', command: 'loopctl execution-config' },
           { label: 'Routing', command: 'loopctl routing' },

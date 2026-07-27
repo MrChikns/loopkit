@@ -89,8 +89,8 @@ its own and what needs your eyes.**
 
   | tier | what it is | what happens |
   |---|---|---|
-  | `auto` | framework-internal, gate-proven | ships silently after a short window |
-  | `optional` | non-surface code | ships after a longer window |
+  | `auto` | framework-internal, gate-proven | auto-accepts after a short window |
+  | `optional` | non-surface code | auto-accepts after a longer window |
   | `review` | a declared product surface | **surfaces for your test** |
   | `must` | money · auth · migrations, or a failed quality judge | **waits for you, forever** |
 
@@ -105,8 +105,10 @@ its own and what needs your eyes.**
   events; the plane degrades and reports instead of wedging.
 - **Sensitivity-aware model routing.** Every item carries a data-sensitivity tier
   (`public`/`internal`/`private`); the provider registry gates which model may serve which tier
-  (`private` → local model), fail-closed. Run one provider with zero config, or split by role
-  (cheap scout / volume builder / judge), quota lane, and sensitivity. Full boundary semantics:
+  (`private` → local model), fail-closed. A fresh plane uses the exercised Claude CLI worker for
+  public/internal work; ordered provider chains can be configured by sensitivity. Stages have
+  separate model settings, but independent provider-per-stage assignment is not built yet.
+  Full boundary semantics:
   [docs/trust-boundaries.md](docs/trust-boundaries.md).
 
 ## Get pinged when it needs you
@@ -148,31 +150,48 @@ your phone:
 
 ## Try it
 
-The exact sequence below drove a real worker end-to-end — intent → worktree build in the target
-repo → its own test gate → merge into its `main`:
+Clone this repository into a directory named `loopkit`. The exact sequence below then drives a
+real worker end-to-end — intent → worktree build in the target repo → its own test gate → merge
+into its `main`:
+
+**Prerequisites:** macOS, Node.js 22+, git, and one installed and authenticated Claude CLI
+(`claude auth status`). That is enough for the exercised path; Codex, Ollama, and multi-provider
+chains are optional experimental configuration. If the only eligible provider is unavailable,
+routing/build work waits, parks, or fails closed — the plane does not silently widen the
+sensitivity allowlist.
 
 ```bash
 # 0. Build the engine
 cd loopkit && npm install && (cd packages/core && npm run build)
-LOOPCTL="node $(pwd)/packages/core/dist/cli.js"
+LOOPKIT_REPO_ROOT="$(pwd)"
+LOOPCTL="node $LOOPKIT_REPO_ROOT/packages/core/dist/cli.js"
 
 # 1. Materialize the demo target (a tiny notes app with its own tests + loopkit.target.json)
 bash examples/setup-demo.sh ~/loopkit-demo/notes
 
 # 2. Create a plane (its own state lives here, separate from the target)
 mkdir -p ~/loopkit-demo/plane && cd ~/loopkit-demo/plane && git init -b main
-mkdir -p .ai/loops/prompts && cp <loopkit>/packages/core/prompts/*.md .ai/loops/prompts/
-echo 'export LOOPKIT_AUTONOMY=on' > .ai/loops/config.env   # fail-safe: OFF until you arm it
+mkdir -p .ai/loops/prompts
+cp "$LOOPKIT_REPO_ROOT"/packages/core/prompts/*.md .ai/loops/prompts/
+echo 'export LOOPKIT_AUTONOMY=off' > .ai/loops/config.env  # fail-safe while you inspect it
 
 # 3. Connect the target (prints its manifest — gate command, branch — for your review)
 $LOOPCTL target add ~/loopkit-demo/notes
 
-# 4. Drop intent, then run the two beats (normally these run on a scheduler)
+# 4. Check the read-only health views, then arm deliberately
+claude auth status
+$LOOPCTL state
+$LOOPCTL slo
+# If you run the optional console, inspect its read-only /analytics page too.
+echo 'export LOOPKIT_AUTONOMY=on' > .ai/loops/config.env
+export LOOPKIT_AUTONOMY=on
+
+# 5. Drop intent, then run the two beats (normally these run on a scheduler)
 $LOOPCTL new "Add a deleteNote(id) function to src/notes.js with tests"
 $LOOPCTL beat reactor     # routes + queues the item
 $LOOPCTL beat dispatch    # builds in a worktree OF THE TARGET, gates, merges into ITS main
 
-# 5. See what happened
+# 6. See what happened
 $LOOPCTL state && $LOOPCTL events --item WI-001
 cd ~/loopkit-demo/notes && git log --oneline   # the worker's commit is in YOUR repo's history
 ```
@@ -212,10 +231,13 @@ More: [the method](docs/method.md) · [the vision](docs/vision.md) ·
 [trust boundaries](docs/trust-boundaries.md) · [hardening audit](docs/hardening-audit.md) ·
 [agent integration](docs/agent-integration.md) · [knowledge index](docs/knowledge.md).
 
-For Claude Code users the repo ships the operating discipline as slash commands
+For Claude Code users the repo includes three handwritten, repo-local helper commands
 (`.claude/commands/`): `/drive` (attended coordinator mode over claims),
 `/plane-check` (health triage), `/board` (the status window). Open a session in this repo and
-they load automatically; see [agent integration](docs/agent-integration.md).
+they load automatically. They are optional attended helpers, not external prerequisites or a
+provider-neutral skills pack, and `loopctl` does not install them into target repos. Workers run
+from the target worktree; discovery of its `AGENTS.md` / `CLAUDE.md` is provider-native rather
+than Loopkit-enforced. See [agent integration](docs/agent-integration.md).
 
 ## Honest scope
 

@@ -40,7 +40,7 @@ flowchart LR
   G -->|green| M["Merge<br/><small>no-ff, after a re-gate</small>"]
   M --> A["Acceptance tier"]
   A -->|only if needed| YOU(["Your desk"])
-  A -->|most work| SILENT["ships silently"]
+  A -->|most work| SILENT["closes silently"]
 
   classDef term fill:#111820,stroke:#111820,color:#ffffff
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
@@ -207,11 +207,13 @@ That is the only reason a CLI drain and a running beat can overlap safely.
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
-**Provider health is a chain, not a single provider.** The registry walks the configured chain; an
-auth failure marks the current provider unhealthy and falls over to the next
-(`packages/core/src/beats/dispatch.ts:3357`<!--cite:providerFallback-->), and a later successful beat
-clears the marker. With no healthy provider for an item's sensitivity tier, the item parks rather than
-routing to a disallowed one.
+**Provider health is a chain, not a single provider.** In dispatch, the auth preflight and a
+mid-build auth failure mark the current builder provider unhealthy; preflight then falls over to the
+next tool-capable provider
+(`packages/core/src/beats/dispatch.ts:3357`<!--cite:providerFallback-->), and a later successful
+dispatch preflight clears the marker. With no healthy provider for an item's sensitivity tier, the
+item parks rather than routing to a disallowed one. Reactor content-call errors use their own
+per-item backoff; they do not trip this shared provider breaker.
 
 **Numbers that bound this**
 
@@ -226,8 +228,11 @@ routing to a disallowed one.
   worktree so they share one gate and one merge
   (`packages/core/src/beats/dispatch.ts:3317`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
-- 🔵 Builds spawned in one beat are collected by a later one via on-disk exit files, so a long build
-  does not pin the beat that started it ([ADR-008](decisions/ADR-008-detached-dispatch-staging.md)).
+- ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
+  selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
+  for a later beat to collect, so a long build does not pin the beat that started it. With the flag
+  off, or with any other provider, dispatch awaits the build synchronously
+  ([ADR-008](decisions/ADR-008-detached-dispatch-staging.md)).
 
 ---
 
@@ -442,6 +447,13 @@ flowchart TD
 them is what made the transient-requeue arm unreachable for months: both decisions read the same
 counter, so by the time a park happened the budget was already spent.
 
+The diagram above is the **LLM pathology** path: a bounded, read-only, fail-open diagnosis of an
+already-parked build failure. It is separate from deterministic **self-heal runbooks**, which react
+to breached SLO rows. Each configured runbook rule is either `shadow` — append `heal.shadowed` and
+take no action — or `armed`, which enters the existing propose/execute ladder. Legacy rules omitted
+from `healRules` remain armed for compatibility; new runbooks should ship explicitly in shadow mode
+and are promoted only by a manual config change after burn-in.
+
 | counter | value | what it bounds |
 |---|---|---|
 | dispatch pick guard | **5**<!--pin:BUILDER_BREAKER_N--> | attempts before dispatch stops picking the item at all; only an explicit unpark from you resets it |
@@ -455,9 +467,9 @@ counter, so by the time a park happened the budget was already spent.
   as a decision; it reaches the board as work.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
-- Running alongside on every reactor beat: orphaned-build detection, crashed-worker reaping, stale
-  session-claim reaping (`packages/core/src/beats/reactor.ts:3547`<!--cite:staleClaimReap-->), and a
-  leaked-worktree sweep.
+- Running alongside on every autonomy-enabled reactor beat: orphaned-build detection,
+  crashed-worker reaping, stale session-claim reaping
+  (`packages/core/src/beats/reactor.ts:3547`<!--cite:staleClaimReap-->), and a leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
   anything you have claimed, and measures staleness from real activity.
@@ -486,7 +498,7 @@ a change that touched real code cannot launder itself as harmless.
 flowchart LR
   M(["item.merged"]) --> READ["Read the diff<br/><small>what it really touched</small>"]
   READ --> T{"tier"}
-  T -->|framework-internal or no code| A1["ships silently"]
+  T -->|framework-internal or no code| A1["auto-accepts silently"]
   T -->|low risk| A2["accepts after a short window"]
   T -->|a surface you would notice| A3["asks you to test"]
   T -->|money · auth · migrations · judge said no| A4["waits for you, indefinitely"]
@@ -607,7 +619,7 @@ lanes on Plate 02.
 flowchart LR
   T1["Plane running<br/><small>a beat picks work on a timer</small>"] --> ONE["The same lanes<br/><small>Plates 04–09</small>"]
   T2["You drive it<br/><small>an agent claims and builds, now</small>"] --> ONE
-  ONE --> BOARD["One board<br/><small>one history, one proof</small>"]
+  ONE --> BOARD["One board<br/><small>one history, recorded evidence</small>"]
 
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
@@ -616,7 +628,8 @@ flowchart LR
 ```
 
 Claims stop the two from colliding, so they may overlap — there is no switch to flip. Work you drove
-by hand lands with the same trail as work done while you slept.
+by hand lands on the same ledger and board, but it has the full automated build/gate/judge trail
+only when the coordinator records equivalent evidence.
 
 - An attended drain is **coordinated by an agent, not by a lane**. There used to be a CLI drain
   (`loopctl conduct`) running its own copy of this procedure; it was deleted in

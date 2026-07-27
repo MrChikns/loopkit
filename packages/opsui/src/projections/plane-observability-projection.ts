@@ -32,6 +32,7 @@ import type {
   PlaneLedgerHygiene,
   PlaneRoutingData,
   PlaneExecutionConfigData,
+  PlaneAgentRuntimeData,
   PlaneCodexData,
   PlaneQuotaData,
   PlanesCacheEfficiencyData,
@@ -112,7 +113,8 @@ count and summarise what already happened.</p>
 <li><strong>Spend</strong> — metering so budgets can be set from measurement, not guesses. The ceiling is unset while the baseline is being measured.</li>
 <li><strong>Judge (advisory)</strong> — no power to block merges until its false-alarm rate is proven near zero over a calibration window. Watch <em>false alarms</em> (trend toward 0) and <em>agreement</em> (trend toward high once outcomes accumulate).</li>
 <li><strong>Acceptance split</strong> — human accepts are ground truth for judge calibration; provisional accepts are the plane self-accepting its own internals on an evidence ladder. Provisional accepts are excluded from agreement stats. What to watch: provisional accepts should have full evidence trails; a high provisional count with thin evidence is a signal to review.</li>
-<li><strong>Provider chain</strong> — the LLM provider health as a circuit-breaker row. Primary healthy = all good; running on fallback = the primary is down and the plane degraded to a fallback provider; no healthy provider = the plane cannot route any LLM call. The breaker self-recovers when the primary comes back (default: Anthropic primary, Ollama degraded fallback).</li>
+<li><strong>Provider breaker markers</strong> — the configured internal provider chain's on-disk circuit-breaker state. Primary marker clear = no unhealthy marker is present; fallback selected = the primary is marked unhealthy and a configured fallback is available; chain marked blocked = no configured provider has a clear marker. This does not test provider authentication, quota, network access, or live API readiness. A fresh plane defaults to Claude only for public/internal work; Ollama is not an internal fallback unless explicitly configured.</li>
+<li><strong>Agent runtime</strong> — the current/default configuration for router, planner, scout, builder, judge, and pathologist. It is not execution history: per-item sensitivity, provider health, tool checks, and runtime requests may select something different.</li>
 <li><strong>Context packs</strong> — fraction of dispatched items that had a scout brief before building. Higher coverage → builders start with more context → fewer first-attempt failures.</li>
 <li><strong>Repairs</strong> — items that needed more than one build attempt. The evaluator-optimizer loop injects the previous diff + gate log so the repair has evidence of what went wrong.</li>
 <li><strong>Salvage</strong> — when a worker is interrupted (crash or timeout) before committing, the dispatcher captures the uncommitted diff as a <code>.salvage.patch</code> file under <code>.ai/runs/loopkit/</code>. The next attempt pre-applies the patch as a suspect draft. Salvage is best-effort; a <code>.salvage.note</code> appears instead when the diff exceeds the size cap.</li>
@@ -120,21 +122,22 @@ count and summarise what already happened.</p>
 <li><strong>Ledger hygiene</strong> — the raw event log is the truth; telemetry and ops segments archive when old, but work-item segments never do. A quarantined count above zero means some events were malformed and silenced; they do not affect fold correctness.</li>
 <li><strong>Quota utilization</strong> — Claude (five_hour/seven_day) and Codex (primary) subscription-quota readings, with a capacity/runway estimate regressed from consecutive same-cycle readings. All $ figures are API-equivalent, not billed charges — the founder pays in quota, not per-call.</li>
 <li><strong>Trajectory</strong> — aggregate velocity and quality metrics. The first-pass merge rate is shown against a reference baseline a deployment calibrates from its own history.</li>
-<li><strong>Routing panel</strong> — when model routing is enabled, the plane routes different intent buckets to different models (scout → haiku, builder → sonnet, architect → opus) and tracks first-pass rate and cost per bucket. The panel shows advisory stats while the routing logic is being calibrated; it becomes active once per-bucket thresholds are set. Until then, this section shows "coming online".</li>
+<li><strong>Routing panel</strong> — eval-driven builder routing groups attempts by spec-size bucket and model, then tracks first-pass rate and cost. Advisory mode records what it would choose; active mode applies the measured choice. Scout, judge, and pathology have separate model settings and are not these routing buckets.</li>
 <li><strong>Token usage</strong> — raw transcript token and cost data from the Claude sessions driving the plane.</li>
 </ul>
 
 <h4>Kill switch</h4>
-<p>Set <code>LOOPKIT_AUTONOMY=off</code> in <code>.ai/loops/config.env</code> to pause the entire
-agent plane (reactor + dispatch both become no-ops). The console and all projections
-remain readable — only autonomous action stops. Flip back to <code>on</code> to resume.
-If the variable is unset entirely (bare invocation without sourcing config.env), the
-beats default to <code>off</code> as a fail-safe.</p>
+<p>Set <code>LOOPKIT_AUTONOMY=off</code> in the environment used by the scheduler that launches
+reactor and dispatch to pause the plane; set it to <code>on</code> and reload the scheduler to
+resume. For a standalone plane, set <code>LOOPKIT_HOME</code> in that same scheduler environment;
+loopkit then reads configuration from <code>$LOOPKIT_HOME/config/loopkit.json</code>. The console
+and projections remain readable while halted. If <code>LOOPKIT_AUTONOMY</code> is unset, the beats
+default to <code>off</code> as a fail-safe.</p>
 
 <h4>Operator controls</h4>
 <ol>
 <li><strong>Budget ceiling</strong> — set <code>budget.dispatchDailyUsd</code> in <code>loopkit.config.json</code> once a few days of baseline spend data have accumulated (see Spend section).</li>
-<li><strong>Judge power</strong> — once the false-alarm cell stays near 0 over a calibration window of verdicts with outcomes, enable the judge as a merge gate.</li>
+<li><strong>Judge status</strong> — only advisory mode is configurable today. A merge-blocking judge remains a future change, not an operator control.</li>
 </ol>
 </div>
 </details>`;
@@ -708,28 +711,27 @@ function acceptSplitRegion(split: PlaneAcceptSplit | null, verdicts: PlaneVerdic
 
 function providerStatusRegion(providerStatus: PlaneProviderStatus | null): string {
   let body: string;
+  const markerLabel =
+    providerStatus?.status === 'met'       ? 'Primary marker clear'
+    : providerStatus?.status === 'at-risk'  ? 'Fallback selected'
+    : providerStatus?.status === 'breached' ? 'Chain marked blocked'
+    : 'Unknown';
 
   if (!providerStatus) {
-    body = `<p class="opsui-plane-obs__unavailable">Provider chain status unavailable — loopctl CLI not found or slo command failed.</p>`;
+    body = `<p class="opsui-plane-obs__unavailable">Provider circuit-breaker marker state unavailable — loopctl CLI not found or slo command failed.</p>`;
   } else {
     const stateClass =
       providerStatus.status === 'met'      ? 'opsui-plane-obs__tag--ok'
       : providerStatus.status === 'at-risk' ? 'opsui-plane-obs__tag--warn'
       : providerStatus.status === 'breached' ? 'opsui-plane-obs__tag--missing'
       : '';
-    const label =
-      providerStatus.status === 'met'       ? 'Primary healthy'
-      : providerStatus.status === 'at-risk'  ? 'Running on fallback'
-      : providerStatus.status === 'breached' ? 'No healthy provider'
-      : 'Unknown';
-
     body =
-      `<p class="opsui-plane-obs__caption">Circuit breaker with self-recovery. ` +
-      `Primary healthy = all good; running on fallback = primary down, degraded routing; ` +
-      `no healthy provider = all LLM calls blocked.</p>` +
+      `<p class="opsui-plane-obs__caption">On-disk circuit-breaker markers with self-recovery. ` +
+      `This readout does <strong>not</strong> test authentication, quota, network access, or ` +
+      `live provider API readiness.</p>` +
       `<div class="opsui-plane-obs__judge-summary">` +
-      `<span>Status: <span class="opsui-plane-obs__tag ${stateClass}">${esc(label)}</span></span>` +
-      `<span>Value: <strong>${esc(providerStatus.value)}</strong></span>` +
+      `<span>Marker state: <span class="opsui-plane-obs__tag ${stateClass}">${esc(markerLabel)}</span></span>` +
+      `<span>Authentication / API readiness: <strong>not checked</strong></span>` +
       `</div>`;
   }
 
@@ -739,11 +741,85 @@ function providerStatusRegion(providerStatus: PlaneProviderStatus | null): strin
           : providerStatus.status === 'at-risk' ? 'warning'
           : providerStatus.status === 'breached' ? 'critical'
           : 'neutral',
-        label: providerStatus.status,
+        label: markerLabel,
       })
     : StatusBadge({ state: 'warning', label: 'unavailable' });
 
-  return Card({ title: 'Provider chain', subtitle: 'LLM provider health — circuit breaker with self-recovery', headerAside, body });
+  return Card({
+    title: 'Provider breaker markers',
+    subtitle: 'On-disk circuit-breaker state for the reference routing lane',
+    headerAside,
+    body,
+  });
+}
+
+function agentRuntimeRegion(agentRuntime: PlaneAgentRuntimeData): string {
+  if (!agentRuntime) {
+    return Card({
+      title: 'Agent runtime',
+      subtitle: 'Current/default configuration by stage',
+      headerAside: StatusBadge({ state: 'warning', label: 'unavailable', size: 'sm' }),
+      body: `<p class="opsui-plane-obs__unavailable">Agent runtime configuration unavailable — this caller did not report it.</p>`,
+    });
+  }
+
+  const reasoningState = {
+    configured: 'info',
+    requested: 'warning',
+    'not-recorded': 'neutral',
+  } as const;
+  const reasoningLabel = {
+    configured: 'configured',
+    requested: 'requested',
+    'not-recorded': 'not recorded',
+  } as const;
+  const cell = (primary: string, detail: string) =>
+    `<span class="opsui-plane-obs__runtime-primary">${esc(primary)}</span>` +
+    `<span class="opsui-plane-obs__runtime-detail">${esc(detail)}</span>`;
+
+  const rows = agentRuntime.rows.map((row) =>
+    `<tr>` +
+    `<td class="opsui-plane-obs__runtime-stage">` +
+      `<span class="opsui-plane-obs__runtime-primary">${esc(row.stage)}</span>` +
+      StatusBadge({
+        state: row.enabled ? 'success' : 'neutral',
+        label: row.enabled ? 'enabled' : 'disabled',
+        size: 'sm',
+      }) +
+    `</td>` +
+    `<td>${cell(row.effectiveDefault, row.providerRule)}</td>` +
+    `<td>${cell(row.modelValue, row.modelSource)}</td>` +
+    `<td>` +
+      StatusBadge({
+        state: reasoningState[row.reasoningStatus],
+        label: reasoningLabel[row.reasoningStatus],
+        size: 'sm',
+      }) +
+      `<span class="opsui-plane-obs__runtime-detail">${esc(row.reasoningDetail)}</span>` +
+    `</td>` +
+    `<td>${esc(row.promptSource)}</td>` +
+    `<td>${esc(row.instructionDiscovery)}</td>` +
+    `</tr>`,
+  ).join('');
+
+  const body =
+    `<p class="opsui-plane-obs__runtime-note">` +
+    `<strong>Configuration snapshot, not execution history.</strong> Effective defaults are shown ` +
+    `before per-item sensitivity, provider health, and tool-capability checks, so an actual run may ` +
+    `differ. Reasoning is only labelled configured or requested when its source says so; otherwise ` +
+    `it is shown as not recorded.</p>` +
+    `<div class="opsui-plane-obs__runtime-scroll">` +
+    `<table class="opsui-plane-obs__table opsui-plane-obs__runtime-table">` +
+    `<thead><tr><th>Stage</th><th>Provider default / rule</th><th>Model</th><th>Reasoning</th><th>Prompt</th><th>Instructions</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>` +
+    `</div>`;
+
+  return Card({
+    title: 'Agent runtime',
+    subtitle: 'Current/default configuration by stage',
+    headerAside: StatusBadge({ state: 'neutral', label: 'Configuration', size: 'sm' }),
+    body,
+  });
 }
 
 function salvageRegion(salvageFiles: PlaneSalvageFile[]): string {
@@ -848,7 +924,7 @@ function routingPanelRegion(routing: PlaneRoutingData): string {
       title:    'Routing panel',
       subtitle: 'Bucket × model stats',
       body:     `<p class="opsui-plane-obs__unavailable">Coming online. ` +
-                `Once enabled, this panel shows advisory routing stats per bucket (scout/builder/architect) and model.</p>`,
+                `Once enabled, this panel shows builder outcomes by spec-size bucket and model.</p>`,
     });
   }
 
@@ -1023,8 +1099,11 @@ function autonomyRegion(planeArmed: boolean | undefined): string {
       `<li>Attended CLI work is unaffected, and every projection stays readable.</li>` +
       `<li>It holds until someone changes it: no timeout, no auto-rearm.</li>` +
       `</ul>` +
-      `<p class="opsui-plane-obs__autonomy-fix">Set <code>LOOPKIT_AUTONOMY=on</code> in ` +
-      `<code>.ai/loops/config.env</code> to arm the plane.</p>`;
+      `<p class="opsui-plane-obs__autonomy-fix">Set <code>LOOPKIT_AUTONOMY=on</code> in the ` +
+      `environment used by the scheduler that launches the beats. For a standalone plane, set ` +
+      `<code>LOOPKIT_HOME</code> there too; configuration is read from ` +
+      `<code>$LOOPKIT_HOME/config/loopkit.json</code>. Reload the scheduler so the beats inherit ` +
+      `the environment.</p>`;
   return Card({ title: 'Autonomy (kill switch)', headerAside: badge, body });
 }
 
@@ -1052,7 +1131,8 @@ export function PlaneObservabilityProjection(env: ProjectionEnvelope<PlaneObserv
     safeRegion('Ops observability',       () => glanceRegion(d.glance)) +
     safeRegion('Autonomy (kill switch)',  () => autonomyRegion(d.planeArmed)) +
     safeRegion('Acceptance split',        () => acceptSplitRegion(d.acceptSplit, d.verdicts)) +
-    safeRegion('Provider chain',          () => providerStatusRegion(d.providerStatus)) +
+    safeRegion('Provider breaker markers', () => providerStatusRegion(d.providerStatus)) +
+    safeRegion('Agent runtime',           () => agentRuntimeRegion(d.agentRuntime)) +
     safeRegion('Spend',                   () => spendRegion(d.costs, d.budget)) +
     safeRegion('Codex',                   () => codexRegion(d.codex)) +
     safeRegion('Quota utilization',       () => quotaRegion(d.quota)) +

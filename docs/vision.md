@@ -6,19 +6,18 @@ in [trust-boundaries.md](trust-boundaries.md). This doc is the whole picture and
 
 ## What loopkit is
 
-**An event-sourced delivery plane for a solo operator running multiple AI models against
-multiple projects.** You connect it to any project — an app, a docs tree, a prompt/eval
-workspace, any local folder. You drop intent in plain language. The plane plans, builds in
-isolated git worktrees, proves with deterministic gates, merges, and routes outcomes through
-tiered acceptance so only the work that genuinely needs your judgment reaches you. Every step —
-by an agent overnight or by you at the keyboard — is an immutable event in one append-only work
-ledger. Everything you look at is a projection of that log.
+**An event-sourced delivery plane for a solo operator.** The exercised v0.1 path drives one git
+target at a time with a Claude CLI worker. Built-in Codex and Ollama adapters are experimental
+text-only lanes, not interchangeable autonomous builders. Multiple concurrently scheduled
+projects, arbitrary-folder initialization, and provider-independent attended tooling are
+roadmap. You drop intent in plain language; the plane builds in isolated git worktrees, proves
+with deterministic gates, merges, and routes outcomes through tiered acceptance. Every recorded
+step is an immutable event in one append-only work ledger; every view is a projection of it.
 
 ## The one-line model
 
-> One plane whose dispatcher **yields to the operator's scope claims** while you work, and
-> **executes explicitly armed plan runs** while you're away — two UX presets over one domain
-> model, never two systems.
+> One plane whose dispatcher **yields to the operator's item claims** today; explicitly armed
+> plan runs and richer scope claims are roadmap over the same domain model.
 
 ## The latency doctrine (why attended mode exists)
 
@@ -29,9 +28,9 @@ roadmap. What stays structural:
 - **beat quantization** — pickup waits for the next heartbeat;
 - **cold context** — every spawned worker rediscovers the repo from zero; your attended session
   already holds the whole picture;
-- **stage ceremony** — scout → brief → build → judge → gate → merge are separate, serialized
-  proof stages; that rigor is the *point* of unattended trust, and pure overhead when you are
-  sitting right there.
+- **stage ceremony** — scout → brief → build → deterministic gate → advisory judge → merge are
+  separate, serialized proof stages; that rigor is the *point* of unattended trust, and pure
+  overhead when you are sitting right there.
 
 So the plane refuses to compete on attended latency. The doctrine:
 
@@ -39,7 +38,7 @@ So the plane refuses to compete on attended latency. The doctrine:
 
 Concretely:
 
-- **The attended fast path adds exactly two user verbs** to work you were doing anyway:
+- **Roadmap — the attended fast path adds two user verbs** to work you were doing anyway:
   `attended start` (append a scope claim; dispatch instantly yields on conflicting paths and
   keeps building everything disjoint) and `attended finish` (run the target's gate — which you'd
   run regardless — verify the commit range against the claim, stamp the same
@@ -62,12 +61,12 @@ Concretely:
    projections as the only UI. Events already appended are never mutated by a crash — recovery
    is reading the log. A unified record across human and agent work is the design center, not an
    afterthought.
-2. **Targets: connect to anything.** A target is a git history plus a manifest
+2. **Targets: explicit git repositories today; broader onboarding is roadmap.** A target is a
+   git history plus a manifest
    (`loopkit.target.json`): gate command, default branch, and the three boundary axes —
-   merge-trust prefixes, test-visible surfaces, risk patterns. Apps, docs trees, AI/eval
-   projects, any local folder (`target add --init` makes git invisible-but-present). Gates are
-   arbitrary deterministic commands; presets for non-code projects (`docs`, `eval` — eval scores
-   land as events, so prompt/model quality over time is a projection).
+   merge-trust prefixes, test-visible surfaces, risk patterns. `target add --init`, non-code
+   `docs`/`eval` gate presets, eval-score projections, and arbitrary non-git folders are roadmap,
+   not v0.1 commands.
 3. **Trust is explicit and layered.**
    - *Merge-trust vs test-visibility vs risk* — three declared axes, not one conflated list; a
      path can auto-merge AND still cross your desk.
@@ -76,15 +75,16 @@ Concretely:
      to `review`. Gate strength and human attention are a policy see-saw.
    - *Sensitivity-gated model routing* — every item carries public/internal/private; the
      provider registry gates which model may serve which tier (`private` → local model).
-     Multi-model by role (cheap scout / volume builder / judge), by quota lane, by measured
-     performance (eval-driven routing) — zero-config single-provider default. End-to-end
-     fail-closed enforcement is the release bar for claiming the guarantee.
-4. **Plans make "away" productive, not just busy.** A plan is data — a validated acyclic DAG of
+     Stage-specific model settings and sensitivity-specific provider chains exist today;
+     independent provider assignment by stage does not. Eval-driven builder routing can select
+     from measured models by spec-size bucket. End-to-end content inspection remains the release
+     bar for claiming that sensitive payloads never leave the machine.
+4. **Roadmap — plans make "away" productive, not just busy.** A plan is data — a validated acyclic DAG of
    ordinary slices — and an evening run is an event: a one-shot bounded window the existing
    beats honor, closing with an inspectable outcome tally. Morning surface: what shipped by
    tier, what parked, what's blocked and why — dependency-ordered unattended execution with an
    inspectable record, not a cron that fires isolated prompts.
-5. **The plane teaches its method.** A versioned skills pack — event-model the slice, keep it
+5. **Roadmap — the plane teaches its method.** A versioned skills pack — event-model the slice, keep it
    vertical, what reviewable means — projected into worker prompts *and* installable into your
    attended sessions. CLI enforces invariants; skills teach judgment. Both postures share one
    discipline, which is what makes the unified ledger coherent.
@@ -93,10 +93,11 @@ Concretely:
 
 ## What loopkit is not
 
-Not a coding agent (bring your own — any CLI-invocable model). Not a workflow engine (plans are
-fixed DAGs of ordinary items). Not a team platform (solo-operator first; multi-seat is not a
-goal). Not a cloud service (your machine, your git, your models, your data). Not two systems
-pretending to be one (presets, not planes).
+Not a coding agent: v0.1 integrates built-in CLI adapters, with Claude as the exercised autonomous
+worker and Codex/Ollama as experimental text-only adapters. It is not yet an arbitrary
+CLI-model integration contract. Not a workflow engine (plan DAGs are roadmap). Not a team
+platform (solo-operator first; multi-seat is not a goal). Not a cloud service (your machine,
+your git, your models, your data).
 
 ## Where it goes (sequence, not promises)
 

@@ -43,6 +43,10 @@ test('IntentComposer: halted renders a notice that explains itself', () => {
     seen.add(what);
   }
   assert.equal(seen.size, REQUIRED_TEACHING.length, 'every teaching point must be exercised');
+  assert.match(html, /scheduler that launches the beats/i, 'arming belongs in the scheduler environment');
+  assert.match(html, /LOOPKIT_HOME/, 'standalone arming must name the plane-home selector');
+  assert.match(html, /\$LOOPKIT_HOME\/config\/loopkit\.json/, 'standalone config source must be explicit');
+  assert.doesNotMatch(html, /\.ai\/loops\/config\.env/, 'must not assume an embedded repo layout');
 });
 
 test('IntentComposer: the notice never implies the halt expires or that running work stopped', () => {
@@ -141,6 +145,9 @@ test('observability: the autonomy gate is reported as a state — armed, halted,
   assert.match(halted, /already running continues/i, 'halted: must say running work continues');
   assert.match(halted, /no timeout, no auto-rearm/i, 'halted: must not imply the halt lapses');
   assert.match(halted, /LOOPKIT_AUTONOMY=on/, 'halted: must name the fix');
+  assert.match(halted, /scheduler that launches the beats/i, 'halted: must identify the real process environment');
+  assert.match(halted, /\$LOOPKIT_HOME\/config\/loopkit\.json/, 'halted: must name standalone config resolution');
+  assert.doesNotMatch(halted, /\.ai\/loops\/config\.env/, 'halted: must not prescribe a repo-local file');
   seen.add('halted');
 
   // An absent reading is UNKNOWN. Defaulting it to "armed" would be the same flattering guess
@@ -152,4 +159,13 @@ test('observability: the autonomy gate is reported as a state — armed, halted,
 
   assert.deepEqual([...seen].sort(), ['armed', 'halted', 'unknown'],
     'all three autonomy readings must be exercised');
+});
+
+test('observability: explanatory copy describes current routing and advisory judge limits', () => {
+  const html = observabilityHtml(true);
+  assert.match(html, /defaults to Claude only for public\/internal work/i);
+  assert.match(html, /builder routing groups attempts by spec-size bucket and model/i);
+  assert.match(html, /only advisory mode is configurable today/i);
+  assert.doesNotMatch(html, /scout → haiku, builder → sonnet, architect → opus/i);
+  assert.doesNotMatch(html, /enable the judge as a merge gate/i);
 });

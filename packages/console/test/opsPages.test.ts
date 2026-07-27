@@ -13,7 +13,7 @@ import { join } from 'node:path';
 
 import { loadConfig } from '@loopkit/core';
 
-import { computeSloRows, resetSloCacheForTests } from '../src/opsPages.js';
+import { buildAgentRuntimeConfig, computeSloRows, resetSloCacheForTests } from '../src/opsPages.js';
 
 async function withRepoRoot<T>(fn: (repoRoot: string) => Promise<T>): Promise<T> {
   const repoRoot = await mkdtemp(join(tmpdir(), 'loopkit-opspages-test-'));
@@ -83,5 +83,46 @@ test('computeSloRows: a live (non-cached) call still returns the real evaluateSl
       assert.equal(typeof row.key, 'string');
       assert.equal(typeof row.status, 'string');
     }
+  });
+});
+
+test('buildAgentRuntimeConfig: resolves honest defaults for every agent stage', async () => {
+  await withRepoRoot(async (repoRoot) => {
+    const cfg = loadConfig(repoRoot);
+    const runtime = buildAgentRuntimeConfig(cfg);
+
+    assert.deepEqual(runtime.rows.map((row) => row.stage),
+      ['router', 'planner', 'scout', 'builder', 'judge', 'pathologist']);
+    assert.equal(runtime.rows.find((row) => row.stage === 'router')?.modelValue, cfg.models.router);
+    assert.equal(runtime.rows.find((row) => row.stage === 'planner')?.modelValue, cfg.models.builderDefault);
+    assert.match(runtime.rows.find((row) => row.stage === 'builder')?.modelSource ?? '', /item\/routing choice/);
+    assert.equal(runtime.rows.find((row) => row.stage === 'router')?.promptSource, 'configured promptsDir/router.md');
+    assert.match(runtime.rows.find((row) => row.stage === 'judge')?.instructionDiscovery ?? '', /self-contained prompt/i);
+    assert.equal(runtime.rows.find((row) => row.stage === 'builder')?.reasoningStatus, 'not-recorded');
+  });
+});
+
+test('buildAgentRuntimeConfig: reports configured effort without leaking private configured paths', async () => {
+  await withRepoRoot(async (repoRoot) => {
+    const base = loadConfig(repoRoot);
+    const defaultProvider = base.chains.internal?.[0]!;
+    const cfg = {
+      ...base,
+      promptsDir: '/Users/example/private-prompts',
+      playbook: { ...base.playbook, enabled: true, path: '/private/secret/playbook.md' },
+      providers: {
+        ...base.providers,
+        [defaultProvider]: { ...base.providers[defaultProvider]!, effort: 'high' },
+      },
+    };
+    const runtime = buildAgentRuntimeConfig(cfg);
+    const serialized = JSON.stringify(runtime);
+
+    assert.equal(runtime.rows.find((row) => row.stage === 'router')?.reasoningStatus, 'configured');
+    assert.match(runtime.rows.find((row) => row.stage === 'router')?.reasoningDetail ?? '', /provider config: high/);
+    assert.match(runtime.rows.find((row) => row.stage === 'router')?.reasoningDetail ?? '', /does not preserve it/);
+    assert.doesNotMatch(serialized, /\/Users\/|\/private\/|private-prompts|playbook\.md/);
+    assert.match(serialized, /configured promptsDir\/router\.md/);
+    assert.match(serialized, /configured playbook/);
   });
 });

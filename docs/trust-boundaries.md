@@ -1,17 +1,19 @@
 # Trust boundaries — data sensitivity, provider routing, and what leaves the machine
 
-loopkit assumes a world where you run **several models with different trust levels at once** — a
-subscription frontier model, a second-opinion lane on a separate quota, and a local model that
-never touches the network. The plane routes work between them **by declared data sensitivity and
-by measured capability** — enforced in code, not by operator discipline.
+loopkit has a provider registry for models with different trust levels: a hosted worker, an
+optional provider on another quota, and a local model that never touches the network. Provider
+selection is gated by declared data sensitivity and required tool capability. The exercised v0.1
+worker is Claude CLI; Codex and Ollama adapters are experimental. Independent provider assignment
+per stage, including an automatic cross-provider second-opinion lane, is not built yet.
 
 ## The threat model, plainly
 
-When a work item is built, its prompt carries: the item's text, relevant file contents from the
-target's worktree, and method/prompt-pack text. For an **external provider** (a hosted model),
-all of that leaves the machine. The plane's job is to make "what may leave, for which project,
-to which provider" an explicit, enforced policy — because "we were careful" does not survive an
-overnight run.
+When a work item is built, its prompt carries the item's text and may carry attachment paths,
+operator notes, a configured playbook, prior diff/gate evidence, or a scout brief. A tool-enabled
+worker can also read files from the target worktree. For an **external provider** (a hosted model),
+material sent to or read by that worker leaves the machine. The routing policy controls which
+configured provider may serve an item's declared sensitivity; it is not yet a content-DLP
+guarantee.
 
 ## Sensitivity tiers (fail-closed routing, enforced per item)
 
@@ -29,17 +31,16 @@ The provider registry **hard-gates** selection on it:
 If no allowed provider is healthy, the item waits or parks — it is never quietly routed to a
 disallowed one.
 
-**Honest status (v0.1):** provider resolution is now **per-item and fail-closed at every routing
-and build call site**. The reactor routes each captured item through a provider re-resolved against
-*that item's own* sensitivity; the dispatch builder and the merge-review judge each resolve against
-the most restrictive sensitivity in the build group; and an unknown/garbage sensitivity value is
-treated as `private` (the most restrictive tier), never quietly widened. When no allowed, healthy
-provider exists for an item's tier, the item **waits or parks — it is never routed to a disallowed
-provider**. The only sites that still name a fixed `internal` tier are the plane-level health
-*readouts* (the SLO board, the `slo`/`brief` CLI status lines), which read on-disk health markers
-and send no item or repo material to any provider — each is annotated in code as such.
+**Honest status (v0.1):** the provider registry resolves item-bearing router, reply, build, and
+pathology work against the item's sensitivity (or a build group's strictest sensitivity), and an
+unknown/garbage value is treated as `private`, never quietly widened. Scout and the dispatch
+judge reuse the already selected builder provider rather than selecting an independent
+stage-specific provider. When a resolution point has no allowed, healthy,
+capability-compatible provider, work waits, parks, or fails closed. Plane-level health
+*readouts* use the `internal` chain only to inspect on-disk provider health markers; they send no
+item or repo material.
 
-The **remaining** work before "private never leaves the machine" is a provable end-to-end
+The **remaining** work needed to make "private never leaves the machine" a provable end-to-end
 *content* guarantee (not just routing) is the pre-egress content scan below — a deterministic
 secret/credential check on any prompt bound for a non-local provider. Routing is fail-closed; the
 payload-content guard is still roadmap.
@@ -48,7 +49,7 @@ Fallbacks are **ordered chains per tier** (the registry walks the chain, skippin
 providers):
 
 ```jsonc
-"fallbackChains": {
+"chains": {
   "internal": ["claude-cli", "ollama"]   // degrade to local rather than to a different cloud
 }
 ```
@@ -59,22 +60,28 @@ inherits it. One line makes an entire codebase local-only by construction.
 
 ## Multi-model customization (easy default, full control)
 
-**Default: one provider for everything.** A fresh install with a single configured provider works
-end-to-end with zero routing config.
+**Default exercised path: one provider.** A fresh plane uses one authenticated Claude CLI worker
+for public/internal routing and builds with no additional provider-chain configuration. Private
+items require an allowed local provider with the capability needed by that stage; otherwise they
+wait or park rather than falling through to Claude.
 
-**Customize by role** — different stages have different stakes and costs:
+**Customize models by stage** — different stages have different stakes and costs:
 
 ```jsonc
 "models": {
-  "scout":  "haiku",    // cheap discovery
-  "builder": "sonnet",  // the volume lane
-  "judge":  "opus"      // the quality gate reads, it doesn't write
-}
+  "router": "sonnet",
+  "builderDefault": "sonnet"
+},
+"scout": { "model": "haiku" },
+"judge": { "mode": "advisory", "model": "sonnet" },
+"pathology": { "model": "opus" }
 ```
 
-**Customize by provider lane** — e.g. a conserved second-opinion quota used only for review-stage
-consults, never for build volume; a local model for private targets and as the degraded-mode
-fallback.
+Provider chains are configured by sensitivity, not by stage. In the dispatch path, scout and
+judge use the builder's selected provider; the judge is advisory and cannot block a merge.
+Codex can be used manually as a conserved second opinion, but there is no automatic Codex review
+stage. A local provider can be selected for private work or added explicitly as a degraded
+fallback where its capabilities are sufficient.
 
 **Or let measurement decide** — eval-driven routing tracks each model's first-pass merge rate and
 cost per spec-size bucket from the ledger's own trajectory records, and can run:
@@ -83,8 +90,10 @@ cost per spec-size bucket from the ledger's own trajectory records, and can run:
 - `active` — picks the best measured model, ties broken by cost, with a bounded exploration rate
   so cheaper models get a chance to earn samples.
 
-Every provider call lands usage in the ledger (tokens, and quota-% for subscription-metered
-providers), so "which model is actually earning its keep" is a projection, not a feeling.
+Instrumented runs can land token/cost usage in the ledger, and subscription collectors add quota
+readings. Coverage is incomplete: Codex adapter calls do not currently emit `cost.usage`, and the
+effective reasoning effort is not recorded per call. Treat the usage projection as observed
+telemetry, not a complete accounting of every provider invocation.
 
 ## Egress guards (roadmap, in order)
 
@@ -99,5 +108,6 @@ providers), so "which model is actually earning its keep" is a projection, not a
 ## What this is not
 
 Not a DLP product, not a sandbox escape guarantee, and not a substitute for repo hygiene (don't
-commit secrets). It is one enforced answer to one question: **which of my models is allowed to
-see which of my projects — and does the record prove that's what happened.**
+commit secrets). Today it enforces provider eligibility from declared sensitivity at its
+resolution points; proving that sensitive content never escaped requires the roadmap pre-egress
+guard.

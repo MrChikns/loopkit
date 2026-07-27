@@ -33,6 +33,10 @@ test('IntentComposer: halted renders a notice that explains itself', () => {
     seen.add(what);
   }
   assert.equal(seen.size, REQUIRED_TEACHING.length, 'every teaching point must be exercised');
+  assert.match(html, /scheduler that launches the beats/i, 'arming belongs in the scheduler environment');
+  assert.match(html, /LOOPKIT_HOME/, 'standalone arming must name the plane-home selector');
+  assert.match(html, /\$LOOPKIT_HOME\/config\/loopkit\.json/, 'standalone config source must be explicit');
+  assert.doesNotMatch(html, /\.ai\/loops\/config\.env/, 'must not assume an embedded repo layout');
 });
 
 test('IntentComposer: the notice never implies the halt expires or that running work stopped', () => {

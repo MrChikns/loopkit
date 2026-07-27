@@ -1,7 +1,8 @@
 # loopkit event model — targets, plane-home, and the multi-target contract
 
-Status: v0.1 design. Single-target preview ships first; `targetId` is in every
-contract from birth so one-to-many is an activation, not a migration.
+Status: v0.1 design. Single-target preview ships first. Target registration and new
+`item.captured` data can carry a stable `targetId`; the fold retains that identity on the item
+projection so downstream item events do not have to repeat it.
 
 ## The two repos
 
@@ -13,7 +14,7 @@ contract from birth so one-to-many is an activation, not a migration.
   <plane-home>/
     config/loopkit.json     # plane-level config: providers, beats, models, defaults
     targets/<targetId>.json # registration record (projection convenience; ledger is truth)
-    ledger/                 # ONE ledger, monthly segments; every event carries targetId
+    ledger/                 # ONE ledger, monthly segments; item target is projected by the fold
     runs/<targetId>/        # worker logs, exit files, scratch — namespaced per target
   ```
 
@@ -41,7 +42,7 @@ The generalized plane/target boundary, lifted to N targets:
     "escalationPatterns": []          // risk axis: always park for the operator
   },
   "acceptance": { "tiers": { /* per-tier acceptance windows */ } },
-  "promptsDir": "",                   // optional per-target prompt overrides
+  "promptsDir": "",                   // reserved; parsed but not consumed by the v0.1 runtime
   "buildTimeoutMinutes": 45
 }
 ```
@@ -56,9 +57,9 @@ The generalized plane/target boundary, lifted to N targets:
   `target.manifest-updated { targetId, manifestHash }` — never mutates.
 - **Identity ≠ name.** `targetId` is an opaque id **minted once** at first registration; `name`
   is a mutable display handle. Renaming a target never changes its identity, and two targets may
-  even share a name without colliding. Nothing downstream (fold keys, event fields, worktree and
-  run paths) may key on `name`. (v0.1 implementation note: the single-target preview still keys
-  by name — minting the id is the first step of multi-target activation.)
+  even share a name without colliding. Runtime lookup and target-specific worktree/run paths use
+  the projected id where available; downstream item events need not restamp it. (The mutable name
+  remains on captures for display and backward compatibility.)
 - **Projection** `TargetBoard`: per-target status (registered · active items · last build ·
   health), derived by the one fold.
 
@@ -86,11 +87,11 @@ contract is pinned now so activation is additive):
 - **Command** `loopctl new [--target <name>] "<text>"` — `--target` optional while exactly one
   target is registered (the single-target preview); required once N>1. Explicit selection first;
   natural-language routing is a later milestone.
-- **Event** `item.captured { targetId, source, text }` — and **every** downstream event on the
-  item (`item.queued`, `item.routed`, `build.dispatched`, `gate.passed|failed|parked`,
-  `item.merged`, `item.accepted`, `msg.out`, …) carries the item's `targetId`. The fold keys work
-  items by `(targetId, itemId)`; item ids stay globally unique (`WI-NNN` counter is plane-scoped,
-  not per-target, so cross-target references stay unambiguous).
+- **Event** `item.captured { targetId?, target?, source, text }` — new targeted captures stamp the
+  stable id and display name. Downstream events (`item.queued`, `build.dispatched`, `gate.*`,
+  `item.merged`, `msg.out`, …) are still addressed by the globally unique `WI-NNN` subject and
+  usually omit target fields; the fold inherits target identity from the capture onto the item
+  projection. Legacy captures that carry only the name resolve through the target registry.
 
 ### Build execution
 - Dispatch resolves the item's target, creates the worktree **from the target repo** (prefix from
@@ -119,8 +120,9 @@ contract is pinned now so activation is additive):
   approve/reject). The fold merges it onto `mergeCertification.portability`, last-writer-wins —
   any amendment (including `none`) also silences the nudge, since the nudge's dedup key is simply
   "does `cert.portability` have a value".
-- `stepPortabilityPromotion` (reactor) is unchanged: it already re-reads `cert.portability` every
-  beat, so the very next beat after an amendment promotes the sibling on the named target.
+- `stepPortabilityPromotion` (reactor) re-reads `cert.portability`, but the feature is staged
+  behind `portabilityPromotion.enabled` and defaults **off**. Only an explicitly enabled plane
+  captures the sibling on a subsequent beat.
 
 ## Plane topology — one default plane; detached planes; never federation
 
@@ -135,16 +137,17 @@ from the default console is the feature, not a gap. Moving a project between pla
 `target export` into the fresh plane-home. There is **no cross-plane aggregation, discovery, or
 federated console**; anyone needing a unified view of two planes should merge them into one.
 
-**Event scope pin:** plane-scoped events (provider quota, plane health, doctor) carry an explicit
-`targetId: null` — never a missing field. The missing-field → `defaultTarget` fallback below is
-strictly the legacy-ledger upgrade path; new writers always set `targetId` (an id or null), so a
-`target export` never drags plane noise along.
+**Event scope pin:** target identity is data on target registration/capture and projected item
+state, not a universal envelope field. Plane-scoped events (provider quota, plane health, doctor)
+remain distinguishable by their event type and non-work-item subject (for example `system`);
+they do not need a fabricated `targetId: null`.
 
 ## Compatibility & migration
 
-- Events with **no `targetId`** (a ledger written by a pre-multi-target deployment) fold as
-  `targetId = config.defaultTarget` — a plane-level config key. No rewrite of any existing
-  ledger, ever.
+- Items whose capture carries **no target stamp** can fold with
+  `targetId = config.defaultTarget` — a caller-supplied compatibility option. The fold can also
+  resolve a name-only legacy capture, or coalesce an unstamped item onto the sole registered
+  target. No rewrite of any existing ledger is required.
 - An embedded single-target deployment keeps running its in-repo ledger untouched. Parity check
   before any cutover: point the packaged fold (read-only) at the live ledger with
   `defaultTarget` set to that deployment's name and diff `summary --json` against the embedded

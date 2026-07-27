@@ -140,6 +140,56 @@
   text-align: right;
 }
 
+/* Agent runtime configuration ────────────────────────────────────────────── */
+
+.opsui-plane-obs__runtime-note {
+  max-width: 1040px;
+  margin: 0 0 14px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.opsui-plane-obs__runtime-scroll {
+  overflow-x: auto;
+}
+
+.opsui-plane-obs__runtime-table {
+  min-width: 1040px;
+}
+
+.opsui-plane-obs__runtime-table td {
+  padding-right: 18px;
+  vertical-align: top;
+}
+
+.opsui-plane-obs__runtime-table td:last-child {
+  padding-right: 0;
+}
+
+.opsui-plane-obs__runtime-primary {
+  display: block;
+  color: var(--text);
+  font-weight: 560;
+}
+
+.opsui-plane-obs__runtime-detail {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.opsui-plane-obs__runtime-stage {
+  min-width: 96px;
+  white-space: nowrap;
+}
+
+.opsui-plane-obs__runtime-stage .opsui-status {
+  margin-top: 5px;
+}
+
 /* Empty-state message ────────────────────────────────────────────────────── */
 
 .opsui-plane-obs__empty {

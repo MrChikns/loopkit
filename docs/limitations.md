@@ -79,14 +79,15 @@ says exist are checked the same way, against the symbol that backs them.
 
 ## Integration-lane invariants (target lane)
 
-- **The target lane does not re-gate after integration.** The engineering lane will not
+- **The target lane does not re-gate the combined destination state.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
   (`packages/core/src/beats/dispatch.ts:4443`<!--cite:postIntegrationRegate-->). The target build lane
-  does not carry that invariant: it gates once, on its own branch, and merges. *Bounded:* it is an
-  opt-in path that runs against the target's own repo and still gates before merging. *Matters when:*
-  the destination branch advances during the build — the merged result is then a combination nothing
-  ever tested. Porting the engineering lane's terminal to the target lane is the fix.
+  does not carry that invariant: it gates its isolated target branch once and then merges it into
+  the declared destination without a post-integration re-gate. *Bounded:* it is an opt-in path that
+  runs against the target's own repo and still gates before merging. *Matters when:* the destination
+  branch advances during the build — the merged result is then a combination nothing ever tested.
+  Porting the engineering lane's terminal to the target lane is the fix.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
@@ -153,12 +154,11 @@ says exist are checked the same way, against the symbol that backs them.
 
 ## Provider content guarantee (routing done, payload not)
 
-- **Fail-closed provider resolution is routing-level, not content-level.** As of this hardening
-  pass, provider resolution is per-item/per-group and fail-closed at **every** content-bearing call
-  site — the engineering group, the planning lane, the target build lane, the operator-reply
-  engagement lane, and the failure-pathology lane all resolve against the item's
-  own (or the group's strictest) sensitivity and refuse to route a private-only item to a
-  disallowed provider. What is **not** yet in place is a *pre-egress content scan*: a deterministic
+- **Fail-closed provider resolution is routing-level, not content-level.** Item-bearing router,
+  reply, build, and pathology resolution uses the item's own (or a build group's strictest)
+  sensitivity and refuses to route a private-only item to a disallowed provider. Scout and the
+  dispatch judge reuse the selected builder provider; there is no independent provider-per-stage
+  policy today. What is **not** yet in place is a *pre-egress content scan*: a deterministic
   secret/credential/PII check on the prompt payload actually bound for a non-local provider.
   *Bounded:* routing can no longer send a private item to a cloud provider, so the tier boundary is
   enforced. *Matters when:* an *internal*-tier item (legitimately cloud-routed) carries a secret in
@@ -211,9 +211,10 @@ says exist are checked the same way, against the symbol that backs them.
 
 ## Re-planning is intake-only (a running build worker cannot re-scope its item)
 
-- **Decomposition happens before a builder runs, and never after.** Routing classifies an oversized
-  intent and queues a planning-lane child that splits it; that is the only automatic path into
-  decomposition. A **build** worker still has no channel to re-*queue* work: its toolset grants no
+- **Decomposition happens before a builder runs, and never after.** Routing first parks an
+  oversized intent for an operator decision. Only after the operator approves/unparks it can a
+  fresh routing pass classify it as `parkKind:decomposition` and queue the planning-lane child
+  that splits it. A **build** worker still has no channel to re-*queue* work: its toolset grants no
   capture verb, and it cannot put anything into the build queue. So a worker that discovers mid-build
   that its item is mis-scoped does the instructed thing: it ships the smallest safe slice and states
   the remainder in its manifest. *Bounded:* the item still gates and merges normally, and the partial

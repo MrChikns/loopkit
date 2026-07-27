@@ -18,11 +18,12 @@ sentence, from wherever they already are — and they **answer the few decisions
 Everything between is the plane.
 
 Intent has one door. A feature, a fix, a change of mind — all arrive the same way (`loopctl new
-"<text>"`), get event-modeled, queued, built, and gated through one pipeline. There is no separate
-ticket ritual, no branch ceremony, no "which system do I file this in" — the transport is
-incidental (terminal, a console box, a chat bridge), and every intent lands as the same
-`item.captured` event and routes identically<!--exists:oneDoorCapture-->. The
-[README](../README.md) opens on exactly this: one sentence in, a merged and tested commit out.
+"<text>"`), land as `item.captured`, and enter the same routing pipeline. A build-classified intent
+continues through queue, build, and gate; an answer or park route stops earlier by design. There is
+no separate ticket ritual, no branch ceremony, no "which system do I file this in" — the transport
+is incidental (terminal, a console box, a chat bridge), and every intent captures and routes through
+the same contract<!--exists:oneDoorCapture-->. The [README](../README.md) opens on the build-shaped
+case: one sentence in, a merged and tested commit out.
 
 Attention has one window. The operator does not chase status across chat threads, dashboards, and
 log files; they watch one board — a projection of the ledger — that shows what shipped, what's
@@ -66,7 +67,7 @@ Put that diagram next to this repo and the nodes line up:
 | Reference node | loopkit |
 |---|---|
 | **In** | operator intent → `item.captured`, whatever the transport |
-| **Orchestrator** *(decompose)* | the reactor's grooming beat — an LLM event-models raw intent into a work item with a free-prose `spec` and a `Touches` set |
+| **Orchestrator** *(classify)* | the reactor router — an LLM event-models raw intent into a work item with a free-prose `spec` and a `Touches` set; oversized work parks for later planning-lane decomposition |
 | **Orchestrator** *(delegate)* | the dispatch picker — **deterministic, no model**: `Touches`-disjoint grouping under claims |
 | **Worker LLM calls** | build agents, one git worktree each |
 | **Synthesizer** | the target's gate, then `git merge --no-ff` — per item, serial |
@@ -74,17 +75,16 @@ Put that diagram next to this repo and the nodes line up:
 
 Two divergences from the reference carry the whole method.
 
-**Workers return commits, not text — so the synthesizer stops being a model.** In the reference
+**Workers return scoped worktree changes, not text — so the synthesizer stops being a model.** In the reference
 workflow, parallel calls produce overlapping opinions about the same artifact, and an LLM
 aggregator is needed to reconcile them. Here, disjointness is enforced *before* the work: two
 in-flight builds may never share a `Touches` set<!--exists:touchesDisjointInflight-->, so no two
-workers can produce two answers to the same file. Each worker side-effects into its own branch and
-hands up a verdict, not prose.
-Combining is then git's job and judging is the gate's job — both mechanical, both replayable. The
-aggregator does not get replaced by a better aggregator; it **disappears**, because scheduling
-already did its work. Where genuine multi-perspective judgment *is* wanted, it is applied to
-decisions — an independent second opinion with a named arbiter — never as a synthesis step over
-worker output.
+workers can produce two answers to the same file. Each worker changes its own worktree and returns a
+structured manifest; dispatch stages and commits only the in-scope output. The target gate then
+provides deterministic merge proof, followed by an advisory LLM judge before merge. That judge
+records review evidence and may raise the later acceptance tier, but never blocks the merge.
+Combining is still git's job, so an LLM aggregator does not get replaced by a better aggregator; it
+**disappears**, because scheduling already did its work.
 
 **The orchestrator holds no context.** This is the real architectural difference, and it is the
 one that makes the difference between a session and a plane. In the reference workflow the
@@ -129,8 +129,9 @@ boundary is explicit, configurable policy, not a vibe.
 That boundary is the tiered-acceptance model in the [README](../README.md#how-it-works): every
 merged item is classified by *what it actually changed* — the real diff at merge time, not the
 item's own declared metadata<!--exists:mergeDiffTiering-->, so a change that touched real code can
-never launder itself as "nothing changed." Framework-internal, gate-proven work ships silently; a
-declared product surface **surfaces for your test**; anything touching money, auth, or migrations,
+never launder itself as "nothing changed." Framework-internal, gate-proven work auto-accepts
+silently; a declared product surface **surfaces for your test**; anything touching money, auth, or
+migrations,
 or anything a quality judge failed, **waits for a human, forever**<!--exists:mustTierWaitsForHuman-->.
 Trust is two orthogonal axes, not one list —
 *merge-trust* (what may auto-merge) and *test-visibility* (what you want to eyeball) are declared
@@ -155,14 +156,16 @@ boundaries" is now a deterministic write, not a hope that someone reads the thre
 The whole point of routing attention is that the plane **stops** for the calls a human should make
 — and stops *well*. Two things are non-negotiable at the boundary.
 
-First, **costly-and-irreversible always parks.** Before anything destructive, irreversible, or
-outward-facing — a merge to money/auth/a migration, a publish, a spend, an external send — the
-plane does not act on its own judgment; it parks the item (never silently auto-completes it) and
-raises it to the human. [ADR-005](decisions/ADR-005-self-hosting.md) draws this line in its
-sharpest form: the plane may build, gate, and merge improvements to *its own framework* like any
-other target — but self-hosting is **not self-publishing**. An autonomous system improving its own
-engine is healthy; one pushing its own code to a public remote without a human at the boundary is
-not. Merging is a reversible local act; publishing is not — so the irreversible one parks.
+First, **costly-and-irreversible is an operating rule, not complete semantic authorization.**
+Before anything destructive, irreversible, or outward-facing — money/auth/a migration, a publish,
+a spend, an external send — the operator should route or park the item for a human decision. The
+runtime does not infer every such meaning from prose. Its narrow mechanical guard is the optional,
+default-off `preMergeRiskHold`: configured path patterns can park a `must`-class diff before merge;
+ordinary acceptance tiering is computed after merge and controls attention, not authorization.
+[ADR-005](decisions/ADR-005-self-hosting.md) draws the operating line in its sharpest form: the plane
+may build, gate, and merge improvements to *its own framework* like any other target — but
+self-hosting is **not self-publishing**. Publishing, spending, and external sends still require an
+explicitly configured boundary and human procedure rather than an assumed semantic guard.
 
 Second, **an escalation is an intent, never a bare question.** "Should I do X?" is malformed —
 it hands the operator a research task and an unstated recommendation. A well-formed escalation
@@ -232,14 +235,16 @@ clean/minor/major/blocker read stays the operator's judgement — the plane does
 events, and a doc that implied otherwise would be selling a projection nobody built.
 
 This reframes success as *attention saved per accepted slice*, not *throughput*. The
-[trust-boundaries](trust-boundaries.md) routing model earns its keep by this measure: every
-provider call lands its usage in the ledger<!--exists:usageInLedger-->, so "which model is actually
-earning its keep" is a projection you can read, not a feeling — and eval-driven routing picks the
-model with the highest measured first-pass merge rate<!--exists:evalDrivenRouting-->, not the
-fastest one. The [vision](vision.md) states the doctrine directly: *unattended, optimize for
-trust per token; attended, get out of the way.* A plane that merged a hundred items but handed you
-three blockers and a rework had a bad day, however green its dashboards — and the honest metric is
-the one that says so. Machine counts are diagnostics; the operator's felt experience is the score.
+[trust-boundaries](trust-boundaries.md) routing model earns its keep by this measure: a provider
+call lands usage in the ledger when its adapter returns machine-readable usage
+data<!--exists:usageInLedger-->. Claude does; the current Codex text adapter does not, so economics
+are partial across all built-ins rather than a complete cross-provider account. Within the measured
+set, eval-driven routing picks the model with the highest first-pass merge
+rate<!--exists:evalDrivenRouting-->, not the fastest one. The [vision](vision.md) states the doctrine
+directly: *unattended, optimize for trust per token; attended, get out of the way.* A plane that
+merged a hundred items but handed you three blockers and a rework had a bad day, however green its
+dashboards — and the honest metric is the one that says so. Machine counts are diagnostics; the
+operator's felt experience is the score.
 
 ## What this method is not
 

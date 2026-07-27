@@ -477,16 +477,18 @@ test('renderAnalytics: provider-chain card renders the circuit-breaker states wi
     ...PROBE_EXTRAS,
     providerHealth: { status: 'primary-healthy', primaryProvider: 'claude-cli', activeProvider: 'claude-cli' },
   });
-  assert.match(healthy, /Provider chain/);
-  assert.match(healthy, /primary healthy/);
+  assert.match(healthy, /Provider breaker markers/);
+  assert.match(healthy, /primary marker clear/i);
   assert.match(healthy, /opsui-status--success/);
-  assert.match(healthy, /Interval: live — resolved from on-disk provider health markers/);
+  assert.match(healthy, /Interval: live — resolved from on-disk circuit-breaker markers/);
+  assert.match(healthy, /does not test authentication, quota, network access, or live provider API readiness/i);
+  assert.doesNotMatch(healthy, /LLM provider health/i);
 
   const fallback = renderAnalytics(fold([]), NOW, [], URL_DEFAULT, {
     ...PROBE_EXTRAS,
     providerHealth: { status: 'fallback-active', primaryProvider: 'claude-cli', activeProvider: 'ollama' },
   });
-  assert.match(fallback, /running on fallback/);
+  assert.match(fallback, /fallback selected/i);
   assert.match(fallback, /opsui-status--warning/);
   assert.match(fallback, /ollama/);
 
@@ -494,13 +496,14 @@ test('renderAnalytics: provider-chain card renders the circuit-breaker states wi
     ...PROBE_EXTRAS,
     providerHealth: { status: 'all-unhealthy', primaryProvider: 'claude-cli' },
   });
-  assert.match(dead, /no healthy provider/);
+  assert.match(dead, /chain marked blocked/i);
   assert.match(dead, /opsui-status--critical/);
 });
 
 test('renderAnalytics: provider-chain card reads honest unknown when no chain is resolvable', () => {
   const html = renderAnalytics(fold([]), NOW, [], URL_DEFAULT, PROBE_EXTRAS);
-  assert.match(html, /Provider health unknown/);
+  assert.match(html, /Breaker marker state unknown/);
+  assert.doesNotMatch(html, /Provider health unknown/);
 });
 
 // ---------------------------------------------------------------------------
@@ -646,10 +649,13 @@ test('renderAnalytics: carries a native-details how-to-read legend defining pane
   assert.match(html, /<details class="analytics-legend">/);
   assert.match(html, /How to read this page/);
   assert.match(html, /Loop labels/);
-  // The autonomy kill-switch legend row — env var + where it lives.
+  // The autonomy kill-switch legend row — scheduler env + standalone plane-home config.
   assert.match(html, /Operational controls/);
   assert.match(html, /LOOPKIT_AUTONOMY/);
-  assert.match(html, /\.ai\/loops\/config\.env/);
+  assert.match(html, /scheduler environment that launches the beats/i);
+  assert.match(html, /LOOPKIT_HOME/);
+  assert.match(html, /\$LOOPKIT_HOME\/config\/loopkit\.json/);
+  assert.doesNotMatch(html, /\.ai\/loops\/config\.env/);
   // No client JS involved — the legend must be a native details element, no script hooks.
   assert.ok(!html.includes('data-legend'));
 });
