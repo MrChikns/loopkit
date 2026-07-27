@@ -145,7 +145,7 @@ export function threadCard(thread: ThreadCard, replyNextPath = '/threads'): stri
     `</summary>` +
     `<div class="opsui-threads__card-body">` +
     `<div class="opsui-threads__card-hdr">` +
-    `<a class="opsui-threads__card-label" href="${esc(detailHref)}">${esc(thread.label)}</a>` +
+    `<a class="opsui-threads__card-label" href="${esc(detailHref)}" aria-label="Open ${esc(thread.label)} details">Open details →</a>` +
     `</div>` +
     parkSubtitle +
     supersededSubtitle +

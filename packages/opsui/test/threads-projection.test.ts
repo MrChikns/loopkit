@@ -40,6 +40,12 @@ test('no externalRef links straight at the item hub (same destination the WI-sty
   assert.match(html, /href="\/item\/WI-907"/);
 });
 
+test('expanded card keeps a detail link without repeating the WI label below its summary', () => {
+  const html = threadCard(baseCard());
+  assert.match(html, /aria-label="Open WI-907 details">Open details →<\/a>/);
+  assert.doesNotMatch(html, /opsui-threads__card-label[^>]*>WI-907<\/a>/);
+});
+
 // Regression: toCard() used to set label to a channel-style externalRef ('console'), which
 // displaced the WI id in the id-chip slot. label must always be the id; the channel renders
 // as a separate small tag ahead of the title instead.
