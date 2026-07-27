@@ -16,7 +16,7 @@ says exist are checked the same way, against the symbol that backs them.
 ## Ledger durability & concurrency
 
 - **Each line is durable; the transition is not, and a torn line does not stop the fold**
-  (`packages/core/src/ledger.ts:168`<!--cite:ledgerAppendWrite-->). Every append writes and then
+  (`packages/core/src/ledger.ts:249`<!--cite:ledgerAppendWrite-->). Every append writes and then
   `fsync`s before closing the handle, so a line that lands is whole and survives a process crash or
   an OS panic. Two things that barrier does *not* buy. **Not transition atomicity:** a multi-event
   batch is N separate write-and-sync cycles under one lock, so a crash, kill or `ENOSPC` part-way
@@ -26,7 +26,7 @@ says exist are checked the same way, against the symbol that backs them.
   (commit-the-transition events last, re-appends idempotent). **Not power-loss durability on macOS:**
   `fsync(2)` there does not flush the drive's own write cache — that needs `F_FULLFSYNC`, which Node
   does not expose. The amplification is still on the read side: the loader **skips a corrupt line and
-  continues** (`packages/core/src/ledger.ts:275`<!--cite:ledgerCorruptSkip-->), so a torn write does
+  continues** (`packages/core/src/ledger.ts:356`<!--cite:ledgerCorruptSkip-->), so a torn write does
   not halt the fold — it silently folds an incomplete history while every later event still applies.
   *Bounded:* the lock serializes writers and id-dedupe on load makes re-append idempotent. **The
   shrunk-ledger regression guard is not a mitigation for this** — it compares a segment's max valid id
@@ -37,23 +37,25 @@ says exist are checked the same way, against the symbol that backs them.
   saying out loud — recovery is from the local checkpoint refs, and the stderr warning is the only
   signal you get.
 
-- **The ledger lock carries no owner/PID token; staleness is inferred from the clock**
-  (`packages/core/src/ledger.ts:68`<!--cite:ledgerLockAcquire-->). A contender spins for
-  **10**<!--pin:lockSpinSeconds--> seconds waiting for the lock, then judges it: a lock older than
-  **120**<!--pin:lockStaleSeconds--> seconds is assumed to belong to a dead holder and is reclaimed.
-  Those are two independent constants (WI-197); they used to be one, which made the "the holder is
-  alive, respect it" branch near-unreachable — the staleness test is only *reached* once the spin has
-  given up, so a contended lock was by construction always at the threshold and a live-but-slow
-  holder was reaped rather than respected. Separating them restores that branch. **Still open:**
-  nothing refreshes the lock's mtime while it is held, so age means "the holder *started* a while
-  ago", not "the holder has stopped making progress" — and the lock still names no owner. *Bounded:*
-  real transactions are a fold plus a few appends, sub-second in practice, and the staleness window
-  is now twice the slowest (60 s) beat interval, so no live beat loses its lock merely for being
-  slow. *Matters when:* a transaction genuinely runs past two minutes while alive — its lock can
-  still be reaped and two writers interleave. Writing an owner token (pid + start time) into the lock
-  dir and reclaiming only when that pid is provably gone replaces the inference with a fact; it
-  remains the known next step, and is strictly better than an mtime heartbeat, which would prove only
-  that *something* is touching the directory.
+- **Same-host lock reclaim is now fact-based (WI-200); the clock is a cross-host backstop only**
+  (`packages/core/src/ledger.ts:142`<!--cite:ledgerLockAcquire-->). The lock dir is stamped at
+  acquire time with an owner token (pid + the holder's own wall-clock start time). A contender
+  still spins for **10**<!--pin:lockSpinSeconds--> seconds before judging a contended lock, but the
+  judgment itself no longer trusts the lock's age: it reclaims only when `process.kill(pid, 0)`
+  proves the recorded pid is gone, or the pid answers but the OS's own start time for it no longer
+  matches the recorded one (a *recycled* pid — a different, later process now holds that number, so
+  the original holder is provably gone too). Neither check needs the holder to still be reachable or
+  cooperative, and — deliberately, per WI-197's finding on the previous approach — there is still no
+  heartbeat/refresh timer: one was rejected as an interval-leak risk across the ~20 call sites that
+  can exit mid-transaction. **Still open:** the pid + start-time check only works on the SAME host —
+  a lock held by a process on a different machine (e.g. NFS-shared ledger dir) can't be probed this
+  way, so `LOCK_STALE_MS` (**120**<!--pin:lockStaleSeconds--> seconds) remains as the fallback for
+  that case, and for the rare local case where the owner token itself is missing or unreadable.
+  *Bounded:* on a single host — the only configuration this plane runs in today — a crashed or killed
+  holder is reclaimed on the very next contention, not after a two-minute wait, and a slow-but-alive
+  holder is never reaped merely for being slow, no matter how long it runs. *Matters when:* the
+  ledger dir is ever shared across hosts — that path still has the old two-minute exposure window
+  this whole entry used to describe.
 
 ## Event schema evolution
 
