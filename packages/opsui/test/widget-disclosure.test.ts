@@ -31,4 +31,7 @@ test('widget disclosure has visible keyboard focus and collapsed-state styling',
   assert.match(css, /\.opsui-widget-controls__button:focus-visible/);
   assert.match(css, /\[data-opsui-widget-state="collapsed"\]/);
   assert.match(css, /cursor:\s*pointer/);
+  assert.match(css, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto\s+minmax\(0,\s*1fr\)/);
+  assert.match(css, /@media \(max-width:\s*760px\)/);
+  assert.match(css, /grid-column:\s*1\s*\/\s*-1/);
 });
