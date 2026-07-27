@@ -22,6 +22,7 @@ test('widget headers and the page-wide control share one expansion path', async 
   assert.match(js, /toggleAll\.addEventListener\('click'/);
   assert.match(js, /setExpanded\(widget, shouldExpand, true\)/);
   assert.match(js, /event\.key !== 'Enter' && event\.key !== ' '/);
+  assert.match(js, /interactive && interactive !== header/, 'the header itself must not be mistaken for an interactive child');
   assert.match(js, /new MutationObserver/, 'live card replacements must rejoin the disclosure system');
 });
 

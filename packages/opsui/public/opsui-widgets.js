@@ -96,7 +96,8 @@
 
   function interactiveTarget(target, header) {
     if (!target || target === header || !target.closest) return false;
-    return Boolean(target.closest('a, button, input, select, textarea, summary, [role="button"]'));
+    var interactive = target.closest('a, button, input, select, textarea, summary, [role="button"]');
+    return Boolean(interactive && interactive !== header);
   }
 
   function ensureControls() {
