@@ -2237,6 +2237,11 @@ test('POST /intent (multipart) — a body over the multipart cap is refused with
         redirect: 'manual',
       });
       assert.equal(res.status, 413);
+
+      // The oversized upload is drained without retaining its excess bytes, so it cannot leave
+      // the request promise pending or poison the server for the next request.
+      const health = await fetch(`${base}/command`);
+      assert.equal(health.status, 200);
     }),
   );
 });

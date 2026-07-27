@@ -1398,17 +1398,28 @@ function originAllowed(req: IncomingMessage, trustedHosts: ReadonlySet<string>):
 
 /** Read the request body up to `cap` bytes. Throws 'too-large' when the cap is exceeded. */
 async function readBodyBuffer(req: IncomingMessage, cap: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
-    if (total > cap) {
-      throw new Error('too-large');
-    }
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks);
+  return await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let tooLarge = false;
+
+    req.on('data', (chunk: Buffer) => {
+      if (tooLarge) return; // keep draining without retaining attacker-controlled bytes
+      total += chunk.length;
+      if (total > cap) {
+        tooLarge = true;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.once('end', () => {
+      if (tooLarge) reject(new Error('too-large'));
+      else resolve(Buffer.concat(chunks));
+    });
+    req.once('aborted', () => reject(new Error('aborted')));
+    req.once('error', reject);
+  });
 }
 
 /** Read the request body up to MAX_BODY_BYTES. Throws 'too-large' when the cap is exceeded. */
