@@ -2512,11 +2512,17 @@ async function stepAutoApprove(
   try {
     const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
     const foldResult = fold(allEvents);
+    const pendingOperatorInputs = projectEngagement(allEvents).unansweredInputs;
 
     const events: ReturnType<typeof makeEvent>[] = [];
     let approved = 0;
     for (const rec of foldResult.items.values()) {
       if (rec.state !== 'parked') continue;
+      // Operator input newer than the live park wins over delegated approval. This guard is
+      // baseline-independent: a missing engagement baseline may make the reply loop dormant,
+      // but it must never turn an explicit "do not approve" into permission to merge.
+      if (pendingOperatorInputs.some((reply) =>
+        reply.item === rec.id && (!rec.parkedAt || reply.ts > rec.parkedAt))) continue;
       // Never re-enter an ops-park (belt-and-braces against a parkClass-survival ping-pong; the
       // fold side is guarded separately — this is the reactor-side guard).
       // Ops parks (merge-transient, no-commit, breaker, infra) are the plane's own health lane, not

@@ -181,6 +181,7 @@ test('projection: no baseline → dormant (nothing engaged, nothing held)', () =
     reply,
   ]);
   assert.equal(p.baselineTs, undefined);
+  assert.equal(p.unansweredInputs.length, 1, 'baseline-independent safety consumers still see the input');
   assert.equal(p.unanswered.length, 0);
   assert.equal(p.heldItems.size, 0);
 });

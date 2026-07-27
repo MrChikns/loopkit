@@ -456,6 +456,30 @@ test('auto-approve guard: an ops park is never auto-approved (even if its class 
   } finally { clean(base); }
 });
 
+test('auto-approve guard: unanswered operator input newer than the live park blocks delegated approval', async () => {
+  const base = tmp();
+  const repoRoot = join(base, 'repo');
+  const ledgerDir = join(base, 'ledger');
+  initRepo(repoRoot);
+  await appendEvents(ledgerDir, [
+    makeEvent('cli', 'WI-301', 'item.captured', { source: 'cli', text: 'x' }, iso(NOW - 5000)),
+    makeEvent('dispatch', 'WI-301', 'build.dispatched', { attempt: 1, pid: 1, branch: 'wi-301' }, iso(NOW - 4500)),
+    makeEvent('dispatch', 'WI-301', 'build.finished', { commit: 'abc' }, iso(NOW - 4400)),
+    makeEvent('reactor', 'WI-301', 'gate.parked', { reason: 'spine files: packages/engine/src/foo.ts' }, iso(NOW - 4000)),
+    makeEvent('reactor', 'WI-301', 'item.parked', { reason: 'needs-decision: spine files: packages/engine/src/foo.ts', parkKind: 'decision' }, iso(NOW - 3999)),
+    // No engagement baseline: the reply loop is dormant, but this explicit steer must still
+    // block the otherwise-delegated plane-only spine approval.
+    makeEvent('operator', 'WI-301', 'msg.in', { text: 'do not approve; the behavior is wrong' }, iso(NOW - 3000)),
+  ]);
+  try {
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, pidProbe: () => true, config: cfg() });
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'item.approved' && e.item === 'WI-301').length, 0,
+      'unanswered post-park operator input must block delegated approval');
+    assert.equal(fold(events).items.get('WI-301')!.state, 'parked');
+  } finally { clean(base); }
+});
+
 // ---------------------------------------------------------------------------
 // routing-wall grounding — a target-stamped item routes with cwd = the TARGET repo (not the
 // plane root); an operator-approved unpark is never re-parked for the same reason (no new evidence)

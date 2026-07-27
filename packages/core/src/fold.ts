@@ -1746,6 +1746,12 @@ export interface UnansweredReply {
 export interface EngagementProjection {
   /** Earliest engagement.baseline event ts (undefined ⇒ feature dormant, nothing engaged). */
   baselineTs: string | undefined;
+  /**
+   * Every unanswered operator input, including legacy pre-baseline messages. Consumers that
+   * protect a current transition can apply their own causation boundary (for example, only
+   * replies newer than the live park). The engagement loop itself still uses `unanswered`.
+   */
+  unansweredInputs: UnansweredReply[];
   /** Post-baseline operator replies with no outcome event referencing them (the reactor's work-list). */
   unanswered: UnansweredReply[];
   /**
@@ -1784,21 +1790,21 @@ export function projectEngagement(events: LedgerEvent[]): EngagementProjection {
     if (typeof irt === 'string' && irt) answered.add(irt);
   }
 
-  const unanswered: UnansweredReply[] = [];
-  if (baselineTs !== undefined) {
-    for (const ev of events) {
-      if (ev.type !== 'msg.in' || !WI_RE.test(ev.item)) continue;
-      if (!(ev.ts > baselineTs)) continue;      // at/before baseline ⇒ legacy-unresolved
-      if (answered.has(ev.id)) continue;         // already answered ⇒ deduped
-      const d = ev.data as Record<string, unknown>;
-      unanswered.push({
-        evId: ev.id,
-        item: ev.item,
-        text: typeof d['text'] === 'string' ? d['text'] : '',
-        ts: ev.ts,
-      });
-    }
+  const unansweredInputs: UnansweredReply[] = [];
+  for (const ev of events) {
+    if (ev.type !== 'msg.in' || !WI_RE.test(ev.item)) continue;
+    if (answered.has(ev.id)) continue;           // already answered ⇒ deduped
+    const d = ev.data as Record<string, unknown>;
+    unansweredInputs.push({
+      evId: ev.id,
+      item: ev.item,
+      text: typeof d['text'] === 'string' ? d['text'] : '',
+      ts: ev.ts,
+    });
   }
+  const unanswered = baselineTs === undefined
+    ? []
+    : unansweredInputs.filter((reply) => reply.ts > baselineTs);
 
   const heldItems = new Map<string, string>();
   // unanswered reply ⇒ agent's turn, hold — the EARLIEST reply ts is the hold onset.
@@ -1831,5 +1837,5 @@ export function projectEngagement(events: LedgerEvent[]): EngagementProjection {
     }
   }
 
-  return { baselineTs, unanswered, heldItems };
+  return { baselineTs, unansweredInputs, unanswered, heldItems };
 }

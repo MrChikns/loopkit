@@ -456,7 +456,7 @@ counter, so by the time a park happened the budget was already spent.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every reactor beat: orphaned-build detection, crashed-worker reaping, stale
-  session-claim reaping (`packages/core/src/beats/reactor.ts:3541`<!--cite:staleClaimReap-->), and a
+  session-claim reaping (`packages/core/src/beats/reactor.ts:3547`<!--cite:staleClaimReap-->), and a
   leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
@@ -510,7 +510,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4032`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4038`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -521,7 +521,7 @@ how often you have found something wrong.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:3685`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:3691`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier is
   never withheld: there is nothing to test, so plane health protects nothing for it.
 - **Your unanswered reply.** An item with an open reply or an unresolved proposal is held rather than
