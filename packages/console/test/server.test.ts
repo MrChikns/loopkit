@@ -2470,18 +2470,18 @@ for (const route of ALL_ROUTES) {
 
 }
 
-// The no-JS TopBar fallback twins are an old-shell affordance: the @loopkit/opsui TopBar
-// drives palette/intent/theme through its client shell module (data-opsui-shell hooks), so the
-// twin markup only renders on the legacy-shell routes. Progressive enhancement for the WRITE
+// The no-JS TopBar fallbacks are an old-shell affordance: the @loopkit/opsui TopBar
+// drives intent/theme through its client shell module (data-opsui-shell hooks), so the
+// fallback markup only renders on the legacy-shell routes. Progressive enhancement for the WRITE
 // verbs (intent/approve/reject/accept) is proven independently by the "No-JS verb sweep" tests
 // below — those plain form POSTs work on every shell with JS disabled.
 for (const route of LEGACY_SHELL_ROUTES) {
-  test(`GET ${route} — the no-JS TopBar fallback twins still render (legacy shell)`, async () => {
+  test(`GET ${route} — visible TopBar actions keep their no-JS fallbacks (legacy shell)`, async () => {
     await withLedger((ledgerDir) =>
       withServer(ledgerDir, async (base) => {
         const res = await fetch(`${base}${route}`);
         const body = await res.text();
-        assert.match(body, /class="opsui-topbar__palette opsui-topbar__nojs"/);
+        assert.doesNotMatch(body, /class="opsui-topbar__palette/);
         assert.match(body, /class="opsui-topbar__intent opsui-topbar__nojs"/);
         assert.match(body, /opsui-topbar__theme-form/);
       }),

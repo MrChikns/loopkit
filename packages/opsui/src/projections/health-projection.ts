@@ -162,21 +162,21 @@ function healActivityRegion(
   truncated = false,
 ): string {
   const badge = mode ? StatusBadge({ state: OPS_AUTONOMY_STATE[mode], label: OPS_AUTONOMY_LABEL[mode], size: 'sm' }) : '';
-  // The window filter sits on the title row next to the autonomy badge (WI-359 pattern:
-  // filters live in headerAside, never in the body).
   const picker = window ? WindowPicker({ active: window }) : '';
-  const aside = picker + badge;
+  // The mode is durable collapsed-state context, so it stays in the header. The time filter
+  // changes only the expanded feed and therefore lives immediately above that feed.
+  const filters = picker ? `<div class="opsui-health__healfilters">${picker}</div>` : '';
   const truncation = truncated
     ? `<p class="opsui-health__healtruncated">Showing the newest ${entries.length} events; more exist in this window.</p>`
     : '';
-  const body = entries.length
+  const feed = entries.length
     ? `<ul class="opsui-health__healfeed" role="list">${entries.map(healRow).join('')}</ul>${truncation}`
     : `<p class="opsui-empty">No self-heal activity in this window.</p>`;
   return Card({
     title: 'Self-heal activity',
     subtitle: 'heal.proposed / heal.executed / heal.escalated — most recent first',
-    ...(aside ? { headerAside: aside } : {}),
-    body,
+    ...(badge ? { headerAside: badge } : {}),
+    body: filters + feed,
   });
 }
 

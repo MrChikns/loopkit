@@ -1,10 +1,10 @@
-// Shell client module — progressive enhancement for the TopBar's Search / Drop-intent /
+// Shell client module — progressive enhancement for the TopBar's Drop-intent /
 // theme-toggle affordances plus the navigation rail's collapse toggle. The server always
 // renders a working no-JS twin (a real <a>/<form>) immediately after each `data-opsui-shell`
 // TopBar button (see console.css: the buttons render `display: none` until this module marks
 // the document ready). Without JS every twin still works and the rail stays at its server
 // (expanded) width; with JS, this module reveals the real buttons, hides the twins, and wires:
-//   • command palette   (button + Cmd/Ctrl+K, Esc to close, backdrop click)
+//   • command palette   (button + Cmd/Ctrl+K only when a palette trigger is rendered)
 //   • drop-intent modal (button + Cmd/Ctrl+I, Esc to close, backdrop click)
 //   • theme toggle       (button — submits the adjacent no-JS <form method="post"
 //                          action="/theme"> so the cookie stays the single source of truth;
@@ -20,6 +20,9 @@
   }
   function palette() {
     return document.querySelector('[data-opsui-shell="palette"]');
+  }
+  function paletteTrigger() {
+    return document.querySelector('[data-opsui-shell="palette-open"]');
   }
   function composer() {
     return document.querySelector('[data-opsui-shell="composer"]');
@@ -190,7 +193,9 @@
   document.addEventListener('keydown', function (event) {
     var mod = event.metaKey || event.ctrlKey;
     var key = (event.key || '').toLowerCase();
-    if (mod && key === 'k') {
+    // The nav-only palette remains mounted for a future real search, but is genuinely dormant
+    // while TopBar renders no trigger. Restoring that trigger re-enables both click and shortcut.
+    if (mod && key === 'k' && paletteTrigger()) {
       event.preventDefault();
       openPalette();
     } else if (mod && key === 'i') {

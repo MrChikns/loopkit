@@ -179,7 +179,7 @@ function topBarStories(): string {
 }
 
 function intentComposerStories(): string {
-  // The drop-intent widget: the write peer of Search. Rendered inline here; the
+  // The drop-intent widget: the TopBar's primary global action. Rendered inline here; the
   // shell wraps it in the topbar-triggered dialog (see TopBar / AppShell stories).
   return section(
     'IntentComposer',

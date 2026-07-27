@@ -1338,8 +1338,8 @@ test('composer: the halted notice renders beside the intent box, and armed adds 
 
   const titleAt = halted.indexOf('opsui-topbar__title');
   const statusAt = halted.indexOf('opsui-topbar__status');
-  const goToAt = halted.indexOf('opsui-topbar__palette');
-  assert.ok(titleAt < statusAt && statusAt < goToAt, 'halted tag sits between the page title and Go to');
+  const composerAt = halted.indexOf('opsui-topbar__intent');
+  assert.ok(titleAt < statusAt && statusAt < composerAt, 'halted tag sits between the page title and global actions');
 
   // The notice must sit INSIDE the composer form, above the input — not floated elsewhere in the
   // document, which is what "next to the intent box" means in practice.

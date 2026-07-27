@@ -46,10 +46,9 @@ test('every rendered button/link exposes an accessible name', () => {
 test('icon-only shell toggles carry an aria-label, not just a glyph', () => {
   const rail = NavigationRail({ destinations: DESTINATIONS });
   const bar = TopBar({ title: 'Command' });
-  // Rail width toggle, theme toggle: glyph-only, so aria-label is mandatory.
+  // Rail width toggle and theme toggle are glyph-only, so aria-label is mandatory.
   assert.match(rail, /class="opsui-rail__toggle"[^>]*aria-label="[^"]+"/);
   assert.match(bar, /class="opsui-topbar__theme"[^>]*aria-label="[^"]+"/);
-  assert.match(bar, /class="opsui-topbar__palette"[^>]*aria-label="[^"]+"/);
 });
 
 test('navigation landmarks are labelled and the active item is marked current', () => {

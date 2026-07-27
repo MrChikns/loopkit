@@ -90,6 +90,13 @@ a.opsui-health__label:hover { color: var(--accent); }
  * Reuses .opsui-health__row cell classes (label/value/target) plus a kind chip
  * and a timestamp; dot colour reuses the SLO status palette above. */
 
+.opsui-health__healfilters {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
 .opsui-health__healfeed {
   list-style: none;
   margin: 0;
@@ -128,6 +135,13 @@ a.opsui-health__label:hover { color: var(--accent); }
   font-size: 11px;
   color: var(--text-2);
   white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .opsui-health__healfilters .opsui-window {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 /* Artifacts region (nav collapse 9→5, WI-350) — carried over verbatim from the retired

@@ -83,3 +83,28 @@ test('an escalation count is a neutral event count, not a claim about the select
   assert.match(html, />count: 9</);
   assert.doesNotMatch(html, /9× in window/);
 });
+
+test('Self-heal keeps only its mode tag in the header and puts the window filter above the expanded feed', () => {
+  const envelope = healthProjectionFromBoard(BOARD, {
+    ledgerSequence: 1,
+    generatedAt: NOW,
+    healActivity: [proposedAt(10)],
+    opsAutonomy: 'propose',
+  });
+  const html = HealthProjection(envelope);
+  const cardStart = html.indexOf('>Self-heal activity<');
+  const cardEnd = html.indexOf('</section>', cardStart);
+  const card = html.slice(cardStart, cardEnd);
+  const bodyStart = card.indexOf('opsui-card__body');
+  const header = card.slice(0, bodyStart);
+  const body = card.slice(bodyStart);
+
+  assert.match(header, /self-heal: propose · dry-run/);
+  assert.doesNotMatch(header, /opsui-window|Time window/, 'collapsed header must not carry the expanded-feed filter');
+  assert.match(body, /opsui-health__healfilters/);
+  assert.match(body, /href="\?window=24h"[^>]*aria-current="true"/);
+  assert.ok(
+    body.indexOf('opsui-health__healfilters') < body.indexOf('opsui-health__healfeed'),
+    'the right-aligned filter row sits immediately before the feed it scopes',
+  );
+});

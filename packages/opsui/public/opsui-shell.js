@@ -3,7 +3,7 @@
 // declarative `data-opsui-shell` hooks — nothing here knows a projection:
 //   • rail width toggle    (button + Cmd/Ctrl+B), persisted in localStorage
 //   • colour theme toggle  (button), persisted + applied to <html data-theme>
-//   • command palette       (button + Cmd/Ctrl+K, Esc to close, backdrop click)
+//   • command palette       (button + Cmd/Ctrl+K only when a palette trigger is rendered)
 // Without JS the rail renders at its server width, the theme is whatever <html>
 // declares, and the palette stays hidden — every underlying link still works.
 (function () {
@@ -17,6 +17,9 @@
   }
   function palette() {
     return document.querySelector('[data-opsui-shell="palette"]');
+  }
+  function paletteTrigger() {
+    return document.querySelector('[data-opsui-shell="palette-open"]');
   }
   function sheet() {
     return document.querySelector('[data-opsui-shell="bottomsheet"]');
@@ -182,7 +185,9 @@
   document.addEventListener('keydown', function (event) {
     var mod = event.metaKey || event.ctrlKey;
     var key = (event.key || '').toLowerCase();
-    if (mod && key === 'k') {
+    // The nav-only palette remains mounted for a future real search, but is genuinely dormant
+    // while TopBar renders no trigger. Restoring that trigger re-enables both click and shortcut.
+    if (mod && key === 'k' && paletteTrigger()) {
       event.preventDefault();
       openPalette();
     } else if (mod && key === 'i') {

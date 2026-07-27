@@ -1,13 +1,12 @@
 /**
  * html.ts — the console's page shell, built on `@loopkit/ui`'s AppShell/NavigationRail/TopBar.
- * Every interactive TopBar affordance the design system marks with a `data-opsui-shell` hook
- * (search, drop-intent, theme) gets a working href/form fallback here, on the SAME markup the
+ * Every visible interactive TopBar affordance the design system marks with a `data-opsui-shell`
+ * hook (drop-intent, theme) gets a working href/form fallback here, on the SAME markup the
  * client-JS layer (public/console-shell.js + friends) progressively enhances — the buttons
  * stay `display: none` (console.css) until that JS marks the document ready, at which point it
- * reveals them and hides the no-JS twins in turn. The shell-level CommandPalette and
- * IntentComposerModal render hidden for the same reason: they're inert markup without JS, and
- * the JS opens them via the identical `data-opsui-shell="palette-open"` / `"composer-open"`
- * hooks the TopBar buttons already carry.
+ * reveals them and hides the no-JS twins in turn. The shell-level CommandPalette remains
+ * mounted and hidden for a future real search; IntentComposerModal opens via the TopBar's
+ * `data-opsui-shell="composer-open"` hook.
  *
  * Every ledger-derived string (source text, spec, park reason, event data) is untrusted: it
  * originated as free text an operator or an agent typed. `esc` is the single escaping choke
@@ -233,9 +232,9 @@ function railFor(activeNav?: NavId): string {
  * The shell-level CommandPalette's result groups. There is no search/suggest endpoint (the
  * console has no server-side search API to call), so — per the progressive-enhancement
  * contract — the palette ships with exactly what's true today: the five nav destinations,
- * client-filtered by console-palette.js's fuzzy match. This degrades honestly: no JS means the
- * palette never opens (its Go-to no-JS twin links straight to /missions instead), and with JS
- * the results are real working `navigate:` links, never a stub.
+ * client-filtered by console-palette.js's fuzzy match. That duplicates the always-visible
+ * navigation, so the palette stays mounted but dormant until a future real search restores a
+ * trigger. Its results remain real working `navigate:` links, never a stub.
  */
 function paletteGroupsFromNav(): PaletteGroup[] {
   return [
@@ -265,21 +264,15 @@ function topBarFor(opts: PageOptions): string {
 }
 
 /**
- * TopBar renders Go to / Drop intent / theme-toggle as `data-opsui-shell` buttons meant for
- * the (not-yet-built) client module. This slice keeps the exact same classes/attributes — so
- * slice 3's JS binds to the identical markup — but layers a no-JS fallback UNDER each button via
- * a thin wrapper: Go to becomes a real link to /missions (a full-text search page is optional
- * per the task and out of scope here), Drop intent becomes a real link to the inline composer
- * anchor on /command, and the theme toggle becomes a tiny same-page POST /theme form. The
- * buttons themselves stay `type="button"` (unclickable without JS) — swapped for real
- * `<a>`/`<form>` twins placed immediately after them, both sharing the design system's button
- * chrome so the page reads identically whichever one renders.
+ * TopBar renders Drop intent / theme-toggle as `data-opsui-shell` buttons meant for the client
+ * module. This wrapper layers a no-JS fallback UNDER each visible button: Drop intent becomes
+ * a real link to the inline composer anchor on /command, and the theme toggle becomes a tiny
+ * same-page POST /theme form. The buttons themselves stay `type="button"` (unclickable without
+ * JS) — swapped for real `<a>`/`<form>` twins placed immediately after them, both sharing the
+ * design system's button chrome so the page reads identically whichever one renders.
  */
 function topBarWithNoJsFallback(opts: PageOptions, returnTo: string): string {
   const bar = topBarFor(opts);
-  const searchFallback =
-    `<a class="opsui-topbar__palette opsui-topbar__nojs" href="/missions">` +
-    `<span class="opsui-topbar__palette-hint">Go to</span></a>`;
   const composerFallback =
     `<a class="opsui-topbar__intent opsui-topbar__nojs" href="/command#opsui-intent">` +
     `<span class="opsui-topbar__intent-icon" aria-hidden="true">+</span>` +
@@ -295,10 +288,6 @@ function topBarWithNoJsFallback(opts: PageOptions, returnTo: string): string {
   // CSS (console.css) hides the inert `data-opsui-shell` buttons until slice 3's JS marks the
   // document ready, at which point the JS-driven originals take over and the fallbacks hide.
   return bar
-    .replace(
-      /(<button type="button" class="opsui-topbar__palette"[^>]*>.*?<\/button>)/s,
-      `$1${searchFallback}`,
-    )
     .replace(
       /(<button type="button" class="opsui-topbar__intent"[^>]*>.*?<\/button>)/s,
       `$1${composerFallback}`,

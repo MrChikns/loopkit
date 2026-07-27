@@ -46,40 +46,38 @@ test('NavigationRail escapes destination text', () => {
   assert.match(html, /href="\/a&quot;b"/);
 });
 
-test('TopBar renders the palette trigger, theme toggle, breadcrumb and title', () => {
+test('TopBar renders the global actions, breadcrumb and title without a navigation-only palette trigger', () => {
   const html = TopBar({ title: 'Command', breadcrumbs: [{ label: 'Ops', href: '/ops' }] });
   assert.match(html, /role="banner"/);
-  assert.match(html, /data-opsui-shell="palette-open"/);
-  assert.match(html, /aria-keyshortcuts="Control\+K Meta\+K"/);
-  assert.match(html, /opsui-topbar__palette-hint">Go to</);
+  assert.doesNotMatch(html, /data-opsui-shell="palette-open"|opsui-topbar__palette/);
   assert.match(html, /data-opsui-shell="theme-toggle"/);
   assert.match(html, /opsui-topbar__crumb" href="\/ops">Ops</);
   assert.match(html, /opsui-topbar__title">Command</);
 });
 
-test('TopBar renders the drop-intent trigger as a Go-to peer between Go to and the theme toggle', () => {
+test('TopBar begins its actions with the drop-intent trigger, followed by the theme toggle', () => {
   const html = TopBar({ title: 'Command' });
-  // A designed pill (icon + hint + ⌘I), the write peer of Go to — not a bare glyph.
+  // A designed pill (icon + hint + ⌘I), not a bare glyph.
   assert.match(html, /class="opsui-topbar__intent" data-opsui-shell="composer-open"/);
   assert.match(html, /class="opsui-topbar__intent"[^>]*aria-label="Drop intent"/);
   assert.match(html, /aria-keyshortcuts="Control\+I Meta\+I"/);
   assert.match(html, /opsui-topbar__intent-hint">Drop intent</);
   assert.match(html, /opsui-topbar__kbd" aria-hidden="true">⌘I</);
-  const paletteIdx = html.indexOf('data-opsui-shell="palette-open"');
+  const actionsIdx = html.indexOf('opsui-topbar__actions');
   const composerIdx = html.indexOf('data-opsui-shell="composer-open"');
   const themeIdx = html.indexOf('data-opsui-shell="theme-toggle"');
-  assert.ok(paletteIdx < composerIdx && composerIdx < themeIdx, 'intent trigger sits between Go to and theme toggle');
+  assert.ok(actionsIdx < composerIdx && composerIdx < themeIdx, 'intent trigger is the first action');
 });
 
-test('TopBar renders an optional critical status between the title and Go to, and stays quiet by default', () => {
+test('TopBar renders an optional critical status between the title and global actions, and stays quiet by default', () => {
   const halted = TopBar({
     title: 'Command',
     status: { state: 'critical', label: 'Plane halted', emphasis: 'blocking', size: 'sm' },
   });
   const titleIdx = halted.indexOf('opsui-topbar__title');
   const statusIdx = halted.indexOf('opsui-topbar__status');
-  const goToIdx = halted.indexOf('data-opsui-shell="palette-open"');
-  assert.ok(titleIdx < statusIdx && statusIdx < goToIdx, 'status sits between page title and Go to');
+  const composerIdx = halted.indexOf('data-opsui-shell="composer-open"');
+  assert.ok(titleIdx < statusIdx && statusIdx < composerIdx, 'status sits between page title and global actions');
   assert.match(halted, /opsui-status--critical/);
   assert.match(halted, /opsui-status--blocking/);
   assert.match(halted, />Plane halted</);

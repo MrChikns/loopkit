@@ -1,6 +1,7 @@
-// TopBar — sticky banner: the breadcrumb/title of the current
-// operating picture, the command-palette trigger (Cmd/Ctrl+K), and the theme
-// toggle. Palette open and theme persistence are handled by the client module.
+// TopBar — sticky banner: the breadcrumb/title of the current operating picture,
+// optional operational status, drop-intent action, and theme toggle. The command
+// palette remains a shell-level future-search surface, but has no TopBar trigger
+// until it searches more than the already-visible navigation.
 
 import { esc } from '../render/html.ts';
 import { StatusBadge } from './StatusBadge.ts';
@@ -26,14 +27,7 @@ export function TopBar(props: TopBarProps): string {
   const trail = (props.breadcrumbs ?? [])
     .map((c) => crumb(c) + '<span class="opsui-topbar__sep" aria-hidden="true">/</span>')
     .join('');
-  const paletteTrigger =
-    `<button type="button" class="opsui-topbar__palette" data-opsui-shell="palette-open"` +
-    ` aria-keyshortcuts="Control+K Meta+K" aria-label="Open command palette">` +
-    `<span class="opsui-topbar__palette-hint">Go to</span>` +
-    `<kbd class="opsui-topbar__kbd" aria-hidden="true">⌘K</kbd></button>`;
-  // Peer of the Go-to pill: an intent affordance, not a bare glyph. Same pill
-  // chrome (icon + hint + ⌘-shortcut), opens the shell-level composer dialog the
-  // same way Go to opens the palette.
+  // The primary global action: a designed intent pill, not a bare glyph.
   const composerTrigger =
     `<button type="button" class="opsui-topbar__intent" data-opsui-shell="composer-open"` +
     ` aria-haspopup="dialog" aria-keyshortcuts="Control+I Meta+I" aria-label="Drop intent">` +
@@ -51,7 +45,7 @@ export function TopBar(props: TopBarProps): string {
     `<div class="opsui-topbar__lead">${trail}` +
     `<h1 class="opsui-topbar__title">${esc(props.title)}</h1></div>` +
     status +
-    `<div class="opsui-topbar__actions">${paletteTrigger}${composerTrigger}${themeToggle}</div>` +
+    `<div class="opsui-topbar__actions">${composerTrigger}${themeToggle}</div>` +
     `</header>`
   );
 }
