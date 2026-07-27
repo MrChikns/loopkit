@@ -93,6 +93,15 @@
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
 }
+.opsui-card__titles { min-width: 0; }
+.opsui-card__aside {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
 .opsui-card__title { margin: 0; font-size: 14px; font-weight: 620; color: var(--text); }
 .opsui-card__subtitle { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }
 .opsui-card__body { padding: 16px; }
@@ -619,6 +628,33 @@
   gap: 12px;
 }
 .opsui-metric--progress .opsui-metric__value { color: var(--progress-fg); }
+
+/* Only Flow + Reliability follow Command's time window. Keep their compact control beside
+   the subsection title so the seven current-state tiles above never appear filtered. */
+.opsui-glance-outcomes { margin-top: 16px; }
+.opsui-glance-outcomes__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+}
+.opsui-glance-outcomes__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 620;
+  color: var(--text-2);
+}
+.opsui-glancegrid--outcomes {
+  grid-template-columns: repeat(2, minmax(160px, 178px));
+}
+
+@media (max-width: 480px) {
+  .opsui-glance-outcomes__header { align-items: flex-start; }
+  .opsui-glance-outcomes__header .opsui-window { width: 100%; justify-content: flex-end; }
+  .opsui-glancegrid--outcomes { grid-template-columns: 1fr; }
+}
 
 /* Unified operating picture (2026-07-24): the "In flight now" list, rendered below the tile
    grid only when preparing/queued/building carries at least one row — idle boards show the

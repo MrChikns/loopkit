@@ -295,23 +295,26 @@ function operatingPictureRegion(
   d: Pick<CommandData, 'glance' | 'opsHealth' | 'pipelineFlow' | 'inFlight'>,
   activeWindow: GlanceWindow,
 ): string {
+  const currentState = d.glance.slice(0, 7);
+  const flowAndReliability = d.glance.slice(7);
   const body =
-    `<div class="opsui-glancegrid">${d.glance.map((m) => MetricTile(m)).join('')}</div>` +
-    inFlightRegion(d.pipelineFlow, d.inFlight);
+    `<div class="opsui-glancegrid">${currentState.map((m) => MetricTile(m)).join('')}</div>` +
+    inFlightRegion(d.pipelineFlow, d.inFlight) +
+    `<div class="opsui-glance-outcomes">` +
+    `<div class="opsui-glance-outcomes__header">` +
+    `<h3 class="opsui-glance-outcomes__title">Flow &amp; reliability</h3>` +
+    WindowPicker({ active: activeWindow }) +
+    `</div>` +
+    `<div class="opsui-glancegrid opsui-glancegrid--outcomes">${flowAndReliability.map((m) => MetricTile(m)).join('')}</div>` +
+    `</div>`;
   return Card({
     id: 'opsui-glance-card',
     variant: 'glance',
     title: 'Operating picture',
     subtitle: 'What needs you, and what is happening right now',
-    // The window filter lives on the title row (headerAside), never in the body;
-    // WindowPicker is the shared component for this. The `id` above (WI-glance-window-inplace)
-    // is a stable hook so the Command board's client JS can swap this one card's markup in
-    // place on a window-picker click, without a full page reload/scroll reset — see
-    // packages/opsui/public/opsui-live.js. Purely additive: no visual/behavioral change when
-    // JS is off, the picker's links still navigate normally.
-    // The ops-health badge stays OUT of this header (founder decision): "On hold" is now its
-    // own tile in the grid below, so the header carries only the window picker.
-    headerAside: WindowPicker({ active: activeWindow }),
+    // Only Flow and Reliability are windowed; current-state tiles are not. Keep the picker
+    // attached to the subsection it actually scopes. The card id remains the stable hook used
+    // by opsui-live.js for the in-place replacement, and the links still work without JS.
     body,
   });
 }

@@ -1,5 +1,4 @@
-// CommandPalette — the Cmd/Ctrl+K surface that searches projections,
-// work items, decisions, threads, SLOs, workers, evidence receipts, and commands.
+// CommandPalette — the Cmd/Ctrl+K surface that navigates registered destinations.
 // This renders the shell + a data-driven result list; the console supplies the
 // (permission- and context-aware) groups and wires live search. It ships hidden
 // and is opened by the client module — a progressive enhancement, not required
@@ -49,7 +48,7 @@ export function CommandPalette(props: CommandPaletteProps): string {
     `<div class="opsui-palette__panel">` +
     `<input type="search" class="opsui-palette__input" role="combobox" aria-expanded="true"` +
     ` aria-controls="opsui-palette-results" autocomplete="off"` +
-    ` placeholder="${esc(props.placeholder ?? 'Search everything…')}" />` +
+    ` placeholder="${esc(props.placeholder ?? 'Go to a page…')}" />` +
     `<div id="opsui-palette-results" class="opsui-palette__scroll">${body}</div>` +
     `</div></div>`
   );

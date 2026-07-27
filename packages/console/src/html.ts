@@ -234,7 +234,7 @@ function railFor(activeNav?: NavId): string {
  * console has no server-side search API to call), so — per the progressive-enhancement
  * contract — the palette ships with exactly what's true today: the five nav destinations,
  * client-filtered by console-palette.js's fuzzy match. This degrades honestly: no JS means the
- * palette never opens (its Search no-JS twin links straight to /missions instead), and with JS
+ * palette never opens (its Go-to no-JS twin links straight to /missions instead), and with JS
  * the results are real working `navigate:` links, never a stub.
  */
 function paletteGroupsFromNav(): PaletteGroup[] {
@@ -265,10 +265,10 @@ function topBarFor(opts: PageOptions): string {
 }
 
 /**
- * TopBar renders Search / Drop intent / theme-toggle as `data-opsui-shell` buttons meant for
+ * TopBar renders Go to / Drop intent / theme-toggle as `data-opsui-shell` buttons meant for
  * the (not-yet-built) client module. This slice keeps the exact same classes/attributes — so
  * slice 3's JS binds to the identical markup — but layers a no-JS fallback UNDER each button via
- * a thin wrapper: Search becomes a real link to /missions (a full-text search page is optional
+ * a thin wrapper: Go to becomes a real link to /missions (a full-text search page is optional
  * per the task and out of scope here), Drop intent becomes a real link to the inline composer
  * anchor on /command, and the theme toggle becomes a tiny same-page POST /theme form. The
  * buttons themselves stay `type="button"` (unclickable without JS) — swapped for real
@@ -279,7 +279,7 @@ function topBarWithNoJsFallback(opts: PageOptions, returnTo: string): string {
   const bar = topBarFor(opts);
   const searchFallback =
     `<a class="opsui-topbar__palette opsui-topbar__nojs" href="/missions">` +
-    `<span class="opsui-topbar__palette-hint">Search</span></a>`;
+    `<span class="opsui-topbar__palette-hint">Go to</span></a>`;
   const composerFallback =
     `<a class="opsui-topbar__intent opsui-topbar__nojs" href="/command#opsui-intent">` +
     `<span class="opsui-topbar__intent-icon" aria-hidden="true">+</span>` +

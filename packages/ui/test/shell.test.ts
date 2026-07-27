@@ -51,14 +51,15 @@ test('TopBar renders the palette trigger, theme toggle, breadcrumb and title', (
   assert.match(html, /role="banner"/);
   assert.match(html, /data-opsui-shell="palette-open"/);
   assert.match(html, /aria-keyshortcuts="Control\+K Meta\+K"/);
+  assert.match(html, /opsui-topbar__palette-hint">Go to</);
   assert.match(html, /data-opsui-shell="theme-toggle"/);
   assert.match(html, /opsui-topbar__crumb" href="\/ops">Ops</);
   assert.match(html, /opsui-topbar__title">Command</);
 });
 
-test('TopBar renders the drop-intent trigger as a Search-peer pill between Search and the theme toggle', () => {
+test('TopBar renders the drop-intent trigger as a Go-to peer between Go to and the theme toggle', () => {
   const html = TopBar({ title: 'Command' });
-  // A designed pill (icon + hint + ⌘I), the write peer of Search — not a bare glyph.
+  // A designed pill (icon + hint + ⌘I), the write peer of Go to — not a bare glyph.
   assert.match(html, /class="opsui-topbar__intent" data-opsui-shell="composer-open"/);
   assert.match(html, /class="opsui-topbar__intent"[^>]*aria-label="Drop intent"/);
   assert.match(html, /aria-keyshortcuts="Control\+I Meta\+I"/);
@@ -67,18 +68,18 @@ test('TopBar renders the drop-intent trigger as a Search-peer pill between Searc
   const paletteIdx = html.indexOf('data-opsui-shell="palette-open"');
   const composerIdx = html.indexOf('data-opsui-shell="composer-open"');
   const themeIdx = html.indexOf('data-opsui-shell="theme-toggle"');
-  assert.ok(paletteIdx < composerIdx && composerIdx < themeIdx, 'intent trigger sits between Search and theme toggle');
+  assert.ok(paletteIdx < composerIdx && composerIdx < themeIdx, 'intent trigger sits between Go to and theme toggle');
 });
 
-test('TopBar renders an optional critical status between the title and Search, and stays quiet by default', () => {
+test('TopBar renders an optional critical status between the title and Go to, and stays quiet by default', () => {
   const halted = TopBar({
     title: 'Command',
     status: { state: 'critical', label: 'Plane halted', emphasis: 'blocking', size: 'sm' },
   });
   const titleIdx = halted.indexOf('opsui-topbar__title');
   const statusIdx = halted.indexOf('opsui-topbar__status');
-  const searchIdx = halted.indexOf('data-opsui-shell="palette-open"');
-  assert.ok(titleIdx < statusIdx && statusIdx < searchIdx, 'status sits between page title and Search');
+  const goToIdx = halted.indexOf('data-opsui-shell="palette-open"');
+  assert.ok(titleIdx < statusIdx && statusIdx < goToIdx, 'status sits between page title and Go to');
   assert.match(halted, /opsui-status--critical/);
   assert.match(halted, /opsui-status--blocking/);
   assert.match(halted, />Plane halted</);
@@ -176,6 +177,7 @@ test('CommandPalette ships hidden and opens with grouped, actionable results', (
   assert.match(hidden, / hidden>/);
   assert.match(hidden, /role="dialog"/);
   assert.match(hidden, /aria-modal="true"/);
+  assert.match(hidden, /placeholder="Go to a page…"/);
 
   const open = CommandPalette({
     open: true,

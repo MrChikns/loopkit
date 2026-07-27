@@ -89,7 +89,7 @@ test('IntentComposer: the notice sits above the input, and rides the modal too',
   );
 });
 
-test('TopBar: halted is a critical blocking tag between the title and Search; armed stays quiet', () => {
+test('TopBar: halted is a critical blocking tag between the title and Go to; armed stays quiet', () => {
   const halted = TopBar({
     title: 'Command',
     status: { state: 'critical', label: 'Plane halted', emphasis: 'blocking', size: 'sm' },
@@ -102,7 +102,7 @@ test('TopBar: halted is a critical blocking tag between the title and Search; ar
       halted.indexOf('opsui-topbar__status') &&
       halted.indexOf('opsui-topbar__status') <
       halted.indexOf('data-opsui-shell="palette-open"'),
-    'the halted tag must sit between title and Search',
+    'the halted tag must sit between title and Go to',
   );
   assert.doesNotMatch(TopBar({ title: 'Command' }), /opsui-topbar__status|Plane halted/);
 });

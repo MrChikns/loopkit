@@ -171,7 +171,7 @@ function opsPalette(): string {
     action: `navigate:${d.href}`,
     ...(d.purpose ? { meta: d.purpose } : {}),
   }));
-  return CommandPalette({ groups: [{ heading: 'Go to', items }], placeholder: 'Search projections…' });
+  return CommandPalette({ groups: [{ heading: 'Go to', items }], placeholder: 'Go to a page…' });
 }
 
 /** The global "drop intent" modal, opened from the TopBar composer trigger on every page.
@@ -887,7 +887,9 @@ export function renderHealthPage(data: OpsData, ctx: OpsPageContext, theme?: str
     windowParam === '24h' ? '24h' : windowParam === '7d' ? '7d' : windowParam === '30d' ? '30d' : undefined;
   const sloRows = computeSloRows(data.cfg, ctx.repoRoot, ctx.runDir, data.events);
   const board = buildHealthBoard(sloRows);
-  const healActivity = healActivityFromEvents(data.events.filter((e) => e.item === 'system')).slice(0, 30);
+  // Pass the complete sorted feed into the projection adapter. It applies the selected
+  // window first, then an explicit render bound; pre-truncating here made 7d/30d lie.
+  const healActivity = healActivityFromEvents(data.events.filter((e) => e.item === 'system'));
   const analyticsStrip = buildAnalyticsStrip(data);
   const artifactsData = buildArtifactsData(ctx.runsDir);
   const envelope = healthProjectionFromBoard(board, {

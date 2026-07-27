@@ -129,10 +129,11 @@ test('the tile grid renders all nine tiles, Decisions/Stuck carry critical when 
   );
   const glanceSectionStart = html.indexOf('id="opsui-glance-card"');
   const glanceSectionHtml = html.slice(glanceSectionStart, html.indexOf('</section>', glanceSectionStart));
+  const glanceHeaderHtml = glanceSectionHtml.slice(0, glanceSectionHtml.indexOf('opsui-card__body'));
   assert.doesNotMatch(
-    glanceSectionHtml.slice(0, glanceSectionHtml.indexOf('opsui-card__body')),
-    /opsui-status/,
-    'the header aside carries only the WindowPicker, no health StatusBadge',
+    glanceHeaderHtml,
+    /opsui-status|opsui-window/,
+    'the card header carries neither a health badge nor a misleading card-wide window filter',
   );
 
   // All nine tiles render, in the specified order.
@@ -148,6 +149,12 @@ test('the tile grid renders all nine tiles, Decisions/Stuck carry critical when 
   assert.ok(idx('Queued') < idx('Building'));
   assert.ok(idx('Building') < idx('Flow'));
   assert.ok(idx('Flow') < idx('Reliability'));
+  const scopedWindowHeading = html.indexOf('>Flow &amp; reliability<');
+  const picker = html.indexOf('role="group" aria-label="Time window"');
+  assert.ok(
+    idx('Building') < scopedWindowHeading && scopedWindowHeading < picker && picker < idx('Flow'),
+    'the window picker sits in a Flow & reliability subheader immediately before the two metrics it scopes',
+  );
 
   // Decisions carries critical (not warning) when a decision park exists.
   assert.match(html, /opsui-metric opsui-metric--critical" href="#decision-desk"/, 'the Decisions tile carries the critical state class when >0');
@@ -184,7 +191,7 @@ test('the in-flight list is absent when idle and present when preparing/queued/b
   }
 });
 
-test('the Glance card carries a stable id hook for the client in-place window swap, with no visible change', () => {
+test('the Glance card keeps its stable live-replacement hook after the picker moves to its scoped subsection', () => {
   const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
@@ -196,8 +203,8 @@ test('the Glance card carries a stable id hook for the client in-place window sw
     'the Glance card outer section carries the id hook, additive-only (same class list as before)',
   );
 
-  // Visible output is unchanged: the window picker still renders as plain `?window=` links with
-  // aria-current on the active option — the zero-JS contract this hook must not disturb.
+  // The picker still renders as plain `?window=` links with aria-current on the active option —
+  // moving it inside the card body must not disturb the zero-JS or live-replacement contract.
   assert.match(html, /href="\?window=24h"[^>]*aria-current="true"/, 'the default (24h) window link stays a plain marked-active anchor');
   assert.match(html, /class="opsui-window__btn"[^>]*href="\?window=7d"/, 'the 7d window link stays a plain anchor, unmodified');
 });

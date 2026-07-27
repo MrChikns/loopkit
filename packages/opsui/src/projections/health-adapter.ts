@@ -49,6 +49,9 @@ export type HealthData = {
   /** Active time window the healActivity feed was filtered to (WI-359 follow-up) —
    *  drives the feed's WindowPicker active state. Present iff healActivity is. */
   healWindow?: '24h' | '7d' | '30d';
+  /** True when the selected window contains more rows than the bounded feed can render.
+   *  The projection surfaces this explicitly instead of silently under-reporting. */
+  healActivityTruncated?: boolean;
   /** Current OPS_AUTONOMY tier the reactor's heal step runs at — badges the feed above
    *  so the founder can judge readiness to raise it (watch → propose → heal). */
   opsAutonomy?: OpsAutonomyMode;
@@ -225,6 +228,10 @@ export function healActivityFromEvents(raw: unknown[]): HealActivityEntry[] {
 
 // --- Entry point -------------------------------------------------------------
 
+/** A busy plane can emit many heal observations. Bound only AFTER window filtering so 7d/30d
+ *  never lose older in-window events merely because 30 newer, out-of-window rows existed. */
+export const HEAL_ACTIVITY_RENDER_LIMIT = 100;
+
 /** Build the health projection envelope from a raw OpsHealthBoard.
  *  Unknown or malformed input yields a `failed` envelope. */
 export function healthProjectionFromBoard(
@@ -305,14 +312,16 @@ export function healthProjectionFromBoard(
       glance: buildGlance(rollup), rollup, panes,
       ...(opts.healActivity !== undefined
         ? (() => {
-            const w = opts.window ?? '7d';
+            const w = opts.window ?? '24h';
             const cutoffMs = (w === '24h' ? 24 : w === '30d' ? 30 * 24 : 7 * 24) * 60 * 60 * 1000;
+            const inWindow = opts.healActivity.filter((e) => {
+              const t = new Date(e.ts).getTime();
+              return Number.isFinite(t) && nowMs - t < cutoffMs;
+            });
             return {
-              healActivity: opts.healActivity.filter((e) => {
-                const t = new Date(e.ts).getTime();
-                return Number.isFinite(t) && nowMs - t < cutoffMs;
-              }),
+              healActivity: inWindow.slice(0, HEAL_ACTIVITY_RENDER_LIMIT),
               healWindow: w,
+              ...(inWindow.length > HEAL_ACTIVITY_RENDER_LIMIT ? { healActivityTruncated: true } : {}),
             };
           })()
         : {}),

@@ -29,11 +29,11 @@ export function TopBar(props: TopBarProps): string {
   const paletteTrigger =
     `<button type="button" class="opsui-topbar__palette" data-opsui-shell="palette-open"` +
     ` aria-keyshortcuts="Control+K Meta+K" aria-label="Open command palette">` +
-    `<span class="opsui-topbar__palette-hint">Search</span>` +
+    `<span class="opsui-topbar__palette-hint">Go to</span>` +
     `<kbd class="opsui-topbar__kbd" aria-hidden="true">⌘K</kbd></button>`;
-  // Peer of the Search pill: an intent affordance, not a bare glyph. Same pill
+  // Peer of the Go-to pill: an intent affordance, not a bare glyph. Same pill
   // chrome (icon + hint + ⌘-shortcut), opens the shell-level composer dialog the
-  // same way Search opens the palette (WI-262 redesign).
+  // same way Go to opens the palette (WI-262 redesign).
   const composerTrigger =
     `<button type="button" class="opsui-topbar__intent" data-opsui-shell="composer-open"` +
     ` aria-haspopup="dialog" aria-keyshortcuts="Control+I Meta+I" aria-label="Drop intent">` +

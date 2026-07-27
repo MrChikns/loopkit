@@ -137,7 +137,7 @@ const OPS_AUTONOMY_STATE: Record<OpsAutonomyMode, OperationalState> = {
 function healDetail(e: HealActivityEntry): string | undefined {
   if (e.kind === 'proposed') return e.tier ? `tier: ${e.tier}${e.detail ? ` · ${e.detail}` : ''}` : e.detail;
   if (e.kind === 'executed') return e.evidence;
-  return e.count !== undefined ? `${e.count}× in window` : undefined;
+  return e.count !== undefined ? `count: ${e.count}` : undefined;
 }
 
 function healRow(e: HealActivityEntry): string {
@@ -159,14 +159,18 @@ function healActivityRegion(
   entries: HealActivityEntry[],
   mode: OpsAutonomyMode | undefined,
   window?: TimeWindow,
+  truncated = false,
 ): string {
   const badge = mode ? StatusBadge({ state: OPS_AUTONOMY_STATE[mode], label: OPS_AUTONOMY_LABEL[mode], size: 'sm' }) : '';
   // The window filter sits on the title row next to the autonomy badge (WI-359 pattern:
   // filters live in headerAside, never in the body).
   const picker = window ? WindowPicker({ active: window }) : '';
   const aside = picker + badge;
+  const truncation = truncated
+    ? `<p class="opsui-health__healtruncated">Showing the newest ${entries.length} events; more exist in this window.</p>`
+    : '';
   const body = entries.length
-    ? `<ul class="opsui-health__healfeed" role="list">${entries.map(healRow).join('')}</ul>`
+    ? `<ul class="opsui-health__healfeed" role="list">${entries.map(healRow).join('')}</ul>${truncation}`
     : `<p class="opsui-empty">No self-heal activity in this window.</p>`;
   return Card({
     title: 'Self-heal activity',
@@ -229,7 +233,9 @@ export function HealthProjection(env: ProjectionEnvelope<HealthData>): string {
     glanceRegion(d) +
     (d.analyticsStrip?.length ? analyticsStripRegion(d.analyticsStrip) : '') +
     panesRegion(d.panes) +
-    (d.healActivity !== undefined ? healActivityRegion(d.healActivity, d.opsAutonomy, d.healWindow) : '') +
+    (d.healActivity !== undefined
+      ? healActivityRegion(d.healActivity, d.opsAutonomy, d.healWindow, d.healActivityTruncated)
+      : '') +
     (d.artifacts ? artifactsSystemRegion(d.artifacts) : '') +
     provenanceRegion(env) +
     `</div>`
