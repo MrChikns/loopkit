@@ -52,7 +52,7 @@ function messageList(thread: ThreadCard): string {
 
 // ─── Reply composer ───────────────────────────────────────────────────────────
 
-function replyForm(thread: ThreadCard): string {
+function replyForm(thread: ThreadCard, nextPath: string): string {
   const replyTo = thread.externalRef ?? '';
   // A channel-style externalRef (e.g. 'console') is shared by every console-composer
   // capture, so posting via /intent+replyTo=<ref> is not addressed to THIS thread — every
@@ -62,7 +62,6 @@ function replyForm(thread: ThreadCard): string {
   // different items. A resolvable per-intent ref (e.g. 'EXT-1') keeps the existing /intent
   // path, which the router can already thread back to it.
   const resolvable = replyTo !== '' && isResolvableExternalRef(replyTo);
-  const nextPath = '/threads';
   const actionUrl = resolvable
     ? `/intent?next=${esc(encodeURIComponent(nextPath))}`
     : `/item/${esc(encodeURIComponent(thread.id))}/reply?next=${esc(encodeURIComponent(nextPath))}`;
@@ -101,7 +100,7 @@ function replyForm(thread: ThreadCard): string {
  *  collapsed one-liner `<details>` (WI-308): id · title · state badge · last-reply in
  *  the `<summary>`, full message history + reply composer in the body, collapsed by
  *  default. Needs no JS — `<details>` is native. */
-export function threadCard(thread: ThreadCard): string {
+export function threadCard(thread: ThreadCard, replyNextPath = '/threads'): string {
   const badgeSpec = THREAD_STATE_BADGE[thread.state];
   const stateBadge = StatusBadge({
     state: badgeSpec.state,
@@ -152,7 +151,7 @@ export function threadCard(thread: ThreadCard): string {
     supersededSubtitle +
     lastReply +
     messageList(thread) +
-    replyForm(thread) +
+    replyForm(thread, replyNextPath) +
     `</div>` +
     `</details>`
   );
@@ -180,6 +179,7 @@ export function conversationsRegion(
   threads: ThreadCard[],
   page = 1,
   hrefFor: (p: number) => string = (p) => (p <= 1 ? '/threads' : `/threads?page=${p}`),
+  replyNextPath = '/threads',
 ): string {
   const total = threads.length;
   const headerAside = StatusBadge({
@@ -213,7 +213,7 @@ export function conversationsRegion(
     title: 'Conversations',
     subtitle: 'Most recent reply first — reply inline or via the router',
     headerAside,
-    body: pageItems.map(threadCard).join('') + pager,
+    body: pageItems.map((thread) => threadCard(thread, replyNextPath)).join('') + pager,
   });
 }
 

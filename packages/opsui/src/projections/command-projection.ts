@@ -17,6 +17,7 @@ import { DEFAULT_GLANCE_WINDOW } from './fold-adapter.ts';
 import type { GlancePulse, GlanceWindow } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 import type { ThreadCard } from './threads-adapter.ts';
+import { conversationsRegion } from './threads-projection.ts';
 
 /** One recent ext:-sourced intent item for the durable capture trail (WI-178). `foldState`
  *  stays the raw fold lifecycle string (the observable contract recent-intents.test.ts
@@ -433,28 +434,6 @@ function shippedRegion(events: CommandEvent[], page: number): string {
   });
 }
 
-/** WI-128: Conversations demoted from a full inline list to a link — the standalone
- *  `/threads` route (threads-projection.ts) keeps serving the full page, deep links included;
- *  `threadsPage`, when given, carries the operator's current page over to that link so it
- *  reopens where Command left off, rather than resetting to page 1. */
-function conversationsLinkRegion(threads: ThreadCard[], threadsPage?: number): string {
-  const total = threads.length;
-  const needsYou = threads.filter((t) => t.state === 'needs-you').length;
-  const badge = needsYou
-    ? StatusBadge({ state: 'critical', label: `${needsYou} needs you`, emphasis: 'blocking' })
-    : StatusBadge({
-        state: total ? 'neutral' : 'success',
-        label: total ? `${total} thread${total === 1 ? '' : 's'}` : 'No threads',
-      });
-  const href = threadsPage && threadsPage > 1 ? `/threads?page=${threadsPage}` : '/threads';
-  return Card({
-    title: 'Conversations',
-    subtitle: 'Founder conversations with the router',
-    headerAside: badge,
-    body: `<p class="opsui-empty"><a href="${esc(href)}">View all conversations →</a></p>`,
-  });
-}
-
 /** Compact strip of recent ext:-sourced items — durable answer to "where did my capture go?"
  *  (WI-178). Nested inside {@link recentActivityRegion}'s unified card (WI-128); renders '' when
  *  empty so the unified card never shows a blank "Recent work items" heading with nothing under it. */
@@ -521,8 +500,7 @@ export interface CommandProjectionOptions {
   capturedId?: string;
   /** 1-based page for the "Shipped" half of the recent-activity feed (WI-177); defaults to 1. */
   deliveryPage?: number;
-  /** WI-128: Conversations is now a link, not a paginated inline list — when set (>1), the
-   *  link carries the operator's prior page over to `/threads?page=N` instead of resetting it. */
+  /** 1-based page for the inline Conversations widget; defaults to 1. */
   threadsPage?: number;
   /** Glance time-window picker (WI-359). When unset, the picker's displayed active state AND
    *  the underlying tiles both fall back to DEFAULT_GLANCE_WINDOW — one shared default so the
@@ -572,7 +550,12 @@ export function CommandProjection(env: ProjectionEnvelope<CommandData>, opts: Co
     `<section id="decision-desk">${decisionDeskRegion(d.decisionDesk)}</section>` +
     `<section id="to-test">${toTestRegion(d.toTest)}</section>` +
     `<section id="shipped">${shippedRegion(d.deliveryStream, opts.deliveryPage ?? 1)}</section>` +
-    `<section id="conversations">${conversationsLinkRegion(d.threads ?? [], opts.threadsPage)}</section>` +
+    `<section id="conversations">${conversationsRegion(
+      d.threads ?? [],
+      opts.threadsPage ?? 1,
+      (page) => page <= 1 ? '/command#conversations' : `/command?threadsPage=${page}#conversations`,
+      '/command#conversations',
+    )}</section>` +
     `<section id="ops-parks">${opsParksRegion(d.opsParks)}</section>` +
     provenanceRegion(env) +
     `</div>`

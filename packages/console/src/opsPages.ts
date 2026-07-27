@@ -214,7 +214,9 @@ function projectionDocument(title: string, shellHtml: string, theme: 'dark' | 'l
     `<link rel="stylesheet" href="/ui/tokens.css">` +
     `<link rel="stylesheet" href="/ui/components.css">` +
     `<link rel="stylesheet" href="/ui/projections.css">` +
+    `<link rel="stylesheet" href="/ui/widgets.css">` +
     `<script type="module" src="/ui/shell.js"></script>` +
+    `<script src="/ui/widgets.js" defer></script>` +
     `<script src="/ui/composer.js" defer></script>` +
     `<script src="/ui/palette.js" defer></script>` +
     `<script src="/ui/confirm.js" defer></script>` +

@@ -900,8 +900,8 @@ async function opsuiProjectionsCss(): Promise<string> {
 
 const opsuiPublicCache = new Map<string, string>();
 
-/** One of the design system's public/ client scripts (shell/composer/palette/confirm). */
-async function opsuiPublicJs(name: string): Promise<string | undefined> {
+/** One of the design system's public/ progressive-enhancement assets. */
+async function opsuiPublicAsset(name: string): Promise<string | undefined> {
   const cached = opsuiPublicCache.get(name);
   if (cached !== undefined) return cached;
   try {
@@ -1080,9 +1080,14 @@ async function handleRequest(
     if (pathname === '/ui/projections.css') {
       return send(res, 200, await opsuiProjectionsCss(), 'text/css; charset=utf-8');
     }
-    const opsuiJsMatch = /^\/ui\/(shell|composer|palette|confirm|live)\.js$/.exec(pathname);
+    if (pathname === '/ui/widgets.css') {
+      const body = await opsuiPublicAsset('opsui-widgets.css');
+      if (body === undefined) return notFound(req, res);
+      return send(res, 200, body, 'text/css; charset=utf-8');
+    }
+    const opsuiJsMatch = /^\/ui\/(shell|widgets|composer|palette|confirm|live)\.js$/.exec(pathname);
     if (opsuiJsMatch) {
-      const body = await opsuiPublicJs(`opsui-${opsuiJsMatch[1] as string}.js`);
+      const body = await opsuiPublicAsset(`opsui-${opsuiJsMatch[1] as string}.js`);
       if (body === undefined) return notFound(req, res);
       return send(res, 200, body, 'application/javascript; charset=utf-8');
     }

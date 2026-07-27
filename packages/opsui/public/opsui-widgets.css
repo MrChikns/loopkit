@@ -1,0 +1,61 @@
+.opsui-widget-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 12px;
+}
+
+.opsui-widget-controls__button {
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.opsui-widget-controls__button:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.opsui-widget-controls__button:focus-visible,
+.opsui-card[data-opsui-widget-ready] > .opsui-card__header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.opsui-card[data-opsui-widget-ready] > .opsui-card__header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.opsui-card[data-opsui-widget-ready] > .opsui-card__header::after {
+  content: "⌄";
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-3);
+  font-size: 16px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.opsui-card[data-opsui-widget-ready][data-opsui-widget-state="collapsed"] > .opsui-card__header {
+  border-bottom-color: transparent;
+}
+
+.opsui-card[data-opsui-widget-ready][data-opsui-widget-state="collapsed"] > .opsui-card__header::after {
+  transform: rotate(-90deg);
+}
+
+details.opsui-card[data-opsui-widget-ready] > summary.opsui-card__header {
+  list-style: none;
+}
+
+details.opsui-card[data-opsui-widget-ready] > summary.opsui-card__header::-webkit-details-marker {
+  display: none;
+}

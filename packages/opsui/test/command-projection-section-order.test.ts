@@ -14,6 +14,8 @@ import { test } from 'node:test';
 import { CommandProjection } from '../src/projections/command-projection.ts';
 import { commandProjectionFromFold } from '../src/projections/fold-adapter.ts';
 import type { FoldSummary } from '../src/projections/fold-adapter.ts';
+import { conversationsRegion } from '../src/projections/threads-projection.ts';
+import type { ThreadCard } from '../src/projections/threads-adapter.ts';
 
 const NOW = '2026-07-20T12:00:00.000Z';
 
@@ -73,13 +75,41 @@ test('Command sections render in operator-attention order', () => {
 // 'Conductor' was this card's title before WI-128 folded it into the unified widget as the
 // Building sub-badge (the data behind it is `CommandData.inFlight` now). The guard keeps the
 // old title from coming back as a separate card.
-test('the unified widget has no separate Conductor card and Conversations is a link, not a full list', () => {
-  const envelope = commandProjectionFromFold(baseFold(), { ledgerSequence: 1 });
+test('the unified widget has no separate Conductor card and Conversations renders inline', () => {
+  const envelope = commandProjectionFromFold(baseFold({
+    threads: [{
+      id: 'WI-901',
+      externalRef: 'EXT-901',
+      state: 'needs-you',
+      messages: [{ id: 'MSG-1', direction: 'in', text: 'Can you clarify?', timestamp: NOW }],
+    }],
+  }), { ledgerSequence: 1 });
   const html = CommandProjection(envelope);
 
   assert.ok(!html.includes('>Conductor<'), 'Conductor no longer renders as its own card title');
-  assert.ok(!html.includes('opsui-threads__reply'), 'Conversations no longer renders the full inline thread list/reply composer');
-  assert.ok(html.includes('View all conversations'), 'Conversations renders as a link to the full /threads page');
+  assert.ok(html.includes('opsui-threads__reply'), 'Conversations renders the shared inline thread/reply surface');
+  assert.ok(!html.includes('View all conversations'), 'Conversations no longer requires a click-through to /threads');
+  assert.ok(html.includes('next=%2Fcommand%23conversations'), 'inline replies return to the Command widget');
+});
+
+test('inline Conversations pagination stays on Command and anchors back to the widget', () => {
+  const threads: ThreadCard[] = Array.from({ length: 21 }, (_, index) => ({
+    id: `WI-${String(index + 1).padStart(3, '0')}`,
+    label: `WI-${String(index + 1).padStart(3, '0')}`,
+    externalRef: `EXT-${index + 1}`,
+    title: `Thread ${index + 1}`,
+    state: 'unknown',
+    outCount: 0,
+    messages: [],
+  }));
+  const html = conversationsRegion(
+    threads,
+    1,
+    (page) => page <= 1 ? '/command#conversations' : `/command?threadsPage=${page}#conversations`,
+  );
+
+  assert.ok(html.includes('/command?threadsPage=2#conversations'));
+  assert.ok(!html.includes('href="/threads?page=2"'));
 });
 
 test('the tile grid renders all nine tiles, Decisions/Stuck carry critical when non-zero, and On hold/Preparing/Queued/Building carry their board-live tile hooks', () => {

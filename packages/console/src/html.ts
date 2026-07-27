@@ -317,6 +317,7 @@ function topBarWithNoJsFallback(opts: PageOptions, returnTo: string): string {
  */
 const SHELL_SCRIPTS = [
   '/console-shell.js',
+  '/ui/widgets.js',
   '/console-palette.js',
   '/console-composer.js',
   '/console-confirm.js',
@@ -376,6 +377,7 @@ ${refresh}
 <link rel="stylesheet" href="/ui-fonts.css">
 <link rel="stylesheet" href="/ui-tokens.css">
 <link rel="stylesheet" href="/ui-components.css">
+<link rel="stylesheet" href="/ui/widgets.css">
 <link rel="stylesheet" href="/console.css">
 </head>
 <body>

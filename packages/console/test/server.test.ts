@@ -431,6 +431,22 @@ test('GET /ui/live.js — also references the board-live push route', async () =
   );
 });
 
+test('GET /ui/widgets.js and /ui/widgets.css — serve the shared disclosure assets', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const js = await fetch(`${base}/ui/widgets.js`);
+      assert.equal(js.status, 200);
+      assert.match(js.headers.get('content-type') ?? '', /^application\/javascript/);
+      assert.match(await js.text(), /opsui\.widgets\.v1:/);
+
+      const css = await fetch(`${base}/ui/widgets.css`);
+      assert.equal(css.status, 200);
+      assert.match(css.headers.get('content-type') ?? '', /^text\/css/);
+      assert.match(await css.text(), /opsui-widget-controls/);
+    }),
+  );
+});
+
 test('GET /console-live.js — served with a JS content-type, references EventSource + captured', async () => {
   await withLedger((ledgerDir) =>
     withServer(ledgerDir, async (base) => {
@@ -2386,6 +2402,7 @@ const ALL_ROUTES = [...OPSUI_ROUTES, ...LEGACY_SHELL_ROUTES];
 const ALLOWED_SCRIPT_SRCS = new Set([
   // opsui shell
   '/ui/shell.js',
+  '/ui/widgets.js',
   '/ui/palette.js',
   '/ui/composer.js',
   '/ui/confirm.js',
