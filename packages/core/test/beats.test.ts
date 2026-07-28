@@ -209,6 +209,9 @@ test('reactor: dry-run writes nothing to ledger', async () => {
     });
 
     assert.ok(result.dryRun);
+    assert.equal(result.totalEventsWritten, 0, 'dry-run result accounting must report zero durable writes');
+    assert.equal(result.steps.find(step => step.step === 'apply-verbs')?.eventsWritten, 0,
+      'apply-verbs must report zero durable writes in dry-run');
     // Ledger should not have grown (no events written in dry-run)
     const events = await loadAllEvents(ledgerDir);
     assert.equal(events.length, 1, 'dry-run should not write to ledger');
@@ -3047,6 +3050,67 @@ test('reactor: merges approved item in worktree even when primary tree is on a f
     }).stdout.toString().trim();
     assert.equal(primaryBranch, 'some-dev-branch',
       'reactor must not switch the primary tree branch');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('reactor: merge-prefix accounting survives a later deploy-request persistence failure', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'appr-deploy-fail-'));
+  try {
+    const repoRoot = join(tmpDir, 'repo');
+    const originDir = join(tmpDir, 'origin.git');
+    const ledgerDir = join(tmpDir, 'ledger');
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+
+    mkdirSync(originDir, { recursive: true });
+    spawnSync('git', ['init', '--bare', originDir], { cwd: tmpDir, stdio: 'pipe' });
+    mkdirSync(repoRoot, { recursive: true });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    g(['remote', 'add', 'origin', originDir]);
+    writeFileSync(join(repoRoot, 'base.txt'), 'base\n', 'utf8');
+    g(['add', 'base.txt']);
+    g(['commit', '-m', 'init']);
+    g(['push', '-u', 'origin', 'master']);
+    g(['checkout', '-b', 'wi-998']);
+    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n', 'utf8');
+    g(['add', 'feature.txt']);
+    g(['commit', '-m', 'feat: WI-998']);
+    g(['checkout', 'master']);
+
+    await seedLedger(ledgerDir, [
+      makeEvent('test', 'WI-998', 'item.captured', { source: 'cli', text: 'x' }),
+      makeEvent('test', 'WI-998', 'item.queued', { spec: 'x' }),
+      makeEvent('test', 'WI-998', 'build.dispatched', { attempt: 1, branch: 'wi-998', pid: 1 }),
+      makeEvent('test', 'WI-998', 'gate.parked', { reason: 'spine' }),
+      makeEvent('test', 'WI-998', 'item.parked', { reason: 'spine' }),
+      makeEvent('operator', 'WI-998', 'item.approved', { by: 'operator' }),
+    ]);
+
+    const result = await runReactor({
+      repoRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: null,
+      config: makeTestConfig({ deployCommand: 'true' }),
+      deployRequest: async () => {
+        throw new Error('synthetic deploy request write failure');
+      },
+    });
+
+    const apply = result.steps.find(step => step.step === 'apply-verbs');
+    assert.equal(apply?.ok, false);
+    assert.equal(apply?.eventsWritten, 2,
+      'gate.passed plus item.merged were durable before the later request write failed');
+    assert.match(apply?.detail ?? '', /synthetic deploy request write failure/);
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-998' && e.type === 'item.merged').length, 1);
+    assert.equal(events.filter(e => e.item === 'WI-998' && e.type === 'deploy.requested').length, 1,
+      'the later reconciliation step repairs the failed handoff from the durable merge evidence');
+    assert.equal(fold(events).items.get('WI-998')?.state, 'merged',
+      'the durable merge prefix remains truthful while reconciliation repairs intent');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

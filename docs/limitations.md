@@ -115,13 +115,13 @@ says exist are checked the same way, against the symbol that backs them.
 - **The lifecycle is observed, but the detached process is not controlled.** A configured merge
   durably appends `deploy.requested` before spawn, and reactor reconciliation repairs a crash
   before request or before launch
-  (`packages/core/src/deploy.ts:86`<!--cite:requestDeployOnMerge-->). The fold distinguishes
+  (`packages/core/src/deploy.ts:129`<!--cite:requestDeployOnMerge-->). The fold distinguishes
   `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; a legacy merge with no
   configuration evidence remains unknown. Explicit success sets compatibility `deployed` true
   (`packages/core/src/fold.ts:808`<!--cite:foldDeploySucceeded-->).
   A process-launch error becomes `failed`, while a silent hook becomes `timed-out` after the
   configured deploy-freshness hour
-  (`packages/core/src/deploy.ts:217`<!--cite:stalePendingDeployEvents-->). The process is still
+  (`packages/core/src/deploy.ts:267`<!--cite:stalePendingDeployEvents-->). The process is still
   detached and unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->):
   timeout records truth but does not kill a surviving process, and a late terminal receipt may
   supersede it. *Bounded:* deploy is off by default, merge correctness does not depend on deploy,

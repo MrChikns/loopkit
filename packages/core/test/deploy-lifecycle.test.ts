@@ -103,7 +103,9 @@ test('deploy: requested is durable before detached spawn is invoked', async () =
   const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-request-order-'));
   try {
     await appendEvents(ledgerDir, [
-      makeEvent('dispatch', 'WI-010', 'item.merged', { commit: 'abc', deployed: false }),
+      makeEvent('dispatch', 'WI-010', 'item.merged', {
+        commit: 'abc', deployed: false, deployConfigured: true,
+      }),
     ]);
     let observedRequestedAtSpawn = false;
     const spawnDeploy = (() => {
@@ -138,7 +140,9 @@ test('deploy: synchronous spawn failure appends failed after requested', async (
   const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-spawn-fail-'));
   try {
     await appendEvents(ledgerDir, [
-      makeEvent('dispatch', 'WI-011', 'item.merged', { commit: 'def', deployed: false }),
+      makeEvent('dispatch', 'WI-011', 'item.merged', {
+        commit: 'def', deployed: false, deployConfigured: true,
+      }),
     ]);
     const spawnDeploy = (() => {
       throw new Error('synthetic spawn failure');
@@ -169,7 +173,13 @@ test('deploy: synchronous spawn failure appends failed after requested', async (
 test('deploy: requested count remains truthful when the later failure receipt cannot persist', async () => {
   const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-failure-persist-'));
   try {
-    let persistenceCalls = 0;
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-013', 'item.merged', {
+        commit: 'jkl',
+        deployed: false,
+        deployConfigured: true,
+      }),
+    ]);
     const result = await requestDeployOnMerge({
       actor: 'dispatch',
       ledgerDir,
@@ -179,17 +189,15 @@ test('deploy: requested count remains truthful when the later failure receipt ca
       spawnDeploy: (() => {
         throw new Error('synthetic launch failure');
       }) as unknown as DeploySpawn,
-      persistEvents: async (dir, events) => {
-        persistenceCalls++;
-        if (persistenceCalls > 1) throw new Error('synthetic receipt write failure');
-        await appendEvents(dir, events);
+      persistEvents: async () => {
+        throw new Error('synthetic receipt write failure');
       },
     });
 
     assert.equal(result.eventsWritten, 1, 'the already-durable request is not erased from accounting');
     assert.match(result.reason ?? '', /receipt persistence failed.*synthetic receipt write failure/);
     const events = await loadAllEvents(ledgerDir);
-    assert.deepEqual(events.map(e => e.type), ['deploy.requested']);
+    assert.deepEqual(events.map(e => e.type), ['item.merged', 'deploy.requested']);
     assert.equal(fold(events).items.get('WI-013')!.deployStatus, 'pending');
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
@@ -200,7 +208,9 @@ test('deploy: asynchronous ChildProcess launch error appends failed after reques
   const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-async-spawn-fail-'));
   try {
     await appendEvents(ledgerDir, [
-      makeEvent('dispatch', 'WI-012', 'item.merged', { commit: 'ghi', deployed: false }),
+      makeEvent('dispatch', 'WI-012', 'item.merged', {
+        commit: 'ghi', deployed: false, deployConfigured: true,
+      }),
     ]);
 
     const result = await requestDeployOnMerge({
@@ -423,5 +433,77 @@ test('deploy reconciliation: target crash recovery uses target execution and mis
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
     rmSync(targetRoot, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: concurrent requested plus success wins before a stale missing-request claim', async () => {
+  const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-claim-race-'));
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-060', 'item.merged', {
+        commit: 'abc', deployed: false, deployConfigured: true,
+      }),
+    ]);
+    const staleItems = fold(await loadAllEvents(ledgerDir)).items;
+    let launches = 0;
+    const spawnDeploy = (() => {
+      launches++;
+      return spawn('sh', ['-c', 'true'], { cwd: ledgerDir, detached: true, stdio: 'ignore' });
+    }) as unknown as DeploySpawn;
+
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: staleItems.values(),
+      resolve: () => ({ ok: true, repoRoot: ledgerDir, deployCommand: 'true' }),
+      spawnDeploy,
+      beforeCandidate: async rec => {
+        if (rec.id !== 'WI-060') return;
+        await appendEvents(ledgerDir, [
+          makeEvent('dispatch', rec.id, 'deploy.requested', {}),
+          makeEvent('deploy-hook', rec.id, 'deploy.succeeded', { commit: 'abc' }),
+        ]);
+      },
+    });
+
+    assert.equal(result.eventsWritten, 0);
+    assert.equal(launches, 0, 'a fresh terminal fold suppresses the stale launch');
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-060' && e.type === 'deploy.requested').length, 1);
+    assert.equal(fold(events).items.get('WI-060')!.deployStatus, 'succeeded');
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: concurrent success suppresses stale missing-config failure', async () => {
+  const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-config-race-'));
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-061', 'item.merged', {
+        commit: 'def', deployed: false, deployConfigured: true,
+      }),
+    ]);
+    const staleItems = fold(await loadAllEvents(ledgerDir)).items;
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: staleItems.values(),
+      resolve: () => ({ ok: false, reason: 'configured deploy command disappeared' }),
+      beforeCandidate: async rec => {
+        await appendEvents(ledgerDir, [
+          makeEvent('dispatch', rec.id, 'deploy.requested', {}),
+          makeEvent('deploy-hook', rec.id, 'deploy.succeeded', { commit: 'def' }),
+        ]);
+      },
+    });
+
+    assert.equal(result.eventsWritten, 0);
+    assert.deepEqual(result.failures, []);
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-061' && e.type === 'deploy.failed').length, 0);
+    assert.equal(fold(events).items.get('WI-061')!.deployStatus, 'succeeded');
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
   }
 });

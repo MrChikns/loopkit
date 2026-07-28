@@ -33,29 +33,8 @@ export interface DeployRequestResult {
   reason?: string;
 }
 
-async function persistDeployFailure(
-  request: Pick<DeployRequest, 'actor' | 'ledgerDir' | 'persistEvents'>,
-  wiIds: string[],
-  reason: string,
-): Promise<{ eventsWritten: number; reason: string }> {
-  try {
-    await (request.persistEvents ?? appendEvents)(
-      request.ledgerDir,
-      wiIds.map(wi => makeEvent(request.actor, wi, 'deploy.failed', { reason })),
-    );
-    return { eventsWritten: wiIds.length, reason };
-  } catch (error) {
-    return {
-      eventsWritten: 0,
-      reason: `${reason}; deploy.failed receipt persistence failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    };
-  }
-}
-
 async function persistPendingDeployFailureIfStillPending(
-  request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir' | 'persistEvents'>,
   wiIds: string[],
   reason: string,
 ): Promise<{ eventsWritten: number; reason?: string }> {
@@ -66,7 +45,12 @@ async function persistPendingDeployFailureIfStillPending(
       if (stillPending.length === 0) {
         return { eventsWritten: 0 };
       }
-      await tx.append(stillPending.map(wi => makeEvent(request.actor, wi, 'deploy.failed', { reason })));
+      const events = stillPending.map(wi => makeEvent(request.actor, wi, 'deploy.failed', { reason }));
+      if (request.persistEvents) {
+        await request.persistEvents(request.ledgerDir, events);
+      } else {
+        await tx.append(events);
+      }
       return { eventsWritten: stillPending.length, reason };
     });
   } catch (error) {
@@ -77,6 +61,65 @@ async function persistPendingDeployFailureIfStillPending(
       }`,
     };
   }
+}
+
+async function persistReconciliationFailureIfStillActionable(
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
+  wiId: string,
+  reason: string,
+): Promise<{ eventsWritten: number; reason?: string }> {
+  try {
+    return await withLock(request.ledgerDir, async tx => {
+      const rec = fold(await tx.loadAll()).items.get(wiId);
+      if (rec?.deployConfigured !== true ||
+          (rec.deployStatus !== undefined && rec.deployStatus !== 'pending')) {
+        return { eventsWritten: 0 };
+      }
+      await tx.append([makeEvent(request.actor, wiId, 'deploy.failed', { reason })]);
+      return { eventsWritten: 1, reason };
+    });
+  } catch (error) {
+    return {
+      eventsWritten: 0,
+      reason: `${reason}; deploy.failed receipt persistence failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+}
+
+export interface DeployRequestClaim {
+  claimed: string[];
+  pending: string[];
+  ignored: string[];
+}
+
+/**
+ * The one request-claim transaction used by both the normal post-merge handoff and restart
+ * reconciliation. A stale caller can never append deploy.requested after pending/terminal truth.
+ */
+export async function claimDeployRequest(
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
+  wiIds: string[],
+): Promise<DeployRequestClaim> {
+  return withLock(request.ledgerDir, async tx => {
+    const items = fold(await tx.loadAll()).items;
+    const claim: DeployRequestClaim = { claimed: [], pending: [], ignored: [] };
+    for (const wi of [...new Set(wiIds)].sort()) {
+      const rec = items.get(wi);
+      if (rec?.deployConfigured === true && rec.deployStatus === undefined) {
+        claim.claimed.push(wi);
+      } else if (rec?.deployConfigured === true && rec.deployStatus === 'pending') {
+        claim.pending.push(wi);
+      } else {
+        claim.ignored.push(wi);
+      }
+    }
+    if (claim.claimed.length > 0) {
+      await tx.append(claim.claimed.map(wi => makeEvent(request.actor, wi, 'deploy.requested', {})));
+    }
+    return claim;
+  });
 }
 
 /**
@@ -92,27 +135,33 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
     return { configured: true, started: false, eventsWritten: 0, reason: 'no merged items supplied' };
   }
 
-  await (request.persistEvents ?? appendEvents)(
-    request.ledgerDir,
-    wiIds.map(wi => makeEvent(request.actor, wi, 'deploy.requested', {})),
-  );
+  const claim = await claimDeployRequest(request, wiIds);
+  const launchIds = [...claim.claimed, ...claim.pending].sort();
+  if (launchIds.length === 0) {
+    return {
+      configured: true,
+      started: false,
+      eventsWritten: 0,
+      reason: 'deploy request already terminal or lacks current configuration evidence',
+    };
+  }
 
   const spawnResult = await fireDeployOnMerge(
     request.repoRoot,
     request.deployCommand,
-    wiIds,
+    launchIds,
     request.spawnDeploy,
   );
   if (spawnResult.started) {
-    return { configured: true, started: true, eventsWritten: wiIds.length };
+    return { configured: true, started: true, eventsWritten: claim.claimed.length };
   }
 
-  const failure = await persistDeployFailure(request, wiIds, spawnResult.reason);
+  const failure = await persistPendingDeployFailureIfStillPending(request, launchIds, spawnResult.reason);
   return {
     configured: true,
     started: false,
     // deploy.requested is already durable even if persisting the later failure receipt fails.
-    eventsWritten: wiIds.length + failure.eventsWritten,
+    eventsWritten: claim.claimed.length + failure.eventsWritten,
     reason: failure.reason,
   };
 }
@@ -171,6 +220,8 @@ export async function reconcileDeployIntents(args: {
   dryRun?: boolean;
   spawnDeploy?: DeploySpawn;
   excludeItems?: ReadonlySet<string>;
+  /** Deterministic concurrency seam used to prove fresh-fold suppression. */
+  beforeCandidate?: (item: ItemRecord) => Promise<void>;
 }): Promise<DeployReconcileResult> {
   const candidates = [...args.items]
     .filter(rec => rec.deployConfigured === true)
@@ -181,14 +232,15 @@ export async function reconcileDeployIntents(args: {
   if (args.dryRun) return result;
 
   for (const rec of candidates) {
+    await args.beforeCandidate?.(rec);
     const execution = args.resolve(rec);
     if (!execution.ok || !execution.deployCommand) {
       const reason = execution.ok
         ? 'deploy configuration was removed before the durable request could complete'
         : execution.reason;
-      const failure = await persistDeployFailure(args, [rec.id], reason);
+      const failure = await persistReconciliationFailureIfStillActionable(args, rec.id, reason);
       result.eventsWritten += failure.eventsWritten;
-      result.failures.push(`${rec.id}: ${failure.reason}`);
+      if (failure.reason) result.failures.push(`${rec.id}: ${failure.reason}`);
       continue;
     }
 
@@ -200,9 +252,7 @@ export async function reconcileDeployIntents(args: {
       wiIds: [rec.id],
       spawnDeploy: args.spawnDeploy,
     };
-    const launch = rec.deployStatus === 'pending'
-      ? await resumePendingDeploy(request)
-      : await requestDeployOnMerge(request);
+    const launch = await requestDeployOnMerge(request);
     result.eventsWritten += launch.eventsWritten;
     if (!launch.started && launch.reason) result.failures.push(`${rec.id}: ${launch.reason}`);
   }

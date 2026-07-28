@@ -107,6 +107,8 @@ export interface ReactorOptions {
   branchProbe?: (repoRoot: string) => string;
   /** Config override (for tests) */
   config?: LoopkitConfig;
+  /** Injected deploy handoff for deterministic post-merge persistence-failure tests. */
+  deployRequest?: typeof requestDeployOnMerge;
   /**
    * Override OPS_AUTONOMY for the heal step (for tests).
    * Real value comes from process.env.OPS_AUTONOMY (default: propose).
@@ -3232,33 +3234,44 @@ async function stepApplyVerbs(
     // Deployment hand-off starts only after item.merged is durable. Each helper appends
     // deploy.requested before detached spawn and records a synchronous spawn failure.
     let deployEventsWritten = 0;
+    const deployFailures: string[] = [];
     if (!opts.dryRun) {
       for (const deploy of targetDeploys) {
-        const result = await requestDeployOnMerge({
-          actor: 'reactor',
-          ledgerDir: opts.ledgerDir,
-          ...deploy,
-        });
-        deployEventsWritten += result.eventsWritten;
+        try {
+          const result = await (opts.deployRequest ?? requestDeployOnMerge)({
+            actor: 'reactor',
+            ledgerDir: opts.ledgerDir,
+            ...deploy,
+          });
+          deployEventsWritten += result.eventsWritten;
+        } catch (error) {
+          deployFailures.push(error instanceof Error ? error.message : String(error));
+        }
       }
       if (mergedThisBeat) {
-        const result = await requestDeployOnMerge({
-          actor: 'reactor',
-          ledgerDir: opts.ledgerDir,
-          repoRoot: opts.repoRoot,
-          deployCommand: cfg.deployCommand,
-          wiIds: mergedWiIds,
-        });
-        deployEventsWritten += result.eventsWritten;
+        try {
+          const result = await (opts.deployRequest ?? requestDeployOnMerge)({
+            actor: 'reactor',
+            ledgerDir: opts.ledgerDir,
+            repoRoot: opts.repoRoot,
+            deployCommand: cfg.deployCommand,
+            wiIds: mergedWiIds,
+          });
+          deployEventsWritten += result.eventsWritten;
+        } catch (error) {
+          deployFailures.push(error instanceof Error ? error.message : String(error));
+        }
       }
     }
 
     return {
       step,
-      ok: true,
-      eventsWritten: events.length + deployEventsWritten,
+      ok: deployFailures.length === 0,
+      eventsWritten: opts.dryRun ? 0 : events.length + deployEventsWritten,
       mdWritten: false,
-      detail: `processed ${processed} approved merges`,
+      detail: `processed ${processed} approved merges${
+        deployFailures.length > 0 ? `; deploy request persistence failed: ${deployFailures.join('; ')}` : ''
+      }`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
@@ -5051,7 +5064,7 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     // Step (g): self-arming trigger map — fire item.captured on predicate false→true edges
     pushStep(await stepArmed(opts, cfg));
 
-    const totalEventsWritten = steps.reduce((s, r) => s + r.eventsWritten, 0);
+    const totalEventsWritten = opts.dryRun ? 0 : steps.reduce((s, r) => s + r.eventsWritten, 0);
     return { dryRun: opts.dryRun ?? false, steps, totalEventsWritten };
   } finally {
     // Commit ledger residue every beat (not just on a clean exit —
