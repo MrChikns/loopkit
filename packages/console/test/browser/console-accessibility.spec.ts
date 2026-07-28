@@ -218,29 +218,18 @@ for (const route of routes) {
   });
 }
 
-test('palette keyboard flow filters, navigates, closes, and restores focus', async ({ page }) => {
+test('dormant palette stays unavailable without a visible trigger', async ({ page }) => {
   await page.goto('/command');
-  const trigger = page.getByRole('button', { name: 'Open command palette' });
-  await trigger.focus();
-  await trigger.press('Enter');
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toHaveCount(0);
 
-  const dialog = page.getByRole('dialog', { name: 'Command palette' });
-  const search = page.getByRole('combobox', { name: 'Search commands and destinations' });
-  await expect(dialog).toBeVisible();
-  await expect(search).toBeFocused();
-  await search.fill('Analytics');
-  await expect(dialog.getByRole('button', { name: /^Analytics\b/ })).toBeVisible();
-  await search.press('End');
-  await search.press('Enter');
-  await expect(page).toHaveURL(/\/observability$/);
+  const intentTrigger = page.getByRole('button', { name: 'Drop intent' });
+  const dialog = page.locator('[data-opsui-shell="palette"]');
+  await intentTrigger.focus();
+  await page.keyboard.press('ControlOrMeta+K');
 
-  await page.goto('/command');
-  await trigger.focus();
-  await page.keyboard.press('Control+K');
-  await expect(search).toBeFocused();
-  await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
-  await expect(trigger).toBeFocused();
+  await expect(intentTrigger).toBeFocused();
+  await expect(page).toHaveURL(/\/command$/);
 });
 
 test('intent dialog is keyboard reachable and restores focus when dismissed', async ({ page }) => {

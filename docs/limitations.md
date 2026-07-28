@@ -82,7 +82,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **The target lane does not re-gate the combined destination state.** The engineering lane will not
   merge a branch whose base moved without rebasing and re-running the gate over the combined state,
   and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4443`<!--cite:postIntegrationRegate-->). The target build lane
+  (`packages/core/src/beats/dispatch.ts:4936`<!--cite:postIntegrationRegate-->). The target build lane
   does not carry that invariant: it gates its isolated target branch once and then merges it into
   the declared destination without a post-integration re-gate. *Bounded:* it is an opt-in path that
   runs against the target's own repo and still gates before merging. *Matters when:* the destination

@@ -47,7 +47,7 @@ export function CommandPalette(props: CommandPaletteProps): string {
       `<div class="opsui-palette__backdrop" data-opsui-shell="palette-close"></div>` +
       `<div class="opsui-palette__panel">` +
       `<input type="search" class="opsui-palette__input" role="combobox" aria-expanded="true"` +
-      ` aria-controls="opsui-palette-results" aria-label="Go to a page" autocomplete="off"` +
+      ` aria-controls="opsui-palette-results" aria-label="Search commands and destinations" autocomplete="off"` +
       ` placeholder="${esc(props.placeholder ?? 'Go to a page…')}" />` +
     `<div id="opsui-palette-results" class="opsui-palette__scroll">${body}</div>` +
     `</div></div>`

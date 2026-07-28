@@ -332,7 +332,7 @@
   white-space: nowrap;
 }
 .opsui-topbar__status { grid-column: 2; display: flex; align-items: center; }
-.opsui-topbar__actions { grid-column: 3; display: flex; align-items: center; gap: 8px; }
+.opsui-topbar__actions { grid-column: 3; display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 .opsui-topbar__palette,
 .opsui-topbar__intent {
   display: inline-flex;
