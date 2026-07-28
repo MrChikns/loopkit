@@ -407,8 +407,10 @@ export function fireDeployOnMerge(
   deployCommand: string,
   wiIds: string[],
   spawnDeploy: DeploySpawn = spawn,
-): DeploySpawnResult {
-  if (!deployCommand) return { started: false, reason: 'deploy command is not configured' };
+): Promise<DeploySpawnResult> {
+  if (!deployCommand) {
+    return Promise.resolve({ started: false, reason: 'deploy command is not configured' });
+  }
   try {
     const child = spawnDeploy('sh', ['-c', deployCommand], {
       cwd: repoRoot,
@@ -416,12 +418,29 @@ export function fireDeployOnMerge(
       stdio: 'ignore',
       env: { ...process.env, DEPLOY_WI_IDS: wiIds.join(' ') },
     });
-    child.unref();
-    return { started: true };
+    return new Promise(resolve => {
+      let settled = false;
+      child.once('spawn', () => {
+        settled = true;
+        child.unref();
+        resolve({ started: true });
+      });
+      // Node reports launch failures such as ENOENT asynchronously. Keep the listener
+      // installed after `spawn` too so a later ChildProcess error can never become an
+      // unhandled process-level exception; only a pre-spawn error changes the receipt.
+      child.once('error', error => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          started: false,
+          reason: `deploy spawn failed: ${error.message}`,
+        });
+      });
+    });
   } catch (error) {
-    return {
+    return Promise.resolve({
       started: false,
       reason: `deploy spawn failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    });
   }
 }

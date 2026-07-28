@@ -60,7 +60,7 @@ says exist are checked the same way, against the symbol that backs them.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:1027`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1035`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -100,7 +100,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3326`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3335`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -113,13 +113,15 @@ says exist are checked the same way, against the symbol that backs them.
 ## Deploy signalling
 
 - **The lifecycle is observed, but the detached process is not controlled.** A configured merge
-  durably appends `deploy.requested` before spawn
-  (`packages/core/src/deploy.ts:38`<!--cite:requestDeployOnMerge-->), and the fold distinguishes
-  `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; compatibility `deployed`
-  is true only for success (`packages/core/src/fold.ts:805`<!--cite:foldDeploySucceeded-->).
-  A synchronous spawn error becomes `failed`, while a silent hook becomes `timed-out` after the
+  durably appends `deploy.requested` before spawn, and reactor reconciliation repairs a crash
+  before request or before launch
+  (`packages/core/src/deploy.ts:86`<!--cite:requestDeployOnMerge-->). The fold distinguishes
+  `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; a legacy merge with no
+  configuration evidence remains unknown. Explicit success sets compatibility `deployed` true
+  (`packages/core/src/fold.ts:808`<!--cite:foldDeploySucceeded-->).
+  A process-launch error becomes `failed`, while a silent hook becomes `timed-out` after the
   configured deploy-freshness hour
-  (`packages/core/src/deploy.ts:81`<!--cite:stalePendingDeployEvents-->). The process is still
+  (`packages/core/src/deploy.ts:217`<!--cite:stalePendingDeployEvents-->). The process is still
   detached and unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->):
   timeout records truth but does not kill a surviving process, and a late terminal receipt may
   supersede it. *Bounded:* deploy is off by default, merge correctness does not depend on deploy,
@@ -129,7 +131,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all
-  (`packages/core/src/fold.ts:731`<!--cite:certificationRollback-->). Nothing in the plane executes it —
+  (`packages/core/src/fold.ts:734`<!--cite:certificationRollback-->). Nothing in the plane executes it —
   it is written for a human to read and run. *Bounded:* that is the intended contract; an automated
   rollback with no verification step would be a worse failure mode than a recorded instruction.
   *Matters when:* you assumed "certified" implied a mechanism rather than a note.
@@ -224,7 +226,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
   page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
   `item.respec`, which amends the item's `spec` *and* its acceptance criteria
-  (`packages/core/src/fold.ts:1463`<!--cite:foldRespec-->) — the fields builders and the judge are
+  (`packages/core/src/fold.ts:1469`<!--cite:foldRespec-->) — the fields builders and the judge are
   given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
   rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
   does not linger. *What remains:* the original capture text is still on the trail and still the right

@@ -335,10 +335,13 @@ export interface ItemRecord {
   transientRequeueCount?: number;
   mergeCommit?: string;
   /**
-   * Additive deploy lifecycle truth. `deployed` remains the compatibility boolean:
-   * only `succeeded` maps to true; every other observed lifecycle state maps to false.
+   * Additive deploy lifecycle truth. Undefined means legacy/unknown. `deployed` remains the
+   * compatibility boolean: explicit lifecycle receipts update it, while an old item.merged
+   * boolean is preserved without being promoted into lifecycle truth.
    */
   deployStatus?: DeployLifecycleStatus;
+  /** Explicit configuration fact from current item.merged producers; absent means legacy/unknown. */
+  deployConfigured?: boolean;
   deployRequestedAt?: string;
   deployCompletedAt?: string;
   deployFailureReason?: string;
@@ -1231,9 +1234,12 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         rec.mergedAt = ev.ts;
         rec.mergeCommit = typeof d['commit'] === 'string' ? d['commit'] : undefined;
         rec.deployed = typeof d['deployed'] === 'boolean' ? d['deployed'] : undefined;
-        rec.deployStatus = rec.deployed === true ? 'succeeded' : 'not-configured';
+        rec.deployConfigured = typeof d['deployConfigured'] === 'boolean'
+          ? d['deployConfigured']
+          : undefined;
+        rec.deployStatus = rec.deployConfigured === false ? 'not-configured' : undefined;
         rec.deployRequestedAt = undefined;
-        rec.deployCompletedAt = rec.deployed === true ? ev.ts : undefined;
+        rec.deployCompletedAt = undefined;
         rec.deployFailureReason = undefined;
         foldMergeEvidence(rec, d);
         clearParkFields(rec);

@@ -103,12 +103,12 @@ span and pinned by its own drift test. If this prose and that table disagree, th
 - **Planning** (`packages/core/src/beats/dispatch.ts:2231`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2779`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2788`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery. At the
   merge terminal it re-reads that default branch; if it moved, the target lane rebases, recomputes
   the build's actual changed files and re-runs the target gate over the combined state
-  (`packages/core/src/beats/dispatch.ts:2623`<!--cite:targetPostIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:2627`<!--cite:targetPostIntegrationRegate-->).
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
   spine guard and a push step; it shares the post-integration re-gate invariant with target.
 - An **attended drain** is not a fourth lane. When you drive the plane by hand, a coordinator agent
@@ -159,7 +159,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1463`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1469`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -203,7 +203,7 @@ That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3306`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3315`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
@@ -226,7 +226,7 @@ per-item backoff; they do not trip this shared provider breaker.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3426`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3435`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
   selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
@@ -367,7 +367,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4118`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4127`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -405,15 +405,15 @@ flowchart TD
 
 - The invariant: **no build reaches its destination without a gate covering every commit that landed
   since its branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4552`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4566`<!--cite:postIntegrationRegate-->).
 - The target lane applies the same invariant with its own manifest gate: re-read destination,
   rebase, recompute evidence, then re-gate. It never re-runs the advisory judge.
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, verifies that the primary checkout has no staged, unstaged, or untracked
   operator state, then hard-resets it onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4742`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:4756`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4768`<!--cite:pushRaceRegate-->). A dirty checkout stops the
+  (`packages/core/src/beats/dispatch.ts:4782`<!--cite:pushRaceRegate-->). A dirty checkout stops the
   recovery and records exact porcelain path evidence instead of discarding it.
 - Every failure here is a park, never a force. A conflict or a red re-gate stops the item; nothing is
   merged past a disagreement.
@@ -486,11 +486,11 @@ and are promoted only by a manual config change after burn-in.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3265`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3274`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:3060`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:3069`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
@@ -600,15 +600,18 @@ flowchart TD
 
 - **The request is durable before process hand-off.** The plane appends `deploy.requested` for every
   merged item, awaits that write, and only then spawns
-  (`packages/core/src/deploy.ts:38`<!--cite:requestDeployOnMerge-->). A synchronous spawn error
-  immediately appends `deploy.failed`.
+  (`packages/core/src/deploy.ts:86`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
+  asynchronous process-launch errors append `deploy.failed`. A reactor reconciliation also repairs
+  both crash windows: a configured merge missing its request is requested and launched, while a
+  still-pending request safely re-invokes the configured self-locking command.
 - **The process remains fire-and-forget by construction.** It is detached, stdio ignored and
   unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->). The
   merged item ids arrive through `DEPLOY_WI_IDS`; **your** script appends `deploy.succeeded` or
   `deploy.failed`.
-- The fold exposes five honest states: `not-configured`, `pending`, `succeeded`, `failed` and
-  `timed-out`. The compatibility `deployed` boolean is true only for `succeeded`
-  (`packages/core/src/fold.ts:805`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
+- Current merges fold to five explicit states: `not-configured`, `pending`, `succeeded`, `failed`
+  and `timed-out`; a legacy merge with no configuration evidence remains honestly **unknown**.
+  Explicit lifecycle success sets compatibility `deployed` true
+  (`packages/core/src/fold.ts:808`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
   none changes the item's merged/accepted state.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
@@ -617,13 +620,13 @@ flowchart TD
   not be trusted on this field.
 - **A silent script becomes an explicit timeout.** Each reactor beat closes a `pending` request
   after **1**<!--pin:deployBehindHours--> hour
-  (`packages/core/src/deploy.ts:81`<!--cite:stalePendingDeployEvents-->), deterministically and once.
+  (`packages/core/src/deploy.ts:217`<!--cite:stalePendingDeployEvents-->), deterministically and once.
   A late success can still supersede that timeout. The separate deploy-freshness SLO
   (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains the checkout-level backstop,
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
   `unknown`.
 - ⚪ **There is no automatic rollback anywhere.** A merge's `certification.rollback` is a string the
-  worker wrote and you read (`packages/core/src/fold.ts:731`<!--cite:certificationRollback-->). Nothing
+  worker wrote and you read (`packages/core/src/fold.ts:734`<!--cite:certificationRollback-->). Nothing
   executes it.
 
 ---

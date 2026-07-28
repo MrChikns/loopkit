@@ -363,8 +363,10 @@ export function parsePortabilityTargets(portability: string | undefined): Portab
 export interface ItemMergedData {
   commit: string;
   /**
-   * WI-176 — ONE semantic across every lane: **always `false` at merge time.** A merge observes
-   * that code landed on a branch; it never observes a deploy. Deploy truth arrives out of band —
+   * WI-176 — ONE semantic across every current lane: **always `false` at merge time.** A merge
+   * observes that code landed on a branch; it never observes a deploy. Legacy events may contain
+   * either boolean and the fold preserves it only as compatibility history; it never promotes
+   * that old flag into an additive lifecycle receipt. Deploy truth arrives out of band —
    * `requestDeployOnMerge` first appends `deploy.requested`, then spawns the deploy DETACHED with
    * `DEPLOY_WI_IDS`. The deploy script appends `deploy.succeeded` / `deploy.failed`; a reactor beat
    * converts a request that never reports before `deployBehindHours` into `deploy.timed-out`.
@@ -375,8 +377,14 @@ export interface ItemMergedData {
    * whenever a deploy command was merely CONFIGURED, asserted before anything was observed — and
    * the already-shipped retirement wrote a flat `true`. Never reintroduce either: "a deploy is
    * configured" and "a deploy succeeded" are different facts, and this field is the second one.
-   */
+  */
   deployed?: boolean;
+  /**
+   * Additive configuration evidence emitted by every current merge producer. `false` establishes
+   * not-configured; `true` deliberately does not establish pending until deploy.requested is
+   * durable. Absent on legacy merges, whose lifecycle therefore remains unknown.
+   */
+  deployConfigured?: boolean;
   /** How this item was attributed in a batch merge (absent on single-item merges that had no manifest). */
   attribution?: 'manifest' | 'commit-subject';
   /**

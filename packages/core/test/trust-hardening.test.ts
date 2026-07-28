@@ -733,15 +733,15 @@ test('WI-176: the already-shipped retirement records deployed:false (it observes
   }
 });
 
-test('deploy: fireDeployOnMerge runs nothing when deployCommand is empty', () => {
+test('deploy: fireDeployOnMerge runs nothing when deployCommand is empty', async () => {
   const dir = makeTempDir();
   try {
     const sentinel = join(dir, 'deployed.txt');
     // Empty command → no-op: the sentinel must NOT appear.
-    fireDeployOnMerge(dir, '', ['WI-001']);
+    await fireDeployOnMerge(dir, '', ['WI-001']);
     assert.equal(existsSync(sentinel), false, 'empty deployCommand runs no command');
     // A real command DOES fire (proves the empty-branch is the reason nothing ran above).
-    fireDeployOnMerge(dir, `touch ${sentinel}`, ['WI-001']);
+    await fireDeployOnMerge(dir, `touch ${sentinel}`, ['WI-001']);
     // The child is detached; give it a brief moment, then assert. Poll to avoid flakiness.
     const deadline = Date.now() + 2000;
     while (!existsSync(sentinel) && Date.now() < deadline) { /* spin briefly */ }

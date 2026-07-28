@@ -43,7 +43,7 @@ import {
 } from '../slo.js';
 import { getRunbook, RunbookContext, resolveHealMode } from '../runbooks.js';
 import { setupWorktreeDeps } from './worktree-deps.js';
-import { requestDeployOnMerge, stalePendingDeployEvents } from '../deploy.js';
+import { closeStalePendingDeploys, reconcileDeployIntents, requestDeployOnMerge } from '../deploy.js';
 import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity } from './dispatch.js';
 import { classifyParkForAutoApprove, parseOverstepReason, parseDependencyReason } from '../approval.js';
 import { classifyAcceptanceTier, splitTouches, acceptanceClassifyFiles, hasEvidenceGap } from '../acceptance.js';
@@ -2663,7 +2663,11 @@ function applyApprovedTargetMerge(
 
   if (opts.dryRun) {
     events.push(makeEvent('reactor', rec.id, 'gate.passed', { tests: 'dry-run (not executed)' }));
-    events.push(makeEvent('reactor', rec.id, 'item.merged', { commit: 'dry-run', deployed: false }));
+    events.push(makeEvent('reactor', rec.id, 'item.merged', {
+      commit: 'dry-run',
+      deployed: false,
+      deployConfigured: Boolean(manifest.deployCommand),
+    }));
     return { events, merged: true };
   }
 
@@ -2831,6 +2835,7 @@ function applyApprovedTargetMerge(
   events.push(makeEvent('reactor', rec.id, 'item.merged', {
     commit: mergeSha,
     deployed: false,
+    deployConfigured: Boolean(manifest.deployCommand),
     ...(targetMergeEvidence ?? {}),
   }));
   return {
@@ -2925,6 +2930,7 @@ async function stepApplyVerbs(
       events.push(makeEvent('reactor', rec.id, 'item.merged', {
           commit: 'dry-run',
           deployed: false,
+          deployConfigured: Boolean(cfg.deployCommand),
         }));
         processed++;
         continue;
@@ -3213,6 +3219,7 @@ async function stepApplyVerbs(
       events.push(makeEvent('reactor', rec.id, 'item.merged', {
         commit: commitSha,
         deployed: false,
+        deployConfigured: Boolean(cfg.deployCommand),
         ...(approvedMergeEvidence ?? {}),
       }));
       processed++;
@@ -3727,9 +3734,10 @@ async function stepDoctor(
 }
 
 /**
- * Close detached deploy requests that never produced a terminal receipt. This is a data-only
- * lifecycle transition: the merged item remains merged/accepted and no rollback is attempted.
- * Reusing deployBehindHours gives the receipt timeout and deploy-freshness SLO one clock.
+ * Reconcile durable deploy intent after process crashes, then close requests that never produce
+ * a terminal receipt. These are data-only lifecycle transitions: the merged item remains
+ * merged/accepted and no rollback is attempted. Reusing deployBehindHours gives the receipt
+ * timeout and deploy-freshness SLO one clock.
  */
 async function stepDeployTimeouts(
   opts: ReactorOptions,
@@ -3737,26 +3745,56 @@ async function stepDeployTimeouts(
 ): Promise<StepResult> {
   const step = 'deploy-timeouts';
   try {
+    const timeoutHours = cfg.slo?.deployBehindHours ?? 1;
+    const events = await closeStalePendingDeploys({
+      ledgerDir: opts.ledgerDir,
+      actor: 'reactor',
+      nowMs: opts.now ?? Date.now(),
+      timeoutMs: timeoutHours * 3_600_000,
+      dryRun: opts.dryRun,
+    });
     const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
     const foldResult = fold(allEvents);
-    const timeoutHours = cfg.slo?.deployBehindHours ?? 1;
-    const events = stalePendingDeployEvents(
-      foldResult.items.values(),
-      'reactor',
-      Date.now(),
-      timeoutHours * 3_600_000,
-    );
-    if (!opts.dryRun && events.length > 0) {
-      await appendEvents(opts.ledgerDir, events);
-    }
+    const timedOutItems = new Set(events.map(event => event.item));
+    const reconciliation = await reconcileDeployIntents({
+      ledgerDir: opts.ledgerDir,
+      actor: 'reactor',
+      items: foldResult.items.values(),
+      dryRun: opts.dryRun,
+      excludeItems: timedOutItems,
+      resolve: rec => {
+        // A targetId without a target name is attribution metadata, not permission to switch
+        // execution away from the plane. This mirrors every other target-routing call site.
+        if (!rec.target) {
+          return { ok: true, repoRoot: opts.repoRoot, deployCommand: cfg.deployCommand };
+        }
+        const target = resolveRegisteredTarget(foldResult.targets, rec);
+        if (!target.ok) {
+          return {
+            ok: false,
+            reason: `deploy reconciliation failed: ${target.error}`,
+          };
+        }
+        return {
+          ok: true,
+          repoRoot: target.reg.repoPath,
+          deployCommand: target.manifest.deployCommand,
+        };
+      },
+    });
+    const failureDetail = reconciliation.failures.length > 0
+      ? `; ${reconciliation.failures.join('; ')}`
+      : '';
     return {
       step,
       ok: true,
-      eventsWritten: opts.dryRun ? 0 : events.length,
+      eventsWritten: opts.dryRun ? 0 : events.length + reconciliation.eventsWritten,
       mdWritten: false,
-      detail: events.length === 0
+      detail: `${events.length === 0
         ? 'no stale pending deploys'
-        : `${opts.dryRun ? 'would time out' : 'timed out'} ${events.length} stale deploy request(s)`,
+        : `${opts.dryRun ? 'would time out' : 'timed out'} ${events.length} stale deploy request(s)`}; ${
+        reconciliation.attempted
+      } deploy intent(s) ${opts.dryRun ? 'would be reconciled' : 'reconciled'}${failureDetail}`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };

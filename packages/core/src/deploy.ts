@@ -7,8 +7,8 @@
  * None of these events changes the item's delivery state or attempts a rollback.
  */
 
-import { appendEvents } from './ledger.js';
-import { ItemRecord } from './fold.js';
+import { appendEvents, withLock } from './ledger.js';
+import { fold, ItemRecord } from './fold.js';
 import { LedgerEvent, makeEvent } from './schema.js';
 import {
   DeploySpawn,
@@ -22,6 +22,8 @@ export interface DeployRequest {
   deployCommand: string;
   wiIds: string[];
   spawnDeploy?: DeploySpawn;
+  /** Test seam for deterministic persistence-failure coverage. */
+  persistEvents?: typeof appendEvents;
 }
 
 export interface DeployRequestResult {
@@ -29,6 +31,52 @@ export interface DeployRequestResult {
   started: boolean;
   eventsWritten: number;
   reason?: string;
+}
+
+async function persistDeployFailure(
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir' | 'persistEvents'>,
+  wiIds: string[],
+  reason: string,
+): Promise<{ eventsWritten: number; reason: string }> {
+  try {
+    await (request.persistEvents ?? appendEvents)(
+      request.ledgerDir,
+      wiIds.map(wi => makeEvent(request.actor, wi, 'deploy.failed', { reason })),
+    );
+    return { eventsWritten: wiIds.length, reason };
+  } catch (error) {
+    return {
+      eventsWritten: 0,
+      reason: `${reason}; deploy.failed receipt persistence failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+}
+
+async function persistPendingDeployFailureIfStillPending(
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
+  wiIds: string[],
+  reason: string,
+): Promise<{ eventsWritten: number; reason?: string }> {
+  try {
+    return await withLock(request.ledgerDir, async tx => {
+      const items = fold(await tx.loadAll()).items;
+      const stillPending = wiIds.filter(wi => items.get(wi)?.deployStatus === 'pending');
+      if (stillPending.length === 0) {
+        return { eventsWritten: 0 };
+      }
+      await tx.append(stillPending.map(wi => makeEvent(request.actor, wi, 'deploy.failed', { reason })));
+      return { eventsWritten: stillPending.length, reason };
+    });
+  } catch (error) {
+    return {
+      eventsWritten: 0,
+      reason: `${reason}; deploy.failed receipt persistence failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
 }
 
 /**
@@ -44,12 +92,12 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
     return { configured: true, started: false, eventsWritten: 0, reason: 'no merged items supplied' };
   }
 
-  await appendEvents(
+  await (request.persistEvents ?? appendEvents)(
     request.ledgerDir,
     wiIds.map(wi => makeEvent(request.actor, wi, 'deploy.requested', {})),
   );
 
-  const spawnResult = fireDeployOnMerge(
+  const spawnResult = await fireDeployOnMerge(
     request.repoRoot,
     request.deployCommand,
     wiIds,
@@ -59,18 +107,106 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
     return { configured: true, started: true, eventsWritten: wiIds.length };
   }
 
-  await appendEvents(
-    request.ledgerDir,
-    wiIds.map(wi => makeEvent(request.actor, wi, 'deploy.failed', {
-      reason: spawnResult.reason,
-    })),
-  );
+  const failure = await persistDeployFailure(request, wiIds, spawnResult.reason);
   return {
     configured: true,
     started: false,
-    eventsWritten: wiIds.length * 2,
-    reason: spawnResult.reason,
+    // deploy.requested is already durable even if persisting the later failure receipt fails.
+    eventsWritten: wiIds.length + failure.eventsWritten,
+    reason: failure.reason,
   };
+}
+
+/** Re-invoke a configured, self-locking deploy for a durable pending request. */
+export async function resumePendingDeploy(request: DeployRequest): Promise<DeployRequestResult> {
+  if (!request.deployCommand) {
+    return { configured: false, started: false, eventsWritten: 0 };
+  }
+  const wiIds = [...new Set(request.wiIds)].sort();
+  if (wiIds.length === 0) {
+    return { configured: true, started: false, eventsWritten: 0, reason: 'no pending items supplied' };
+  }
+
+  const spawnResult = await fireDeployOnMerge(
+    request.repoRoot,
+    request.deployCommand,
+    wiIds,
+    request.spawnDeploy,
+  );
+  if (spawnResult.started) {
+    return { configured: true, started: true, eventsWritten: 0 };
+  }
+  const failure = await persistPendingDeployFailureIfStillPending(request, wiIds, spawnResult.reason);
+  return {
+    configured: true,
+    started: false,
+    eventsWritten: failure.eventsWritten,
+    reason: failure.reason,
+  };
+}
+
+export type DeployExecutionResolution =
+  | { ok: true; repoRoot: string; deployCommand: string }
+  | { ok: false; reason: string };
+
+export interface DeployReconcileResult {
+  attempted: number;
+  eventsWritten: number;
+  failures: string[];
+}
+
+/**
+ * Recover both crash windows around detached deploy launch:
+ * - configured merge without deploy.requested: append the intent, then launch;
+ * - pending request without a terminal receipt: safely re-invoke the self-locking command.
+ *
+ * The resolver deliberately runs at reconciliation time so target manifests and plane config
+ * are current. Removed or unreadable configuration becomes a visible failed receipt.
+ */
+export async function reconcileDeployIntents(args: {
+  ledgerDir: string;
+  actor: string;
+  items: Iterable<ItemRecord>;
+  resolve: (item: ItemRecord) => DeployExecutionResolution;
+  dryRun?: boolean;
+  spawnDeploy?: DeploySpawn;
+  excludeItems?: ReadonlySet<string>;
+}): Promise<DeployReconcileResult> {
+  const candidates = [...args.items]
+    .filter(rec => rec.deployConfigured === true)
+    .filter(rec => rec.deployStatus === undefined || rec.deployStatus === 'pending')
+    .filter(rec => !args.excludeItems?.has(rec.id))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const result: DeployReconcileResult = { attempted: candidates.length, eventsWritten: 0, failures: [] };
+  if (args.dryRun) return result;
+
+  for (const rec of candidates) {
+    const execution = args.resolve(rec);
+    if (!execution.ok || !execution.deployCommand) {
+      const reason = execution.ok
+        ? 'deploy configuration was removed before the durable request could complete'
+        : execution.reason;
+      const failure = await persistDeployFailure(args, [rec.id], reason);
+      result.eventsWritten += failure.eventsWritten;
+      result.failures.push(`${rec.id}: ${failure.reason}`);
+      continue;
+    }
+
+    const request: DeployRequest = {
+      actor: args.actor,
+      ledgerDir: args.ledgerDir,
+      repoRoot: execution.repoRoot,
+      deployCommand: execution.deployCommand,
+      wiIds: [rec.id],
+      spawnDeploy: args.spawnDeploy,
+    };
+    const launch = rec.deployStatus === 'pending'
+      ? await resumePendingDeploy(request)
+      : await requestDeployOnMerge(request);
+    result.eventsWritten += launch.eventsWritten;
+    if (!launch.started && launch.reason) result.failures.push(`${rec.id}: ${launch.reason}`);
+  }
+  return result;
 }
 
 /**
@@ -97,4 +233,30 @@ export function stalePendingDeployEvents(
     reason: `deploy request exceeded ${timeoutMs}ms without a terminal receipt`,
     requestedAt: rec.deployRequestedAt!,
   }, ts));
+}
+
+/**
+ * Fold and close stale deploy requests under one ledger lock. Terminal receipts that
+ * acquire the lock first are therefore visible to the fold, while a timeout append cannot
+ * interleave with another receipt between observation and mutation.
+ */
+export async function closeStalePendingDeploys(args: {
+  ledgerDir: string;
+  actor: string;
+  nowMs: number;
+  timeoutMs: number;
+  dryRun?: boolean;
+}): Promise<LedgerEvent[]> {
+  return withLock(args.ledgerDir, async tx => {
+    const events = stalePendingDeployEvents(
+      fold(await tx.loadAll()).items.values(),
+      args.actor,
+      args.nowMs,
+      args.timeoutMs,
+    );
+    if (!args.dryRun && events.length > 0) {
+      await tx.append(events);
+    }
+    return events;
+  });
 }

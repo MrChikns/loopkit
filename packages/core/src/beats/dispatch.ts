@@ -2334,7 +2334,11 @@ export async function runPlanningLane(
     const remaining = parsePlannerRemaining(result.text);
     const events: ReturnType<typeof makeEvent>[] = [
       makeEvent('dispatch', rec.id, 'gate.passed', { reason: `planning: queued ${newIds.length} child item(s) (${newIds.join(', ')})` }),
-      makeEvent('dispatch', rec.id, 'item.merged', { commit: 'none (planning lane — no source changes)', deployed: false }),
+      makeEvent('dispatch', rec.id, 'item.merged', {
+        commit: 'none (planning lane — no source changes)',
+        deployed: false,
+        deployConfigured: false,
+      }),
     ];
     if (remaining.length > 0) {
       events.push(makeEvent('dispatch', rec.id, 'msg.out', {
@@ -2601,7 +2605,12 @@ async function finalizeTargetBuild(
     // `false` on the same board. Deploy truth starts only after this merge receipt is durable:
     // requestDeployOnMerge appends deploy.requested before detached spawn, then the script reports
     // deploy.succeeded / deploy.failed (or the reactor closes a stale request as timed-out).
-    makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
+    makeEvent('dispatch', rec.id, 'item.merged', {
+      commit: mergeCommit,
+      deployed: false,
+      deployConfigured: Boolean(manifest.deployCommand),
+      ...targetEvidence,
+    }),
   ]);
   // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
   // (never queued) against the SAME target the partial slice shipped to.
@@ -4170,7 +4179,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
               // the opposite assertion from the very batch lane whose merges it retires. Nothing
               // fires a deploy here, so no deploy.* event will ever contradict it; "not observed
               // deployed" is the honest reading and the deploy-age SLO stays the real backstop.
-              makeEvent('dispatch', id, 'item.merged', { commit: short, deployed: false, attribution: 'commit-subject' }),
+              makeEvent('dispatch', id, 'item.merged', {
+                commit: short,
+                deployed: false,
+                deployConfigured: false,
+                attribution: 'commit-subject',
+              }),
             ];
           }
           return [
@@ -4735,6 +4749,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         gateEvents.push(makeEvent('dispatch', rec.id, 'item.merged', {
           commit: commitSha,
           deployed: false,
+          deployConfigured: Boolean(cfg.deployCommand),
           ...(singleManifest ? { attribution: 'manifest' as const } : {}),
           ...(singleManifest?.certification ? { certification: singleManifest.certification } : {}),
           ...evidence,
@@ -4769,7 +4784,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
               anyMerged = true;
               mergedWiIds.push(r.id);
               gateEvents.push(makeEvent('dispatch', r.id, 'item.merged', {
-                commit: sha, deployed: false, attribution: 'manifest',
+                commit: sha, deployed: false, deployConfigured: Boolean(cfg.deployCommand), attribution: 'manifest',
                 ...(manifest.certification ? { certification: manifest.certification } : {}),
                 ...evidence,
               }));
@@ -4786,7 +4801,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             anyMerged = true;
             mergedWiIds.push(r.id);
             gateEvents.push(makeEvent('dispatch', r.id, 'item.merged', {
-              commit: sha, deployed: false, attribution: 'commit-subject',
+              commit: sha, deployed: false, deployConfigured: Boolean(cfg.deployCommand), attribution: 'commit-subject',
               ...(manifest?.certification ? { certification: manifest.certification } : {}),
               ...evidence,
             }));
