@@ -9,7 +9,7 @@
 }
 
 /* ---- Global baseline reset ------------------------------------------------- */
-.opsui-root a {
+:where(.opsui-root a) {
   text-decoration: none;
   color: inherit;
 }
@@ -37,6 +37,7 @@
   align-items: center;
   min-height: 24px;
 }
+.opsui-topbar__crumb { min-width: 24px; justify-content: center; }
 
 /* ---- Button ---------------------------------------------------------------- */
 .opsui-btn {
@@ -277,6 +278,7 @@
   background: var(--accent-soft);
   color: var(--text);
 }
+.opsui-rail__item--active .opsui-rail__purpose { color: var(--text-2); }
 .opsui-rail__icon {
   flex: 0 0 auto;
   display: inline-flex;

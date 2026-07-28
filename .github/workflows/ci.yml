@@ -44,3 +44,9 @@ jobs:
 
       - name: opsui — build + test
         run: npm test --workspace=packages/opsui
+
+      - name: Install browser used by the accessibility gate
+        run: npx playwright install --with-deps chromium
+
+      - name: console — real-browser accessibility + interaction gate
+        run: npm run test:browser

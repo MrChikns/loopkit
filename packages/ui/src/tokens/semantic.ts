@@ -92,7 +92,7 @@ export const lightTheme: ThemeTokens = {
     'line-strong': '#aebbc9',
     text: '#17202b',
     'text-2': '#536174',
-    'text-3': '#718094',
+    'text-3': '#5b6c82',
     inverse: '#ffffff',
     accent: '#155eef',
     'accent-hover': '#004ee8',
