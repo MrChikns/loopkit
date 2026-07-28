@@ -37,4 +37,5 @@ export * from './timeline-adapter.ts';
 // NOT registered in projection-registry.ts (no nav destination).
 export * from './item-hub-projection.ts';
 export * from './item-hub-adapter.ts';
+export * from './deploy-evidence.ts';
 export * from './projection-registry.ts';

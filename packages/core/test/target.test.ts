@@ -28,6 +28,7 @@ test('parseTargetManifest: a minimal { name } manifest fills all defaults', () =
   assert.equal(m.gateCommand, 'npm test');
   assert.equal(m.gateWorkdir, '.');
   assert.equal(m.deployCommand, '');
+  assert.equal(m.surfaceUrl, '');
   assert.equal(m.worktreePrefix, 'loop-');
   assert.equal(m.touches.conflictMode, 'prefix');
   assert.deepEqual(m.boundaries, { planePrefixes: [], surfacePrefixes: [], escalationPatterns: [] });
@@ -41,6 +42,7 @@ test('parseTargetManifest: explicit fields override defaults', () => {
     gateCommand: 'make test',
     gateWorkdir: 'sub',
     deployCommand: './deploy.sh',
+    surfaceUrl: 'https://app.example.test/',
     worktreePrefix: 'wt-',
     boundaries: { planePrefixes: ['ops/'], surfacePrefixes: ['ui/'], escalationPatterns: ['auth'] },
     buildTimeoutMinutes: 20,
@@ -49,6 +51,7 @@ test('parseTargetManifest: explicit fields override defaults', () => {
   assert.equal(m.gateCommand, 'make test');
   assert.equal(m.gateWorkdir, 'sub');
   assert.equal(m.deployCommand, './deploy.sh');
+  assert.equal(m.surfaceUrl, 'https://app.example.test/');
   assert.equal(m.worktreePrefix, 'wt-');
   assert.deepEqual(m.boundaries.planePrefixes, ['ops/']);
   assert.deepEqual(m.boundaries.surfacePrefixes, ['ui/']);

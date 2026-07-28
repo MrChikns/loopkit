@@ -106,7 +106,7 @@ test('SLO-tier gating: auto tier accepts despite a breached plane-SLO board', as
     makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, iso(REVIEW_OLD - 1000)),
     // plane-only touches → 'auto' tier
     makeEvent('cli', 'WI-001', 'item.queued', { spec: 'x', touches: 'packages/engine/src/foo.ts' }, iso(REVIEW_OLD - 900)),
-    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false }, iso(REVIEW_OLD)),
+    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(REVIEW_OLD)),
   ]);
   try {
     await runReactor({
@@ -128,7 +128,7 @@ test('SLO-tier gating: a non-auto (review) tier item is withheld under a breache
   await appendEvents(ledgerDir, [
     makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'x' }, iso(REVIEW_OLD - 1000)),
     makeEvent('cli', 'WI-002', 'item.queued', { spec: 'x', touches: 'apps/example/src/features/board/screen.ts' }, iso(REVIEW_OLD - 900)),
-    makeEvent('dispatch', 'WI-002', 'item.merged', { commit: 'abc', deployed: false }, iso(REVIEW_OLD)),
+    makeEvent('dispatch', 'WI-002', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(REVIEW_OLD)),
   ]);
   try {
     await runReactor({
@@ -160,7 +160,7 @@ test('silence hold: an unanswered reply OLDER than holdMaxHours expires the hold
     makeEvent('system', 'system', 'engagement.baseline', {}, iso(NOW - 199 * 3_600_000)),
     makeEvent('cli', 'WI-003', 'item.captured', { source: 'cli', text: 'x' }, iso(REVIEW_OLD - 1000)),
     makeEvent('cli', 'WI-003', 'item.queued', { spec: 'x', touches: 'apps/example/src/features/board/screen.ts' }, iso(REVIEW_OLD - 900)),
-    makeEvent('dispatch', 'WI-003', 'item.merged', { commit: 'abc', deployed: false }, iso(REVIEW_OLD)),
+    makeEvent('dispatch', 'WI-003', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(REVIEW_OLD)),
     reply,
   ]);
   try {
@@ -187,7 +187,7 @@ test('silence hold: a RECENT unanswered reply (within holdMaxHours) still holds 
     makeEvent('system', 'system', 'engagement.baseline', {}, iso(NOW - 199 * 3_600_000)),
     makeEvent('cli', 'WI-004', 'item.captured', { source: 'cli', text: 'x' }, iso(REVIEW_OLD - 1000)),
     makeEvent('cli', 'WI-004', 'item.queued', { spec: 'x', touches: 'apps/example/src/features/board/screen.ts' }, iso(REVIEW_OLD - 900)),
-    makeEvent('dispatch', 'WI-004', 'item.merged', { commit: 'abc', deployed: false }, iso(REVIEW_OLD)),
+    makeEvent('dispatch', 'WI-004', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(REVIEW_OLD)),
     reply,
   ]);
   try {

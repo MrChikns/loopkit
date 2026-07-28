@@ -402,7 +402,7 @@ test('provisional-accept: tiers disabled → no-op', async () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-000', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-000', 'x', 'packages/engine/', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-000', 'item.merged', { commit: 'abc000', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-000', 'item.merged', { commit: 'abc000', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -420,7 +420,7 @@ test('provisional-accept: plane-only item auto-accepts once past the 2h auto win
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, isoAt(AUTO_OLD_MS - 1000)),
     queuedEvent('WI-001', 'x', 'packages/engine/src/foo.ts', isoAt(AUTO_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc123', deployed: false }, isoAt(AUTO_OLD_MS)),
+    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc123', deployed: false, deployConfigured: false }, isoAt(AUTO_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -434,11 +434,61 @@ test('provisional-accept: plane-only item auto-accepts once past the 2h auto win
   }
 });
 
+test('provisional-accept: configured deploy must succeed before any tier auto-accepts', async () => {
+  const events: LedgerEvent[] = [];
+  const cases = [
+    { status: 'configured-missing', deployConfigured: true },
+    { status: 'pending', deployConfigured: true },
+    { status: 'failed', deployConfigured: true },
+    { status: 'timed-out', deployConfigured: true },
+    { status: 'succeeded', deployConfigured: true },
+    { status: 'not-configured', deployConfigured: false },
+    { status: 'legacy-unknown', deployConfigured: undefined },
+  ] as const;
+  for (const [index, entry] of cases.entries()) {
+    const id = `WI-01${index}`;
+    events.push(
+      makeEvent('operator', id, 'item.captured', { source: 'cli', text: 'x' }, isoAt(AUTO_OLD_MS - 1000)),
+      queuedEvent(id, 'x', 'packages/engine/src/foo.ts', isoAt(AUTO_OLD_MS - 900)),
+      makeEvent('dispatch', id, 'item.merged', {
+        commit: `abc01${index}`,
+        deployed: false,
+        ...(typeof entry.deployConfigured === 'boolean' ? { deployConfigured: entry.deployConfigured } : {}),
+      }, isoAt(AUTO_OLD_MS)),
+    );
+    if (entry.status === 'pending' || entry.status === 'failed' || entry.status === 'timed-out' || entry.status === 'succeeded') {
+      events.push(makeEvent('dispatch', id, 'deploy.requested', {}, isoAt(AUTO_OLD_MS + 100)));
+    }
+    if (entry.status === 'failed') {
+      events.push(makeEvent('deploy', id, 'deploy.failed', { reason: 'deploy failed' }, isoAt(AUTO_OLD_MS + 200)));
+    } else if (entry.status === 'timed-out') {
+      events.push(makeEvent('reactor', id, 'deploy.timed-out', {
+        reason: 'deploy timed out',
+        requestedAt: isoAt(AUTO_OLD_MS + 100),
+      }, isoAt(AUTO_OLD_MS + 200)));
+    } else if (entry.status === 'succeeded') {
+      events.push(makeEvent('deploy', id, 'deploy.succeeded', { commit: `abc01${index}` }, isoAt(AUTO_OLD_MS + 200)));
+    }
+  }
+  const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
+  try {
+    const allEvents = await runProvisionalAcceptOnly(repoRoot, ledgerDir);
+    const accepted = allEvents.filter(e => e.type === 'item.accepted').map(e => e.item);
+    assert.deepEqual(
+      accepted,
+      ['WI-014', 'WI-015'],
+      'only explicit deploy success or explicit no-deploy configuration may auto-accept',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('provisional-accept: plane-only item skipped when merged too recently (< 2h auto window)', async () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-002', 'item.captured', { source: 'cli', text: 'x' }, isoAt(AUTO_TOO_RECENT_MS - 1000)),
     queuedEvent('WI-002', 'x', 'packages/engine/src/foo.ts', isoAt(AUTO_TOO_RECENT_MS - 900)),
-    makeEvent('dispatch', 'WI-002', 'item.merged', { commit: 'abc124', deployed: false }, isoAt(AUTO_TOO_RECENT_MS)),
+    makeEvent('dispatch', 'WI-002', 'item.merged', { commit: 'abc124', deployed: false, deployConfigured: false }, isoAt(AUTO_TOO_RECENT_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -454,7 +504,7 @@ test('provisional-accept: no-code item (question/feedback) auto-accepts', async 
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-003', 'item.captured', { source: 'cli', text: 'what is X?' }, isoAt(AUTO_OLD_MS - 1000)),
     queuedEvent('WI-003', 'what is X?', '', isoAt(AUTO_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-003', 'item.merged', { commit: 'noop001', deployed: false }, isoAt(AUTO_OLD_MS)),
+    makeEvent('dispatch', 'WI-003', 'item.merged', { commit: 'noop001', deployed: false, deployConfigured: false }, isoAt(AUTO_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -475,7 +525,7 @@ test('provisional-accept: unanswered operator reply after merge HOLDS review/opt
     makeEvent('system', 'system', 'engagement.baseline', {}, isoAt(REVIEW_OLD_MS - 2000)),
     makeEvent('operator', 'WI-010', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-010', 'x', 'apps/example/src/features/board/screen.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-010', 'item.merged', { commit: 'def456', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-010', 'item.merged', { commit: 'def456', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
     // operator engaged AFTER merge (post-baseline, unanswered) → held by causation. The reply
     // must be RECENT (within the 72h holdMaxHours) or the hold expires and the item resumes.
     makeEvent('operator', 'WI-010', 'msg.in', { text: 'looks odd' }, isoAt(NOW_MS - 3_600_000)),
@@ -497,7 +547,7 @@ test('provisional-accept: unanswered operator reply does NOT hold the auto tier'
     makeEvent('system', 'system', 'engagement.baseline', {}, isoAt(REVIEW_OLD_MS - 2000)),
     makeEvent('operator', 'WI-012', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-012', 'x', 'packages/engine/src/foo.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-012', 'item.merged', { commit: 'def457', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-012', 'item.merged', { commit: 'def457', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
     makeEvent('operator', 'WI-012', 'msg.in', { text: 'this thing is odd' }, isoAt(REVIEW_OLD_MS + 3_600_000)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
@@ -515,7 +565,7 @@ test('provisional-accept: risk file (must tier) never accepts, regardless of age
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-020', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-020', 'x', 'apps/example/src/features/billing/plan.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-020', 'item.merged', { commit: 'ghi789', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-020', 'item.merged', { commit: 'ghi789', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -531,7 +581,7 @@ test('provisional-accept: judge verdict fail (must tier) never accepts, regardle
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-021', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-021', 'x', 'packages/engine/src/foo.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-021', 'item.merged', { commit: 'jkl012', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-021', 'item.merged', { commit: 'jkl012', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
     makeEvent('dispatch', 'WI-021', 'review.verdict', {
       verdict: 'fail', confidence: 0.4, specSatisfied: 'partial', scopeCreep: 'minor',
       testTheatre: 'none', reasons: ['issue'], model: 'sonnet', judge: 'merge-review',
@@ -551,7 +601,7 @@ test('provisional-accept: user-facing surface item skipped when younger than the
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-030', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_TOO_RECENT_MS - 1000)),
     queuedEvent('WI-030', 'x', 'apps/example/src/features/share/screen.ts', isoAt(REVIEW_TOO_RECENT_MS - 900)),
-    makeEvent('dispatch', 'WI-030', 'item.merged', { commit: 'mno345', deployed: false }, isoAt(REVIEW_TOO_RECENT_MS)),
+    makeEvent('dispatch', 'WI-030', 'item.merged', { commit: 'mno345', deployed: false, deployConfigured: false }, isoAt(REVIEW_TOO_RECENT_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -567,7 +617,7 @@ test('provisional-accept: user-facing surface item accepts once past the 7-day r
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-031', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     queuedEvent('WI-031', 'x', 'apps/example/src/features/share/screen.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-031', 'item.merged', { commit: 'pqr678', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-031', 'item.merged', { commit: 'pqr678', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -585,7 +635,7 @@ test('provisional-accept: optional-tier item skipped before 48h, accepted after'
   const eventsTooSoon: LedgerEvent[] = [
     makeEvent('operator', 'WI-040', 'item.captured', { source: 'cli', text: 'x' }, isoAt(AUTO_TOO_RECENT_MS - 1000)),
     queuedEvent('WI-040', 'x', 'apps/example/src/app.ts', isoAt(AUTO_TOO_RECENT_MS - 900)),
-    makeEvent('dispatch', 'WI-040', 'item.merged', { commit: 'stu901', deployed: false }, isoAt(AUTO_TOO_RECENT_MS)),
+    makeEvent('dispatch', 'WI-040', 'item.merged', { commit: 'stu901', deployed: false, deployConfigured: false }, isoAt(AUTO_TOO_RECENT_MS)),
   ];
   const { repoRoot: repoRoot1, ledgerDir: ledgerDir1, cleanup: cleanup1 } = await makeReactorEnv(eventsTooSoon);
   try {
@@ -599,7 +649,7 @@ test('provisional-accept: optional-tier item skipped before 48h, accepted after'
   const eventsOldEnough: LedgerEvent[] = [
     makeEvent('operator', 'WI-041', 'item.captured', { source: 'cli', text: 'x' }, isoAt(OPTIONAL_OLD_MS - 1000)),
     queuedEvent('WI-041', 'x', 'apps/example/src/app.ts', isoAt(OPTIONAL_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-041', 'item.merged', { commit: 'stu902', deployed: false }, isoAt(OPTIONAL_OLD_MS)),
+    makeEvent('dispatch', 'WI-041', 'item.merged', { commit: 'stu902', deployed: false, deployConfigured: false }, isoAt(OPTIONAL_OLD_MS)),
   ];
   const { repoRoot: repoRoot2, ledgerDir: ledgerDir2, cleanup: cleanup2 } = await makeReactorEnv(eventsOldEnough);
   try {
@@ -619,7 +669,7 @@ test('provisional-accept: skipped when SLO board has a breached health row', asy
     // A NON-auto (product-surface = review) tier item so the SLO gate applies — the 'auto'
     // tier is exempt from the plane-SLO smoke gate (nothing to test there).
     queuedEvent('WI-060', 'x', 'apps/example/src/features/board/screen.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-060', 'item.merged', { commit: 'vwx234', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-060', 'item.merged', { commit: 'vwx234', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -638,7 +688,7 @@ test('provisional-accept: skipped when a monitored SLO row is unknown (probe err
     makeEvent('operator', 'WI-061', 'item.captured', { source: 'cli', text: 'x' }, isoAt(REVIEW_OLD_MS - 1000)),
     // NON-auto tier so the SLO gate still applies (auto is exempt).
     queuedEvent('WI-061', 'x', 'apps/example/src/features/board/screen.ts', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-061', 'item.merged', { commit: 'vwx235', deployed: false }, isoAt(REVIEW_OLD_MS)),
+    makeEvent('dispatch', 'WI-061', 'item.merged', { commit: 'vwx235', deployed: false, deployConfigured: false }, isoAt(REVIEW_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -699,7 +749,7 @@ test('provisional-accept: all rungs pass → item.accepted provisional + tier + 
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-070', 'item.captured', { source: 'cli', text: 'build engine thing' }, isoAt(AUTO_OLD_MS - 1000)),
     queuedEvent('WI-070', 'build engine thing', 'packages/engine/src/slo.ts,packages/engine/test/slo.test.ts', isoAt(AUTO_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-070', 'item.merged', { commit: 'abc456def', deployed: false }, isoAt(AUTO_OLD_MS)),
+    makeEvent('dispatch', 'WI-070', 'item.merged', { commit: 'abc456def', deployed: false, deployConfigured: false }, isoAt(AUTO_OLD_MS)),
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -739,7 +789,7 @@ test('provisional-accept: perBeatCap=3 — 5 eligible yields exactly 3 accepted'
     const wi = `WI-${String(100 + i).padStart(3, '0')}`;
     events.push(makeEvent('operator', wi, 'item.captured', { source: 'cli', text: `task ${i}` }, ts));
     events.push(queuedEvent(wi, `task ${i}`, 'packages/engine/', ts));
-    events.push(makeEvent('dispatch', wi, 'item.merged', { commit: `sha${i}00`, deployed: false }, mergeTs));
+    events.push(makeEvent('dispatch', wi, 'item.merged', { commit: `sha${i}00`, deployed: false, deployConfigured: false }, mergeTs));
   }
   const { repoRoot, ledgerDir, cleanup } = await makeReactorEnv(events);
   try {
@@ -768,7 +818,7 @@ test('fold: provisional item.accepted transitions merged→accepted', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-200', 'item.captured', { source: 'cli', text: 'engine fix' }),
     queuedEvent('WI-200', 'engine fix', 'packages/engine/', isoAt(REVIEW_OLD_MS - 900)),
-    makeEvent('dispatch', 'WI-200', 'item.merged', { commit: 'abc', deployed: false }, mergeTs),
+    makeEvent('dispatch', 'WI-200', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, mergeTs),
     makeEvent('reactor', 'WI-200', 'item.accepted', { by: 'reactor:tier-auto', provisional: true, tier: 'auto', reason: 'ops-plane internals only' }, acceptTs),
   ];
   const result = fold(events);
@@ -783,7 +833,7 @@ test('fold: human item.accepted does NOT set provisionalAccept flag', () => {
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-201', 'item.captured', { source: 'cli', text: 'build x' }),
     makeEvent('reactor', 'WI-201', 'item.queued', { spec: 'build x', touches: 'src/' }),
-    makeEvent('dispatch', 'WI-201', 'item.merged', { commit: 'xyz', deployed: false }),
+    makeEvent('dispatch', 'WI-201', 'item.merged', { commit: 'xyz', deployed: false, deployConfigured: false }),
     makeEvent('operator', 'WI-201', 'item.accepted', { by: 'operator' }),
   ];
   const result = fold(events);
@@ -796,7 +846,7 @@ test('fold: existing acceptance semantics preserved (merged is terminal; accepte
   const events: LedgerEvent[] = [
     makeEvent('operator', 'WI-202', 'item.captured', { source: 'cli', text: 'build y' }),
     makeEvent('reactor', 'WI-202', 'item.queued', { spec: 'build y', touches: 'src/' }),
-    makeEvent('dispatch', 'WI-202', 'item.merged', { commit: 'zzz', deployed: false }),
+    makeEvent('dispatch', 'WI-202', 'item.merged', { commit: 'zzz', deployed: false, deployConfigured: false }),
     // Stray event that should be no-op on merged state
     makeEvent('reactor', 'WI-202', 'item.parked', { reason: 'stray' }),
     // item.accepted is still the one legit transition

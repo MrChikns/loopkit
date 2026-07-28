@@ -87,3 +87,30 @@ test('rendered HTML: NO certification payload renders a visible "No certificatio
 
   assert.ok(html.includes('No certification provided'), 'absent certification renders a visible line, never blank');
 });
+
+test('acceptance renders compact delivery evidence and only a trusted configured surface URL', () => {
+  const fold = baseFold({
+    recentMerged: [{
+      id: 'WI-954',
+      spec: 'Ship settings panel',
+      mergedAt: '2026-07-20T10:00:00.000Z',
+      mergeCommit: 'abcdef012345',
+      touches: 'packages/app/',
+      mergeChangedFiles: ['packages/app/settings.ts', 'packages/app/settings.css'],
+      deployStatus: 'pending',
+      surfaceUrl: 'https://product.example.test/settings',
+      certification: CERT,
+      tier: 'review',
+    }],
+  });
+  const html = AcceptanceProjection(acceptanceProjectionFromFold(fold, { ledgerSequence: 1 }));
+  assert.match(html, /Commit abcdef0/);
+  assert.match(html, /Origin target/);
+  assert.match(html, /settings\.ts/);
+  assert.match(html, /Deploy pending/);
+  assert.match(html, /href="https:\/\/product\.example\.test\/settings"/);
+
+  fold.recentMerged[0]!.surfaceUrl = 'javascript:alert(1)';
+  const unsafeHtml = AcceptanceProjection(acceptanceProjectionFromFold(fold, { ledgerSequence: 1 }));
+  assert.ok(!unsafeHtml.includes('javascript:'), 'non-http config is not a changed-surface link');
+});

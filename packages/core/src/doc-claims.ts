@@ -542,7 +542,7 @@ export const CITATION_CLAIMS: CitationClaim[] = [
 
   // reactor
   { id: 'repairItemCapture', file: 'reactor', mustContain: "source: 'reactor:pathology'" },
-  { id: 'blockedVictimRelease', file: 'reactor', mustContain: 'blocker && blocker.state ===' },
+  { id: 'blockedVictimRelease', file: 'reactor', mustContain: "if (blocker?.state === 'merged'" },
   { id: 'blockedVictimTimeout', file: 'reactor', mustContain: 'reason: `blocked-victim wait-timeout' },
   { id: 'acceptWithholdKeys', file: 'reactor', mustContain: 'const PROVISIONAL_ACCEPT_SLO_KEYS' },
   { id: 'mustNeverAutoAccepts', file: 'reactor', mustContain: "if (tier === 'must') continue;" },

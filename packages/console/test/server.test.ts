@@ -656,6 +656,12 @@ test('GET /health — renders 200 with the System marker (the SLO/health board)'
       const body = await res.text();
       // "System" survives as the sidebar destination label for the health board.
       assert.match(body, /System/);
+      assert.match(body, /Operating state/);
+      assert.match(body, /Service/);
+      assert.match(body, /Autonomy/);
+      assert.match(body, /Flow/);
+      assert.match(body, /Autonomy halted/, 'an alive service must not hide the halted kill switch');
+      assert.match(body, /Deployments by target/);
     }),
   );
 });
@@ -955,6 +961,7 @@ test('GET /acceptance — renders 200 with tiered merged items, no config file n
       assert.match(body, /Acceptance/);
       assert.match(body, /WI-101/);
       assert.match(body, /WI-104/);
+      assert.match(body, /\d+ need testing · \d+ auto-accepting/);
     });
   } finally {
     await rm(dir, { recursive: true, force: true });

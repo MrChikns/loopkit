@@ -4146,6 +4146,13 @@ async function stepProvisionalAccept(
       const mergedAt = rec.mergedAt;
       if (!mergedAt) continue;
 
+      // Timer acceptance is allowed only when deploy truth is explicit:
+      //   configured=false → there is intentionally no deploy;
+      //   configured=true  → a success receipt is required.
+      // Legacy merges (deployConfigured absent) and crash-gap merges whose request is still
+      // being reconciled both stay manual/unknown rather than being inferred from `deployed`.
+      if (rec.deployConfigured !== false && rec.deployStatus !== 'succeeded') continue;
+
       const mergedMs = new Date(mergedAt).getTime();
       if (isNaN(mergedMs)) continue;
 

@@ -34,6 +34,7 @@ The generalized plane/target boundary, lifted to N targets:
   "gateCommand": "npm test",          // deterministic proof, run in the worktree
   "gateWorkdir": ".",
   "deployCommand": "",                // optional; empty = no deploy step
+  "surfaceUrl": "",                   // optional HTTP(S) product link; never inferred from repoPath
   "worktreePrefix": "loop-",
   "touches": { "conflictMode": "prefix" },
   "boundaries": {

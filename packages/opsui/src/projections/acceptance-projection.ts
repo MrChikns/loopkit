@@ -15,6 +15,7 @@ import { esc } from '../render/html.ts';
 import type { GlanceMetric } from './command-projection.ts';
 import { mergedItemBadge } from './fold-adapter.ts';
 import type { ItemOrigin } from './fold-adapter.ts';
+import type { DeployEvidence } from './deploy-evidence.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 
@@ -49,6 +50,12 @@ export type AcceptanceItem = {
   /** WI-180 origin chip (rendered form of `origin`). */
   originChip?: { state: OperationalState; label: string };
   evidence?: { id: string; label: string; href?: string };
+  commit?: string;
+  touches?: string[];
+  touchesTruncated?: boolean;
+  deploy: DeployEvidence;
+  /** Explicitly configured product URL; never inferred from a checkout path. */
+  surfaceUrl?: string;
   /** Certify-don't-brief payload (item.merged.certification), when present — see
    *  {@link FoldMergedItem.certification}. Absent renders a visible "no certification
    *  provided" line (acceptanceRow), never a silent blank (leader-leader doctrine). */
@@ -218,6 +225,27 @@ function criteriaBlock(i: AcceptanceItem): string {
     `</ul></div>`;
 }
 
+function deliveryEvidenceBlock(i: AcceptanceItem): string {
+  const facts = [
+    i.commit ? `Commit ${i.commit.slice(0, 7)}` : 'Commit unavailable',
+    `Origin ${i.origin ?? 'other'}`,
+    i.touches?.length
+      ? `Touches ${i.touches.slice(0, 3).join(', ')}${i.touches.length > 3 || i.touchesTruncated ? '…' : ''}`
+      : 'Touches not recorded',
+    `Deploy ${i.deploy.label.toLowerCase()}`,
+  ];
+  const surface = i.surfaceUrl
+    ? `<a class="opsui-provenance__chip" href="${esc(i.surfaceUrl)}" rel="noopener noreferrer">Open changed surface</a>`
+    : '';
+  return (
+    `<div class="opsui-acceptance__delivery-evidence">` +
+    `<p class="opsui-provenance__meta">${facts.map(esc).join(' · ')}</p>` +
+    (i.deploy.reason ? `<p class="opsui-acceptance__nocert">${esc(i.deploy.reason)}</p>` : '') +
+    surface +
+    `</div>`
+  );
+}
+
 function acceptanceRow(i: AcceptanceItem): string {
   const actions = buildAcceptanceVerbActions(i.id, i.title, i.tier);
   return EventRow({
@@ -227,7 +255,7 @@ function acceptanceRow(i: AcceptanceItem): string {
     ...(i.captured ? { summary: i.captured } : {}),
     // The bar first, then the certification: the operator reads "what was promised" before
     // "what could break", which is the order the judgement actually happens in.
-    body: criteriaBlock(i) + certificationBlock(i.certification),
+    body: deliveryEvidenceBlock(i) + criteriaBlock(i) + certificationBlock(i.certification),
     badge: i.badge,
     ...(i.originChip ? { originChip: i.originChip } : {}),
     ...(actions.length ? { actions } : {}),

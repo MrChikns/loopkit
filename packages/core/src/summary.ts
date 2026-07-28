@@ -17,6 +17,18 @@ import type { LoopkitConfig } from './config.js';
 import { touchesConflict, normalizeTouches, BUILDER_BREAKER_N } from './beats/dispatch.js';
 import { classifyAcceptanceTier, acceptanceClassifyFiles, hasEvidenceGap } from './acceptance.js';
 import { effectiveTierWindows } from './calibration.js';
+import { lookupRegisteredTarget, readTargetManifest } from './target.js';
+
+/** Only explicit HTTP(S) product URLs cross the core → UI boundary. */
+function trustedSurfaceUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * "Why isn't this building?" scheduling readout for the WI ops-console-scheduling region —
@@ -243,6 +255,8 @@ export function buildSummary(
           id: rec.id,
           mergedAt: rec.mergedAt,
           mergeCommit: rec.mergeCommit,
+          ...(rec.target ? { target: rec.target } : {}),
+          ...(rec.targetId ? { targetId: rec.targetId } : {}),
           spec: (rec.spec ?? rec.sourceText ?? '').slice(0, 100),
           // capture→merge cycle time + first-attempt-merge-rate glance tiles read these off
           // each merged item — carried straight through, no re-derivation.
@@ -259,6 +273,26 @@ export function buildSummary(
           // carry touches so the ops console can derive the origin chip for shipped items on
           // the stream + acceptance desk.
           ...(rec.touches ? { touches: rec.touches } : {}),
+          // Actual merge evidence and deployment truth stay compact but visible on Acceptance.
+          ...(rec.mergeChangedFiles ? { mergeChangedFiles: rec.mergeChangedFiles } : {}),
+          ...(rec.mergeChangedFilesTruncated ? { mergeChangedFilesTruncated: true } : {}),
+          ...(rec.mergeGateCommand ? { mergeGateCommand: rec.mergeGateCommand } : {}),
+          ...(rec.deployStatus ? { deployStatus: rec.deployStatus } : {}),
+          ...(typeof rec.deployConfigured === 'boolean' ? { deployConfigured: rec.deployConfigured } : {}),
+          ...(rec.deployRequestedAt ? { deployRequestedAt: rec.deployRequestedAt } : {}),
+          ...(rec.deployCompletedAt ? { deployCompletedAt: rec.deployCompletedAt } : {}),
+          ...(rec.deployFailureReason ? { deployFailureReason: rec.deployFailureReason } : {}),
+          ...(() => {
+            let configuredUrl: string | undefined;
+            const reg = lookupRegisteredTarget(result.targets, rec);
+            if (reg) {
+              try { configuredUrl = readTargetManifest(reg.repoPath).surfaceUrl; } catch { /* omit unreadable config */ }
+            } else if (!rec.target && !rec.targetId) {
+              configuredUrl = cfg.surfaceUrl;
+            }
+            const url = trustedSurfaceUrl(configuredUrl);
+            return url ? { surfaceUrl: url } : {};
+          })(),
           // Acceptance criteria (WI-193 win 3): what was promised, beside what shipped. This is
           // the pair the acceptance desk renders — the operator is the throughput bottleneck, so
           // showing the pre-authored bar next to the merged diff is the win that pays immediately.

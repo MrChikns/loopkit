@@ -295,7 +295,7 @@ test('reactor: verdict is a proposal — msg.out proposal:true, NO item.accepted
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'x', text: 'do X' }, iso(NOW - 3000)),
     makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'do X', touches: 'packages/engine/' }, iso(NOW - 2500)),
     // Merged very recently → provisional-accept window not due (removes accept ambiguity).
-    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false }, iso(NOW - 2000)),
+    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(NOW - 2000)),
     reply,
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeEnv(seed);
@@ -346,7 +346,7 @@ test('reactor: steer on a MERGED item downgrades to a sibling (never regresses i
     makeEvent('system', 'system', 'engagement.baseline', {}, BASELINE_TS),
     makeEvent('operator', 'WI-001', 'item.captured', { source: 'x', text: 'do X' }, iso(NOW - 3000)),
     makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'do X', touches: 'packages/engine/' }, iso(NOW - 2500)),
-    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false }, iso(NOW - 2000)),
+    makeEvent('dispatch', 'WI-001', 'item.merged', { commit: 'abc', deployed: false, deployConfigured: false }, iso(NOW - 2000)),
     reply,
   ];
   const { repoRoot, ledgerDir, cleanup } = await makeEnv(seed);
@@ -417,7 +417,7 @@ test('reactor causation hold: an unanswered post-baseline reply holds a due revi
     makeEvent('system', 'system', 'engagement.baseline', {}, iso(NOW - 199 * 3_600_000)),
     makeEvent('operator', 'WI-050', 'item.captured', { source: 'x', text: 'x' }, iso(NOW - 201 * 3_600_000)),
     makeEvent('reactor', 'WI-050', 'item.queued', { spec: 'x', touches: 'apps/example/src/features/board/screen.ts' }, iso(NOW - 200.5 * 3_600_000)),
-    makeEvent('dispatch', 'WI-050', 'item.merged', { commit: 'def', deployed: false }, oldMerge),
+    makeEvent('dispatch', 'WI-050', 'item.merged', { commit: 'def', deployed: false, deployConfigured: false }, oldMerge),
     // The unanswered reply must be RECENT (within the 72h holdMaxHours) — a reply
     // older than the hold window now EXPIRES the hold (the item resumes normal tier acceptance).
     makeEvent('operator', 'WI-050', 'msg.in', { text: 'this looks off' }, iso(NOW - 1 * 3_600_000)),
@@ -440,7 +440,7 @@ test('reactor causation hold: once the reply is answered, the review-tier merge 
     makeEvent('system', 'system', 'engagement.baseline', {}, iso(NOW - 199 * 3_600_000)),
     makeEvent('operator', 'WI-051', 'item.captured', { source: 'x', text: 'x' }, iso(NOW - 201 * 3_600_000)),
     makeEvent('reactor', 'WI-051', 'item.queued', { spec: 'x', touches: 'apps/example/src/features/board/screen.ts' }, iso(NOW - 200.5 * 3_600_000)),
-    makeEvent('dispatch', 'WI-051', 'item.merged', { commit: 'def', deployed: false }, oldMerge),
+    makeEvent('dispatch', 'WI-051', 'item.merged', { commit: 'def', deployed: false, deployConfigured: false }, oldMerge),
     reply,
     // A prior beat answered it (no pending proposal) → hold clears.
     makeEvent('reactor', 'WI-051', 'msg.out', { text: 'addressed', inReplyTo: reply.id }, iso(NOW - 99 * 3_600_000)),

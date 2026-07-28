@@ -33,6 +33,7 @@ import {
   buildRoutingTableWithSpecs,
   ROUTING_CONFIG_DEFAULTS,
   isPlaneArmed,
+  readTargetManifest,
 } from '@loopkit/core';
 import type { LoopkitConfig, FoldResult, LedgerEvent, VerdictSummary, SloRow as CoreSloRow } from '@loopkit/core';
 
@@ -106,6 +107,8 @@ import type {
   PlaneAgentRuntimeData,
   DecisionCard,
   WorkGroupId,
+  SystemAxis,
+  DeployTargetLiveness,
 } from '@loopkit/opsui';
 
 // WI-055: legacy-shell convergence reuses views.ts's page-slicer/row-renderer (one paginator,
@@ -255,11 +258,12 @@ function projectionShell(
   theme?: string | null,
   targetNames: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
+  visualOverride?: 'success' | 'warning' | 'critical' | 'neutral' | 'progress',
 ): string {
   const destinations = opsDestinations();
   const rail = NavigationRail({ destinations, activeId, expanded: true });
   const topBar = opsTopBar(title, env);
-  const visual = state === 'failed' ? 'critical' : state === 'stale' ? 'warning' : 'success';
+  const visual = visualOverride ?? (state === 'failed' ? 'critical' : state === 'stale' ? 'warning' : 'success');
   const freshness = state === 'failed'
     ? 'Source unavailable'
     : `Updated ${formatLocal(generatedAt, { seconds: true })}`;
@@ -825,14 +829,15 @@ export function renderAcceptancePage(data: OpsData, theme?: string | null, filte
   const workspace = AcceptanceProjection(envelope);
   const rail = NavigationRail({ destinations, activeId: 'acceptance', expanded: true });
   const topBar = opsTopBar(sectionTitle('acceptance'));
-  const pending = envelope.state === 'failed' ? 0 : envelope.data.queue.length;
-  const state = envelope.state === 'failed' ? 'critical' : pending ? 'warning' : 'success';
+  const manual = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.tier === 'must' || i.tier === 'review').length;
+  const auto = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.tier === 'optional' || i.tier === 'auto').length;
+  const state = envelope.state === 'failed' ? 'critical' : manual ? 'warning' : 'success';
   const freshness = envelope.state === 'failed'
     ? 'Fold unavailable'
     : `Updated ${formatLocal(envelope.generatedAt, { seconds: true })}`;
   const stateLabel = envelope.state === 'failed'
     ? 'Fold failed'
-    : pending ? `${pending} to test` : 'All caught up';
+    : `${manual} need testing · ${auto} auto-accepting`;
   const contextBar = ContextBar({ state, stateLabel, freshness });
   const bottomNav = BottomNav({ destinations, activeId: 'acceptance' });
   const shell = AppShell({
@@ -903,11 +908,126 @@ export function renderWorkPage(
 
 /** Health/System projection — SLO board + heal feed + analytics strip + artifacts region.
  *  Optional panes (product SLIs) are fed their absent state when unused. */
+function configuredSurfaceUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildSystemAxes(
+  data: OpsData,
+  board: ReturnType<typeof buildHealthBoard>,
+  armed: boolean,
+): SystemAxis[] {
+  const serviceState = board.rollup.status === 'breached' ? 'critical'
+    : board.rollup.status === 'at-risk' ? 'warning'
+    : board.rollup.status === 'met' ? 'success'
+    : 'neutral';
+  const building = data.fold.active.filter((i) => i.state === 'building').length;
+  const ready = data.fold.active.filter((i) => i.state === 'queued' || i.state === 'gated' || i.state === 'approved').length;
+  const parked = data.fold.active.filter((i) => i.state === 'parked').length;
+  const flow = !armed
+    ? { state: 'neutral' as const, value: 'Paused', detail: `${building} building · ${ready} ready · kill switch halted` }
+    : building > 0
+      ? { state: 'progress' as const, value: 'Moving', detail: `${building} building · ${ready} ready` }
+      : ready > 0
+        ? { state: 'progress' as const, value: 'Ready', detail: `${ready} item${ready === 1 ? '' : 's'} ready for dispatch` }
+        : parked > 0
+          ? { state: 'warning' as const, value: 'Waiting', detail: `${parked} parked · no build in flight` }
+          : { state: 'success' as const, value: 'Idle', detail: 'No runnable work waiting' };
+  return [
+    { key: 'service', label: 'Service', state: serviceState, value: board.rollup.label, detail: 'Runtime and SLO probes' },
+    {
+      key: 'autonomy',
+      label: 'Autonomy',
+      state: armed ? 'success' : 'warning',
+      value: armed ? 'Armed' : 'Halted',
+      detail: armed ? 'Beats may route and dispatch work' : 'Service can be alive while agentic work is stopped',
+    },
+    { key: 'flow', label: 'Flow', ...flow },
+  ];
+}
+
+function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
+  const stateView = (status: DeployTargetLiveness['status']): Pick<DeployTargetLiveness, 'state' | 'label'> => {
+    if (status === 'succeeded') return { state: 'success', label: 'Succeeded' };
+    if (status === 'pending') return { state: 'progress', label: 'Pending' };
+    if (status === 'failed') return { state: 'critical', label: 'Failed' };
+    if (status === 'timed-out') return { state: 'critical', label: 'Timed out' };
+    if (status === 'unavailable') return { state: 'warning', label: 'Unavailable' };
+    if (status === 'idle') return { state: 'neutral', label: 'No deploy yet' };
+    if (status === 'unknown') return { state: 'neutral', label: 'Legacy status unknown' };
+    return { state: 'neutral', label: 'Not configured' };
+  };
+  const recordsFor = (targetId?: string) => [...data.result.items.values()]
+    .filter((item) => targetId ? item.targetId === targetId : !item.targetId && !item.target)
+    .filter((item) => item.state === 'merged' || item.state === 'accepted')
+    .sort((a, b) => {
+      const at = a.deployCompletedAt ?? a.deployRequestedAt ?? a.mergedAt ?? '';
+      const bt = b.deployCompletedAt ?? b.deployRequestedAt ?? b.mergedAt ?? '';
+      return bt.localeCompare(at);
+    });
+  const row = (
+    target: string,
+    configured: boolean,
+    records: ReturnType<typeof recordsFor>,
+    surfaceUrl?: string,
+  ): DeployTargetLiveness => {
+    const latest = records[0];
+    const status: DeployTargetLiveness['status'] = !configured
+      ? 'not-configured'
+      : !latest
+        ? 'idle'
+        : latest.deployStatus ?? (latest.deployConfigured === true ? 'unavailable' : 'unknown');
+    const view = stateView(status);
+    const detail = status === 'not-configured' ? 'No deploy command configured'
+      : status === 'idle' ? 'Configured; no merged item has requested a deploy'
+      : status === 'unavailable' && latest?.deployConfigured === true ? 'Configured deploy request is awaiting reconciliation'
+      : status === 'unknown' ? 'Merged before explicit lifecycle receipts were recorded'
+      : latest?.deployFailureReason ?? (
+        latest?.deployCompletedAt ? `Updated ${latest.deployCompletedAt}`
+          : latest?.deployRequestedAt ? `Requested ${latest.deployRequestedAt}`
+            : 'Latest durable lifecycle state'
+      );
+    return {
+      target, status, ...view, detail,
+      ...(latest ? { itemId: latest.id } : {}),
+      ...(surfaceUrl ? { surfaceUrl } : {}),
+    };
+  };
+
+  const rows: DeployTargetLiveness[] = [
+    row('Plane', Boolean(data.cfg.deployCommand), recordsFor(), configuredSurfaceUrl(data.cfg.surfaceUrl)),
+  ];
+  for (const target of data.result.targets.values()) {
+    try {
+      const manifest = readTargetManifest(target.repoPath);
+      rows.push(row(target.name, Boolean(manifest.deployCommand), recordsFor(target.targetId), configuredSurfaceUrl(manifest.surfaceUrl)));
+    } catch {
+      rows.push({
+        target: target.name,
+        status: 'unavailable',
+        state: 'warning',
+        label: 'Unavailable',
+        detail: 'Target manifest could not be read',
+      });
+    }
+  }
+  return rows;
+}
+
 export function renderHealthPage(data: OpsData, ctx: OpsPageContext, theme?: string | null, windowParam?: string | null): string {
   const healWindow: '24h' | '7d' | '30d' | undefined =
     windowParam === '24h' ? '24h' : windowParam === '7d' ? '7d' : windowParam === '30d' ? '30d' : undefined;
   const sloRows = computeSloRows(data.cfg, ctx.repoRoot, ctx.runDir, data.events);
   const board = buildHealthBoard(sloRows);
+  const planeArmed = isPlaneArmed(ctx.env);
+  const systemAxes = buildSystemAxes(data, board, planeArmed);
+  const deployTargets = buildDeployTargets(data);
   // Pass the complete sorted feed into the projection adapter. It applies the selected
   // window first, then an explicit render bound; pre-truncating here made 7d/30d lie.
   const healActivity = healActivityFromEvents(data.events.filter((e) => e.item === 'system'));
@@ -918,13 +1038,18 @@ export function renderHealthPage(data: OpsData, ctx: OpsPageContext, theme?: str
     healActivity, opsAutonomy: readOpsAutonomy(ctx.env),
     ...(analyticsStrip.length ? { analyticsStrip } : {}),
     artifacts: artifactsData,
+    systemAxes,
+    deployTargets,
     ...(healWindow ? { window: healWindow } : {}),
   });
   const breached = envelope.state === 'failed' ? 0 : envelope.data.rollup.breached;
   const stateLabel = envelope.state === 'failed' ? 'Board unavailable'
-    : breached ? `${breached} breached` : envelope.data.rollup.label;
+    : `Service ${breached ? `${breached} breached` : envelope.data.rollup.label} · Autonomy ${planeArmed ? 'armed' : 'halted'} · Flow ${systemAxes[2]?.value.toLowerCase() ?? 'unknown'}`;
+  const visual = envelope.state === 'failed' || breached > 0 ? 'critical'
+    : !planeArmed || systemAxes.some((axis) => axis.state === 'warning') ? 'warning'
+    : 'success';
   return projectionShell('health', sectionTitle('health'), HealthProjection(envelope), envelope.state,
-    envelope.generatedAt, stateLabel, theme, targetNamesFrom(data), ctx.env);
+    envelope.generatedAt, stateLabel, theme, targetNamesFrom(data), ctx.env, visual);
 }
 
 /** Analytics top strip — quota utilization, spend, first-pass rate, acceptance split,

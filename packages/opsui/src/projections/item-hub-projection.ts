@@ -96,24 +96,32 @@ function evidenceRegion(data: ItemHubData): string {
     : artifacts.map(artifactRow).join('') +
       (artifactsTruncated ? `<p class="opsui-empty">Showing the newest ${artifacts.length} — older artifacts exist but are capped.</p>` : '');
 
-  // Three honest states (WI-187): a reported deploy.succeeded (ok), a reported
-  // deploy.failed (not ok), or nothing reported at all (deployReceipt absent) — never
-  // collapsed into an assumed success. Mirrors @loopkit/console's deployReceiptRow.
+  // Five durable lifecycle states. A merge is never treated as a successful deploy.
   const deployBody = deployReceipt
     ? EventRow({
-        state: deployReceipt.ok ? 'success' : 'critical',
-        title: 'Deploy receipt',
-        metadata: [deployReceipt.label],
-        badge: { state: deployReceipt.ok ? 'success' : 'critical', label: deployReceipt.ok ? 'deployed' : 'deploy failed' },
+        state: deployReceipt.state,
+        title: 'Deployment',
+        metadata: [
+          ...(deployReceipt.commit ? [`commit ${deployReceipt.commit.slice(0, 7)}`] : []),
+          ...(deployReceipt.requestedAt ? [`requested ${deployReceipt.requestedAt}`] : []),
+          ...(deployReceipt.completedAt ? [`updated ${deployReceipt.completedAt}`] : []),
+        ],
+        ...(deployReceipt.reason ? { summary: deployReceipt.reason } : {}),
+        badge: { state: deployReceipt.state, label: deployReceipt.label },
       })
-    : `<p class="opsui-empty">Not deployed — no deploy reported for this item yet.</p>`;
+    : `<p class="opsui-empty">Deployment state unavailable.</p>`;
+  const evidenceState = deployReceipt?.state ?? (artifacts.length ? 'neutral' : 'success');
+  const artifactLabel = artifacts.length
+    ? `${artifacts.length}${artifactsTruncated ? '+' : ''} artifacts`
+    : 'No artifacts';
+  const evidenceLabel = deployReceipt ? `${artifactLabel} · deploy ${deployReceipt.label.toLowerCase()}` : artifactLabel;
 
   return Card({
     title: 'Evidence',
     subtitle: 'Gate logs, diffs, salvage patches and the deploy receipt for this item',
     headerAside: StatusBadge({
-      state: artifacts.length ? 'neutral' : 'success',
-      label: artifacts.length ? `${artifacts.length}${artifactsTruncated ? '+' : ''} artifacts` : 'None yet',
+      state: evidenceState,
+      label: evidenceLabel,
     }),
     body: artifactsBody + deployBody,
   });

@@ -129,6 +129,29 @@ test('summary: a MERGED item carries its criteria — this is the acceptance-des
     'the operator must see what was promised beside what shipped — that is the whole win');
 });
 
+test('summary: changed-surface links come only from an explicit HTTP(S) config value', () => {
+  const mergedAt = '2099-06-01T00:00:00.000Z';
+  const events = [
+    makeEvent('cli', 'WI-970', 'item.captured', { source: 'test', text: 'ship UI' }, mergedAt),
+    makeEvent('reactor', 'WI-970', 'item.queued', { spec: 'ship UI', touches: 'ui/' }, mergedAt),
+    makeEvent('dispatch', 'WI-970', 'item.merged', { commit: 'abc970' }, mergedAt),
+  ];
+  const result = fold(events);
+  const explicit = buildSummary(result, events, {
+    cfg: { ...CONFIG_DEFAULTS, surfaceUrl: 'https://product.example.test/app' },
+    repoRoot: '/checkout/is-not-a-url',
+  });
+  const explicitRow = (explicit.recentMerged as Array<Record<string, unknown>>)[0]!;
+  assert.equal(explicitRow.surfaceUrl, 'https://product.example.test/app');
+
+  const invalid = buildSummary(result, events, {
+    cfg: { ...CONFIG_DEFAULTS, surfaceUrl: '/checkout/is-not-a-url' },
+    repoRoot: '/checkout/is-not-a-url',
+  });
+  const invalidRow = (invalid.recentMerged as Array<Record<string, unknown>>)[0]!;
+  assert.equal(invalidRow.surfaceUrl, undefined, 'repo paths never become product links');
+});
+
 test('summary: WI-185 — the merged record carries the AMENDED bar, not the original', () => {
   const mergedAt = '2099-06-01T00:00:00.000Z';
   const s = summaryFor([

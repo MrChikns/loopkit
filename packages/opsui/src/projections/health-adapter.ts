@@ -8,6 +8,7 @@ import type { GlanceMetric } from './command-projection.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 import type { ArtifactsData } from './artifacts-adapter.ts';
+import type { DeployLifecycleStatus } from './deploy-evidence.ts';
 
 const SCHEMA_VERSION = '1';
 
@@ -38,6 +39,24 @@ export type HealthRollup = {
   atRisk: number;
 };
 
+export type SystemAxis = {
+  key: 'service' | 'autonomy' | 'flow';
+  label: string;
+  state: OperationalState;
+  value: string;
+  detail: string;
+};
+
+export type DeployTargetLiveness = {
+  target: string;
+  status: DeployLifecycleStatus | 'idle' | 'unavailable';
+  state: OperationalState;
+  label: string;
+  detail: string;
+  itemId?: string;
+  surfaceUrl?: string;
+};
+
 export type HealthData = {
   glance: GlanceMetric[];
   rollup: HealthRollup;
@@ -64,6 +83,11 @@ export type HealthData = {
    *  passed through untouched — same data artifacts-adapter.ts's own `readArtifacts` call
    *  produces. Absent when the caller hasn't wired it through yet (region omitted). */
   artifacts?: ArtifactsData;
+  /** Service, autonomy and work-flow truth stay separate: an alive but halted
+   *  plane must never collapse into one globally healthy badge. */
+  systemAxes?: SystemAxis[];
+  /** One deploy-liveness row per configured plane/target boundary. */
+  deployTargets?: DeployTargetLiveness[];
 };
 
 export type OpsAutonomyMode = 'watch' | 'propose' | 'heal';
@@ -250,6 +274,8 @@ export function healthProjectionFromBoard(
     analyticsStrip?: GlanceMetric[];
     /** Passed through untouched into `data.artifacts`. */
     artifacts?: ArtifactsData;
+    systemAxes?: SystemAxis[];
+    deployTargets?: DeployTargetLiveness[];
     /** Time window for the self-heal activity feed (WI-359 follow-up) — filters
      *  `healActivity` by entry ts and drives the feed's WindowPicker active state.
      *  The SLO board itself is current-state and is never window-filtered. */
@@ -328,6 +354,8 @@ export function healthProjectionFromBoard(
       ...(opts.opsAutonomy ? { opsAutonomy: opts.opsAutonomy } : {}),
       ...(opts.analyticsStrip ? { analyticsStrip: opts.analyticsStrip } : {}),
       ...(opts.artifacts ? { artifacts: opts.artifacts } : {}),
+      ...(opts.systemAxes ? { systemAxes: opts.systemAxes } : {}),
+      ...(opts.deployTargets ? { deployTargets: opts.deployTargets } : {}),
     },
     evidence: [
       { id: 'health-board', kind: 'metric-query', label: 'loopctl slo --json + OS probes' },

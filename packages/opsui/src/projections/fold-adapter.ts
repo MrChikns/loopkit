@@ -85,6 +85,18 @@ export type FoldMergedItem = {
   id: string;
   mergedAt?: string;
   mergeCommit?: string;
+  target?: string;
+  targetId?: string;
+  deployStatus?: 'not-configured' | 'pending' | 'succeeded' | 'failed' | 'timed-out';
+  deployConfigured?: boolean;
+  deployRequestedAt?: string;
+  deployCompletedAt?: string;
+  deployFailureReason?: string;
+  /** Explicit HTTP(S) URL from plane/target configuration; never synthesized from repoPath. */
+  surfaceUrl?: string;
+  mergeChangedFiles?: string[];
+  mergeChangedFilesTruncated?: boolean;
+  mergeGateCommand?: string;
   spec?: string;
   /** File prefixes the slice changed — drives the WI-180 origin chip on the delivery stream.
    *  Comma-joined string as loopkit emits it (@loopkit/core src/fold.ts); split with

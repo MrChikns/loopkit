@@ -12,11 +12,12 @@ import { Card } from '../components/Card.ts';
 import { MetricTile } from '../components/MetricTile.ts';
 import { ProjectionFailure } from '../components/ProjectionFailure.ts';
 import { StatusBadge } from '../components/StatusBadge.ts';
+import { EventRow } from '../components/EventRow.ts';
 import { WindowPicker, type TimeWindow } from '../components/WindowPicker.ts';
 import { esc } from '../render/html.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
-import type { HealActivityEntry, HealthData, HealthPane, HealthSloRow, OpsAutonomyMode, SloStatus } from './health-adapter.ts';
+import type { DeployTargetLiveness, HealActivityEntry, HealthData, HealthPane, HealthSloRow, OpsAutonomyMode, SloStatus, SystemAxis } from './health-adapter.ts';
 import { artifactsSystemRegion } from './artifacts-projection.ts';
 import type { GlanceMetric } from './command-projection.ts';
 
@@ -91,6 +92,55 @@ function panesRegion(panes: HealthPane[]): string {
     });
   }
   return panes.map((pane) => Card({ title: pane.title, body: sloTable(pane) })).join('');
+}
+
+function systemAxesRegion(axes: SystemAxis[]): string {
+  const body = axes.map((axis) => EventRow({
+    state: axis.state,
+    title: axis.label,
+    metadata: [axis.detail],
+    badge: { state: axis.state, label: axis.value },
+  })).join('');
+  return Card({
+    title: 'Operating state',
+    subtitle: 'Service, autonomy and flow are independent signals',
+    body,
+  });
+}
+
+function trustedSurfaceHref(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deployTargetsRegion(targets: DeployTargetLiveness[]): string {
+  const body = targets.length
+    ? targets.map((target) => {
+        const surfaceUrl = trustedSurfaceHref(target.surfaceUrl);
+        return EventRow({
+          state: target.state,
+          title: target.target,
+          metadata: [
+            target.detail,
+            ...(target.itemId ? [{ label: target.itemId, href: `/item/${target.itemId}` }] : []),
+          ],
+          badge: { state: target.state, label: target.label },
+          ...(surfaceUrl
+            ? { evidence: { id: `surface-${target.target}`, label: 'Open surface', href: surfaceUrl } }
+            : {}),
+        });
+      }).join('')
+    : `<p class="opsui-empty">No plane or target deployment configuration found.</p>`;
+  return Card({
+    title: 'Deployments by target',
+    subtitle: 'Latest durable receipt for each explicit deployment boundary',
+    body,
+  });
 }
 
 // ─── Self-heal activity feed ───────────────────────────────────────────────────
@@ -230,7 +280,9 @@ export function HealthProjection(env: ProjectionEnvelope<HealthData>): string {
   const d = env.data;
   return (
     `<div class="opsui-health" data-projection="health" data-state="${env.state}">` +
+    (d.systemAxes?.length ? systemAxesRegion(d.systemAxes) : '') +
     glanceRegion(d) +
+    (d.deployTargets ? deployTargetsRegion(d.deployTargets) : '') +
     (d.analyticsStrip?.length ? analyticsStripRegion(d.analyticsStrip) : '') +
     panesRegion(d.panes) +
     (d.healActivity !== undefined

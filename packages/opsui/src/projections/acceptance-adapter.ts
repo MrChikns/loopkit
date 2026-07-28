@@ -17,6 +17,7 @@ import type { AcceptanceData, AcceptanceItem, AcceptanceFilter, AcceptanceCounts
 import { deriveOrigin, isFoldSummary, mergedItemBadge, originBadge, type FoldMergedItem, type FoldSummary, type ItemOrigin } from './fold-adapter.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
+import { deployEvidenceFromMerged } from './deploy-evidence.ts';
 
 const SCHEMA_VERSION = '1';
 /** Acceptance-debt age past which the oldest tile turns from progress to warning. */
@@ -30,6 +31,16 @@ function mergedAtMs(item: FoldMergedItem): number {
 function specLabel(item: FoldMergedItem): string {
   const spec = (item.spec ?? '').trim();
   return spec ? `${item.id} · ${spec}` : item.id;
+}
+
+function trustedSurfaceUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Human age of an acceptance item relative to the fold's generation time. */
@@ -47,12 +58,20 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
   const metadata = [`shipped ${formatAge(ageMs)}`];
   if (item.mergeCommit) metadata.push(item.mergeCommit.slice(0, 7));
   const origin = deriveOrigin(item.touches);
+  const declaredTouches = item.touches?.split(',').map((t) => t.trim()).filter(Boolean) ?? [];
+  const evidenceTouches = item.mergeChangedFiles?.length ? item.mergeChangedFiles : declaredTouches;
+  const surfaceUrl = trustedSurfaceUrl(item.surfaceUrl);
   return {
     id: item.id,
     title: specLabel(item),
     ...(item.spec && item.spec.trim() ? { captured: item.spec.trim() } : {}),
     metadata,
     ...(item.tier ? { tier: item.tier } : {}),
+    ...(item.mergeCommit ? { commit: item.mergeCommit } : {}),
+    ...(evidenceTouches.length ? { touches: evidenceTouches } : {}),
+    ...(item.mergeChangedFilesTruncated ? { touchesTruncated: true } : {}),
+    deploy: deployEvidenceFromMerged(item),
+    ...(surfaceUrl ? { surfaceUrl } : {}),
     // ONE badge deriver (fold-adapter.ts mergedItemBadge): computed here at the fold
     // boundary, not re-derived by the render layer, so the acceptance desk can never say
     // something different than Command's delivery stream for the same merged item.
@@ -63,9 +82,7 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
     // href — without one EventRow falls back to a `data-opsui-action` button, and no
     // client dispatcher exists for those (WI-348). The item hub renders the actual
     // deploy receipt, so the chip deep-links there.
-    ...(item.mergeCommit
-      ? { evidence: { id: `deploy-${item.mergeCommit}`, label: 'Deploy receipt', href: `/item/${item.id}` } }
-      : {}),
+    evidence: { id: `delivery-${item.id}`, label: 'Delivery evidence', href: `/item/${item.id}` },
     // Certify-don't-brief payload — absent renders a visible "no certification provided"
     // line (acceptance-projection.ts certificationBlock), never a silent blank.
     ...(item.certification ? { certification: item.certification } : {}),
@@ -105,7 +122,7 @@ function buildGlance(items: AcceptanceItem[], oldestAgeMs: number): GlanceMetric
   return [
     {
       label: 'Awaiting your test',
-      value: autoCount > 0 ? `${waiting.length} to test · ${autoCount} auto-accepting` : waiting.length,
+      value: `${waiting.length} need testing · ${autoCount} auto-accepting`,
       footnote: waiting.length ? 'shipped, not yet verified' : 'all caught up',
       state: waiting.length ? 'warning' : 'success',
       open: { kind: 'evidence', id: 'acceptance-queue' },

@@ -300,6 +300,12 @@ export interface LoopkitConfig {
    * Empty string = off. Runs with cwd=repoRoot; must be self-locking (bursts coalesce).
    */
   deployCommand: string;
+  /**
+   * Optional operator-facing URL for the product surface this plane deploys.
+   * Empty string = no link. UI consumers must use only this explicit value (or a
+   * target manifest's equivalent), never derive a URL from repoPath.
+   */
+  surfaceUrl?: string;
 
   /**
    * launchd label kickstarted right after the reactor appends a fresh item.queued — shortcuts
@@ -834,6 +840,7 @@ const DEFAULTS: LoopkitConfig = {
   promptsDir: '.ai/loops/prompts',
   notifyHook: '.ai/notify-phone.sh',
   deployCommand: '',  // off by default; a deployment sets its own deploy-on-merge script
+  surfaceUrl: '',  // opt-in; never inferred from a checkout path
   dispatchKickLabel: '',  // off by default; a deployment sets the dispatch launchd label in loopkit.config.json
   mergeGateTimeoutMs: 10 * 60 * 1000,  // 10 min; raise if beat-load contention causes timeouts
   // WI-180: staged OFF — the rollback is the default. Flipping this on is a deliberate,
@@ -990,6 +997,7 @@ export function loadConfig(repoRoot: string): LoopkitConfig {
     promptsDir: raw.promptsDir ?? DEFAULTS.promptsDir,
     notifyHook: raw.notifyHook ?? DEFAULTS.notifyHook,
     deployCommand: raw.deployCommand ?? DEFAULTS.deployCommand,
+    surfaceUrl: raw.surfaceUrl ?? DEFAULTS.surfaceUrl,
     dispatchKickLabel: raw.dispatchKickLabel ?? DEFAULTS.dispatchKickLabel,
     mergeGateTimeoutMs: raw.mergeGateTimeoutMs ?? DEFAULTS.mergeGateTimeoutMs,
     slo: { ...DEFAULTS.slo, ...((raw as Partial<LoopkitConfig>).slo ?? {}) },

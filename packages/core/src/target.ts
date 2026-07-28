@@ -85,6 +85,8 @@ export interface TargetManifest {
   gateWorkdir: string;
   /** Optional post-merge deploy command. Empty string = no deploy step (the default). */
   deployCommand: string;
+  /** Explicit operator-facing product URL. Empty = do not render a changed-surface link. */
+  surfaceUrl: string;
   /** Prefix for the sibling worktree dirs the beats create next to the target repo. Default: 'loop-'. */
   worktreePrefix: string;
   /** Workdirs (repo-relative; '.' = repo root) whose installed node_modules the beats
@@ -141,6 +143,7 @@ const MANIFEST_DEFAULTS: Omit<TargetManifest, 'name'> = {
   gateCommand: 'npm test',
   gateWorkdir: '.',
   deployCommand: '',
+  surfaceUrl: '',
   worktreePrefix: 'loop-',
   depsWorkdirs: [],
   touches: { conflictMode: 'prefix' },
@@ -243,6 +246,7 @@ export function parseTargetManifest(raw: unknown): TargetManifest {
     gateCommand: strOr('gateCommand', MANIFEST_DEFAULTS.gateCommand),
     gateWorkdir: strOr('gateWorkdir', MANIFEST_DEFAULTS.gateWorkdir),
     deployCommand: strOr('deployCommand', MANIFEST_DEFAULTS.deployCommand),
+    surfaceUrl: strOr('surfaceUrl', MANIFEST_DEFAULTS.surfaceUrl),
     worktreePrefix: strOr('worktreePrefix', MANIFEST_DEFAULTS.worktreePrefix),
     depsWorkdirs: requireStringArray((raw as Record<string, unknown>)['depsWorkdirs'], 'depsWorkdirs'),
     touches: { conflictMode: 'prefix' },
