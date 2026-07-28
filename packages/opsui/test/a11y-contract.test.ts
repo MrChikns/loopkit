@@ -68,6 +68,17 @@ test('opsui stylesheet gives text actions visible focus and 24px targets', async
   assert.match(css, /\.opsui-provenance__chip \{[\s\S]*min-height: 24px;/);
 });
 
+test('mobile top bar preserves the page title beside fixed-width actions', async () => {
+  const css = await readFile(resolve(here, '../src/styles/components.css'), 'utf8');
+  assert.match(css, /\.opsui-topbar__lead \{[\s\S]*flex: 1 1 auto;[\s\S]*overflow: hidden;/);
+  assert.match(css, /\.opsui-topbar__title \{[\s\S]*text-overflow: ellipsis;[\s\S]*white-space: nowrap;/);
+  assert.match(css, /\.opsui-topbar__actions \{[^}]*flex: 0 0 auto;/);
+  assert.match(
+    css,
+    /@media \(max-width: 640px\), \(max-height: 500px\) \{[\s\S]*\.opsui-topbar__crumb,[\s\S]*\.opsui-topbar__kbd \{ display: none; \}/,
+  );
+});
+
 test('Work filter counts use the AA-safe secondary text token', async () => {
   const css = await readFile(resolve(here, '../src/styles/projections/work.css'), 'utf8');
   assert.match(css, /\.opsui-work__filter-count \{\s*color: var\(--text-2\);/);

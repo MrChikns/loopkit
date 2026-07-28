@@ -78,6 +78,7 @@ import {
   ItemHubProjection,
   artifactsProjectionFromInput,
   projectionRegistry,
+  threadsProjectionDefinition,
   Pagination,
   trustedSurfaceUrl,
 } from '@loopkit/opsui';
@@ -145,7 +146,8 @@ export async function loadOpsData(ledgerDir: string, repoRoot: string): Promise<
  *  the same field the sidebar nav renders — so a retitle can never split the nav label from
  *  the page header. */
 function sectionTitle(id: keyof typeof projectionRegistry & string): string {
-  return projectionRegistry[id]?.title ?? id;
+  return projectionRegistry[id]?.title
+    ?? (id === threadsProjectionDefinition.id ? threadsProjectionDefinition.title : id);
 }
 
 function escapeHtml(value: string): string {
@@ -1712,7 +1714,7 @@ export function renderItemHubPage(data: OpsData, ctx: OpsPageContext, itemId: st
 
   return projectionShell(
     'work',
-    `${itemId} · loopkit ops`,
+    itemId,
     ItemHubProjection(envelope),
     envelope.state,
     envelope.generatedAt,

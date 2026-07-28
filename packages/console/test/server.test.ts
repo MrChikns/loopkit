@@ -2597,6 +2597,24 @@ for (const route of ALL_ROUTES) {
 
 }
 
+for (const [route, expectedTitle] of [
+  ['/threads', 'Threads'],
+  ['/item/WI-001', 'WI-001'],
+] as const) {
+  test(`GET ${route} — uses one polished page name in the h1 and document title`, async () => {
+    await withLedger((ledgerDir) =>
+      withServer(ledgerDir, async (base) => {
+        const res = await fetch(`${base}${route}`);
+        assert.equal(res.status, 200);
+        const body = await res.text();
+        assert.match(body, new RegExp(`<h1 class="opsui-topbar__title">${expectedTitle}<\\/h1>`));
+        assert.match(body, new RegExp(`<title>${expectedTitle} · loopkit ops<\\/title>`));
+        assert.doesNotMatch(body, /loopkit ops · loopkit ops/);
+      }),
+    );
+  });
+}
+
 // The no-JS TopBar fallbacks are an old-shell affordance: the @loopkit/opsui TopBar
 // drives intent/theme through its client shell module (data-opsui-shell hooks), so the
 // fallback markup only renders on the legacy-shell routes. Progressive enhancement for the WRITE

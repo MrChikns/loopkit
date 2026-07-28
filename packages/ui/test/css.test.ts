@@ -72,3 +72,14 @@ test('component stylesheet gives text actions visible focus and 24px targets', a
   assert.match(css, /\.opsui-eventrow__metaitem--link,[\s\S]*min-height: 24px;/);
   assert.match(css, /\.opsui-provenance__chip \{[\s\S]*min-height: 24px;/);
 });
+
+test('mobile top bar protects long page titles from action overlap', async () => {
+  const css = await readFile(resolve(here, '../src/styles/components.css'), 'utf8');
+  assert.match(css, /\.opsui-topbar__lead \{[\s\S]*flex: 1 1 auto;[\s\S]*overflow: hidden;/);
+  assert.match(css, /\.opsui-topbar__title \{[\s\S]*text-overflow: ellipsis;[\s\S]*white-space: nowrap;/);
+  assert.match(css, /\.opsui-topbar__actions \{[^}]*flex: 0 0 auto;/);
+  assert.match(
+    css,
+    /@media \(max-width: 640px\), \(max-height: 500px\) \{[\s\S]*\.opsui-topbar__crumb,[\s\S]*\.opsui-topbar__kbd \{ display: none; \}/,
+  );
+});

@@ -310,11 +310,27 @@
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.opsui-topbar__lead { grid-column: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.opsui-topbar__lead {
+  grid-column: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
 .opsui-topbar__crumb { font-size: 12px; color: var(--text-3); text-decoration: none; }
 .opsui-topbar__crumb[href]:hover { color: var(--text-2); }
 .opsui-topbar__sep { font-size: 12px; color: var(--text-3); margin: 0 2px; }
-.opsui-topbar__title { margin: 0; font-size: 15px; font-weight: 620; color: var(--text); }
+.opsui-topbar__title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .opsui-topbar__status { grid-column: 2; display: flex; align-items: center; }
 .opsui-topbar__actions { grid-column: 3; display: flex; align-items: center; gap: 8px; }
 .opsui-topbar__palette,
@@ -382,6 +398,11 @@
 @media (max-width: 640px), (max-height: 500px) {
   .opsui-shell { grid-template-columns: 1fr; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .opsui-rail { display: none; }
+  .opsui-topbar { gap: 8px; padding-right: 12px; padding-left: 12px; }
+  .opsui-topbar__crumb,
+  .opsui-topbar__sep,
+  .opsui-topbar__kbd { display: none; }
+  .opsui-topbar__actions { gap: 6px; }
   .opsui-bottomnav {
     /* fixed, not sticky: .opsui-shell is a grid with no align-items, so its
      * default (stretch) sizes this sibling's box to the tallest grid item's
