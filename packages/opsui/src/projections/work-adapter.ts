@@ -341,7 +341,7 @@ export function classifyWorkGroup(
 function buildGlance(counts: Record<string, number>, parkedKinds: Record<string, number>): GlanceMetric[] {
   const inFlight =
     (counts['building'] ?? 0) + (counts['testing'] ?? 0) +
-    (counts['gated'] ?? 0) + (counts['approved'] ?? 0) + (counts['blocked'] ?? 0);
+    (counts['gated'] ?? 0) + (counts['approved'] ?? 0);
   const queued   = (counts['queued'] ?? 0) + (counts['routed'] ?? 0);
   const parked   = (counts['parked'] ?? 0);
   const decisionParked = parkedKinds['decision'] ?? 0;
@@ -359,8 +359,8 @@ function buildGlance(counts: Record<string, number>, parkedKinds: Record<string,
 
   return [
     {
-      label: 'In flight', value: inFlight,
-      footnote: inFlight ? 'actively building' : 'none in flight',
+      label: 'In progress', value: inFlight,
+      footnote: inFlight ? 'building, testing, gated, or approved' : 'no active execution',
       state: inFlightState,
       open: { kind: 'evidence', id: 'work-board' },
     },
@@ -380,19 +380,28 @@ function buildGlance(counts: Record<string, number>, parkedKinds: Record<string,
 }
 
 function workAge(
-  item: Pick<FoldActiveItem, 'state' | 'createdAt' | 'queuedAt' | 'buildingAt' | 'parkedAt' | 'approvedAt'>,
+  item: Pick<FoldActiveItem, 'state' | 'createdAt' | 'queuedAt' | 'buildingAt' | 'testingAt' | 'gatedAt' | 'parkedAt' | 'approvedAt'>,
   nowMs: number,
-): string | undefined {
-  const at = item.state === 'building'
+): { value: string; label: string } | undefined {
+  const stage = item.state === 'building'
     ? item.buildingAt
-    : item.state === 'approved'
-      ? item.approvedAt
-      : item.state === 'parked'
-        ? item.parkedAt
-        : item.queuedAt ?? item.createdAt;
+    : item.state === 'testing'
+      ? item.testingAt
+      : item.state === 'gated'
+        ? item.gatedAt
+        : item.state === 'approved'
+          ? item.approvedAt
+          : undefined;
+  const [at, label] = stage
+    ? [stage, 'stage age']
+    : item.state === 'parked' && item.parkedAt
+      ? [item.parkedAt, 'parked']
+      : (item.state === 'queued' || item.state === 'routed') && item.queuedAt
+        ? [item.queuedAt, 'queued']
+        : [item.createdAt, 'open'];
   if (!at) return undefined;
   const atMs = Date.parse(at);
-  return Number.isFinite(atMs) ? formatAge(nowMs - atMs) : undefined;
+  return Number.isFinite(atMs) ? { value: formatAge(nowMs - atMs), label } : undefined;
 }
 
 function workReason(
@@ -555,6 +564,8 @@ export function workProjectionFromFold(
     const priority   = typeof ext['priority']   === 'string' ? ext['priority']   : '';
     const attempts   = typeof ext['attempts']   === 'number' ? ext['attempts']   : 0;
     const buildingAt = typeof ext['buildingAt'] === 'string' ? ext['buildingAt'] : '';
+    const testingAt  = typeof ext['testingAt']  === 'string' ? ext['testingAt']  : '';
+    const gatedAt    = typeof ext['gatedAt']    === 'string' ? ext['gatedAt']    : '';
     const queuedAt   = typeof ext['queuedAt']   === 'string' ? ext['queuedAt']   : '';
     const parkedAt   = typeof ext['parkedAt']   === 'string' ? ext['parkedAt']   : undefined;
     const lastUnparkedAt = typeof ext['lastUnparkedAt'] === 'string' ? ext['lastUnparkedAt'] : undefined;
@@ -617,6 +628,8 @@ export function workProjectionFromFold(
       ...(typeof ext['createdAt'] === 'string' ? { createdAt: ext['createdAt'] } : {}),
       ...(queuedAt ? { queuedAt } : {}),
       ...(buildingAt ? { buildingAt } : {}),
+      ...(testingAt ? { testingAt } : {}),
+      ...(gatedAt ? { gatedAt } : {}),
       ...(parkedAt ? { parkedAt } : {}),
       ...(typeof ext['approvedAt'] === 'string' ? { approvedAt: ext['approvedAt'] } : {}),
     }, nowMs);
@@ -625,7 +638,7 @@ export function workProjectionFromFold(
 
     const metadata: string[] = [];
     if (priority && priority !== 'unset') metadata.push(`${priority} priority`);
-    if (age) metadata.push(`age ${age}`);
+    if (age) metadata.push(`${age.label} ${age.value}`);
     if (blocker) metadata.push(`blocked by ${blocker.id}${blocker.state ? ` · ${blocker.state}` : ''}`);
     if (attempts > 1) metadata.push(`attempt ${attempts}`);
 
@@ -646,7 +659,7 @@ export function workProjectionFromFold(
       metadata,
       group,
       reason,
-      ...(age ? { age } : {}),
+      ...(age ? { age: age.value } : {}),
       ...(blocker ? { blocker } : {}),
       nextAction,
       summary: reason,

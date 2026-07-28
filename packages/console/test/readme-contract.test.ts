@@ -15,12 +15,31 @@ test('console README names the current canonical route and action surface', asyn
     '/company',
     '/observability',
     '/threads',
-    '/timeline',
     '/activity',
     '/item/<WI-NNN>',
   ]) {
     assert.ok(readme.includes(`\`${route}\``), `README must document ${route}`);
   }
+  assert.match(
+    readme,
+    /`\/activity`[^.\n]*canonical paginated global ledger history/i,
+    'README must name /activity as the canonical global history',
+  );
+  assert.match(
+    readme,
+    /`\/timeline`[^.\n]*compatibility-only[\s\S]{0,180}global route redirects to `\/activity`/i,
+    'README must describe global /timeline as a compatibility redirect to /activity',
+  );
+  assert.match(
+    readme,
+    /`\/timeline\?item=WI-NNN` redirects to the canonical `\/item\/WI-NNN` hub/i,
+    'README must keep item-specific history on the canonical item hub',
+  );
+  assert.doesNotMatch(
+    readme,
+    /`\/timeline`[^.\n]*(?:most recent|cross-item ledger events)/i,
+    'README must not claim /timeline is still a rendered global history',
+  );
   for (const action of [
     'approve',
     'reject',

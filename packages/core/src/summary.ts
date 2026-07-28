@@ -157,7 +157,7 @@ export function buildSummary(
       });
     }
 
-    const activeStates = new Set(['building', 'approved', 'parked', 'queued', 'routed']);
+    const activeStates = new Set(['building', 'gated', 'approved', 'parked', 'queued', 'routed']);
     if (activeStates.has(rec.state)) {
       // For crashed/parked items, include last build's stderrTail
       const lastBuild = rec.builds[rec.builds.length - 1];
@@ -177,6 +177,7 @@ export function buildSummary(
         attempts: rec.attempts,
         createdAt: rec.createdAt ?? rec.capturedAt,
         buildingAt: rec.buildingAt,
+        gatedAt: rec.gatedAt,
         queuedAt: rec.queuedAt,
         parkedAt: rec.parkedAt,
         approvedAt: rec.approvedAt,

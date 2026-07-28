@@ -102,6 +102,20 @@ test('summary: an active item carries its criteria to the console', () => {
   assert.deepEqual(active?.criteria, ['the bar']);
 });
 
+test('summary: a gated item remains active and carries its stage timestamp to the console', () => {
+  const gatedAt = '2099-01-01T00:03:00.000Z';
+  const s = summaryFor([
+    makeEvent('cli', 'WI-959', 'item.captured', { source: 'test', text: 'x' }, AFTER_CUTOFF),
+    makeEvent('reactor', 'WI-959', 'item.queued', { spec: 'gate it' }, '2099-01-01T00:01:00.000Z'),
+    makeEvent('dispatch', 'WI-959', 'build.dispatched', { attempt: 1, pid: 1 }, '2099-01-01T00:02:00.000Z'),
+    makeEvent('dispatch', 'WI-959', 'gate.passed', {}, gatedAt),
+  ]);
+  const active = (s.active as Array<Record<string, unknown>>).find(a => a.id === 'WI-959');
+
+  assert.equal(active?.state, 'gated');
+  assert.equal(active?.gatedAt, gatedAt);
+});
+
 test('summary: a MERGED item carries its criteria — this is the acceptance-desk pair', () => {
   const mergedAt = '2099-06-01T00:00:00.000Z';
   const s = summaryFor([

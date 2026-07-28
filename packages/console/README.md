@@ -7,7 +7,8 @@ loopkit is an event-sourced autonomous delivery plane: an append-only work ledge
 projections, and beats build work items in git worktrees, gate them, merge them, and tier
 acceptance. An operator needs one small window onto that ledger, and a way to drive it without a
 terminal. This package is that window — deliberately thin, with zero product assumptions and
-zero runtime dependencies beyond Node's built-ins.
+no third-party runtime packages: it composes the workspace `@loopkit/core`, `@loopkit/ui` and
+`@loopkit/opsui` packages over Node's built-ins.
 
 ## What it does
 
@@ -19,17 +20,18 @@ canonical, server-rendered routes:
 - **`/acceptance`** — merged slices grouped by acceptance tier, with criteria, certification and
   the evidence currently recorded in the ledger.
 - **`/health`** — SLO rollup, autonomy state, self-heal activity and recent build artifacts.
-- **`/company`** — decision records and configured knowledge sources.
+- **`/company`** — Decisions & docs. Recent active decisions are the default; query, status,
+  target and page filters are bookmarkable, and superseded decisions appear only when requested.
 - **`/observability`** — plane spend, quota, provider, judge, routing, repair and token telemetry.
 - **`/threads`** and **`/threads/<external-ref>`** — paginated conversations and thread detail.
 - **`/item/<WI-NNN>`** — the canonical item hub: state, available actions, timeline,
   conversation and evidence. Other supported item-id shapes retain the legacy timeline view.
-- **`/timeline`** — the most recent cross-item ledger events; `?item=WI-NNN` redirects to that
-  item's canonical hub.
-- **`/activity`** — the paginated operator-facing activity stream.
+- **`/activity`** — the canonical paginated global ledger history, newest first.
 
 Compatibility redirects preserve older bookmarks: `/` and `/needs-you` go to `/command`;
 `/missions`, `/system`, `/knowledge` and `/analytics` redirect to their canonical routes.
+`/timeline` is compatibility-only: the global route redirects to `/activity`, while
+`/timeline?item=WI-NNN` redirects to the canonical `/item/WI-NNN` hub.
 Artifact and attachment download routes serve only validated, bounded paths.
 
 Operator writes use the SAME `@loopkit/core` verb functions as `loopctl`; the console does not

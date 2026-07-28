@@ -72,11 +72,46 @@ test('Work rows carry compact reason, age, blocker, and next action fields', () 
 
   const html = WorkProjection(env);
   assert.match(html, /plane repair in progress|Blocked on WI-21/);
-  assert.match(html, /age 9h/);
+  assert.match(html, /parked 9h/);
   assert.match(html, /blocked by WI-21/);
   assert.match(html, /<strong>Next:<\/strong> Resume WI-21 first/);
   assert.match(html, /href="\/item\/WI-21"/);
   assert.doesNotMatch(html, /<details class="opsui-work__drill" open>/, 'evidence details stay closed by default');
+});
+
+test('Work glance excludes dependency-blocked items from truthful in-progress work', () => {
+  const env = workProjectionFromFold({
+    ...summary([]),
+    counts: { building: 2, testing: 1, gated: 1, approved: 1, blocked: 3 },
+  }, { ledgerSequence: 1 });
+  const inProgress = env.data.glance.find((metric) => metric.label === 'In progress');
+
+  assert.equal(inProgress?.value, 5);
+  assert.equal(inProgress?.footnote, 'building, testing, gated, or approved');
+});
+
+test('Work ages use stage stamps or explicitly fall back to overall open age', () => {
+  const env = workProjectionFromFold(summary([
+    {
+      id: 'WI-70',
+      state: 'testing',
+      createdAt: ago(12),
+      queuedAt: ago(10),
+      testingAt: ago(2),
+    },
+    {
+      id: 'WI-71',
+      state: 'gated',
+      createdAt: ago(14),
+      queuedAt: ago(11),
+    },
+  ]), { ledgerSequence: 1 });
+  const testing = env.data.active.find((item) => item.id === 'WI-70');
+  const gated = env.data.active.find((item) => item.id === 'WI-71');
+
+  assert.ok(testing?.metadata.includes('stage age 2h'));
+  assert.ok(gated?.metadata.includes('open 14h'));
+  assert.ok(!gated?.metadata.includes('queued 11h'), 'missing stage stamps never masquerade as stage age');
 });
 
 test('Work groups filter without JS and paginate independently', () => {

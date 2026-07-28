@@ -48,6 +48,11 @@ export type FoldActiveItem = {
    *  "last activity" age without re-deriving anything from raw ledger events. */
   queuedAt?: string;
   buildingAt?: string;
+  /** Optional stage stamps understood by the Work adapter. `gatedAt` is supplied by current
+   * core folds when present; `testingAt` is forward-compatible for hosts with a distinct
+   * testing transition. Missing stamps must fall back to explicitly-labelled open age. */
+  testingAt?: string;
+  gatedAt?: string;
   parkedAt?: string;
   approvedAt?: string;
   /** Semantic dependency edge from item.blocked. The item itself remains parked, so this is
