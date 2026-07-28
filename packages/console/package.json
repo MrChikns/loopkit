@@ -2,7 +2,7 @@
   "name": "@loopkit/console",
   "version": "0.1.0",
   "private": true,
-  "description": "Thin generic HTTP console for a loopkit ledger — board/item/needs-you/health views plus four operator verbs (capture/approve/reject/accept); works with JS off (plain HTML forms), progressively enhanced by a small set of server-served scripts",
+  "description": "Server-rendered loopkit ledger projections and state-bounded operator actions; works with JavaScript off and adds only progressive enhancement",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

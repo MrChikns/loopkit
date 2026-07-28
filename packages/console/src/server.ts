@@ -1,10 +1,11 @@
 /**
- * server.ts — the console HTTP server: four read-only views plus the operator write verbs
+ * server.ts — the console HTTP server: ledger-derived command/work/acceptance/health/knowledge/
+ * observability/conversation/history/item projections plus explicit operator actions
  * (capture / approve / reject / accept / reply / feedback / the run-control set — stop / hold /
- * resume / requeue / escalate / dismiss). Every write is a plain HTML form POST, answered with a
- * 303 redirect back to the referring view (POST-redirect-GET) — the client-JS layer
- * (public/console-*.js) only progressively enhances that same POST/GET surface, it never opens a
- * new write path of its own.
+ * resume / requeue / escalate / dismiss). Every write is a plain HTML form POST, answered with
+ * a 303 redirect back to the referring view (POST-redirect-GET) — the served `/ui/*.js` and
+ * remaining `public/console-*.js` assets only progressively enhance that same POST/GET surface;
+ * they never open a new write path of their own.
  *
  * Reads stay read-only by construction: every GET re-loads the ledger and folds it fresh
  * (loadAllEvents + fold), never holds mutable in-process state. Writes append to the ledger
@@ -982,8 +983,9 @@ function notFound(req: IncomingMessage, res: ServerResponse): void {
 }
 
 /**
- * Start the console HTTP server (four read views + four write verbs). Resolves once the
- * server is listening.
+ * Start the console HTTP server. GET routes project the ledger; POST routes dispatch the
+ * explicit, state-bounded operator actions described at the top of this module. Resolves once
+ * the server is listening.
  */
 export async function startConsole(opts: ConsoleOptions): Promise<ConsoleHandle> {
   const ledgerDir = opts.ledgerDir;
