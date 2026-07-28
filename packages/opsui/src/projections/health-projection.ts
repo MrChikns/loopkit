@@ -126,6 +126,9 @@ function deployTargetsRegion(targets: DeployTargetLiveness[]): string {
           state: target.state,
           title: target.target,
           metadata: [
+            ...(typeof target.configured === 'boolean'
+              ? [target.configured ? 'Deploy configured now' : 'No deploy command configured now']
+              : []),
             target.detail,
             ...(target.itemId ? [{ label: target.itemId, href: `/item/${target.itemId}` }] : []),
           ],

@@ -25,6 +25,7 @@ test('System keeps service, autonomy and flow independent when the service is al
         state: 'progress',
         label: 'Pending',
         detail: 'Requested now',
+        configured: false,
         itemId: 'WI-100',
         surfaceUrl: 'https://acme.example.test/',
       },
@@ -38,6 +39,8 @@ test('System keeps service, autonomy and flow independent when the service is al
   assert.match(html, /Deployments by target/);
   assert.match(html, /acme-web/);
   assert.match(html, /WI-100/);
+  assert.match(html, /No deploy command configured now/);
+  assert.match(html, /Pending/, 'current configuration does not erase the latest durable receipt');
   assert.match(html, /https:\/\/acme\.example\.test\//);
 });
 

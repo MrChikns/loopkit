@@ -262,7 +262,7 @@ flowchart TD
 
 - **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
   it automatically the moment the blocker **merges**
-  (`packages/core/src/beats/reactor.ts:2118`<!--cite:blockedVictimRelease-->). The plane creates these
+  (`packages/core/src/beats/reactor.ts:2120`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
 - **A blocker that cannot merge does not strand the victim silently.** If the blocker is missing
@@ -270,7 +270,7 @@ flowchart TD
   `decision` after **24**<!--pin:blockedWaitTimeoutHours--> hours with the blocker's state attached.
   A live, recovering, planning, held or decision-blocked repair keeps waiting and points you to the
   blocker; age alone does not create a second decision
-  (`packages/core/src/beats/reactor.ts:2212`<!--cite:blockedVictimTimeout-->).
+  (`packages/core/src/beats/reactor.ts:2214`<!--cite:blockedVictimTimeout-->).
 - **A hold is not a failure.** `parked/hold` never enters pathology, never ages into Stuck, and
   never moves automatically. Stuck means a breaker-tripped ops park or build execution with no
   transition for more than six hours; decision, decomposition, queue wait, and ordinary ops
@@ -471,7 +471,7 @@ and are promoted only by a manual config change after burn-in.
 
 - **The plane files its own bugs.** When the pathologist classifies a park as a plane infrastructure
   bug it allocates a new work item, queues it, and blocks the victim on it
-  (`packages/core/src/beats/reactor.ts:2434`<!--cite:repairItemCapture-->). That never reaches your desk
+  (`packages/core/src/beats/reactor.ts:2436`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
@@ -504,9 +504,11 @@ a change that touched real code cannot launder itself as harmless.
 
 ```mermaid
 flowchart LR
-  M(["item.merged"]) --> READ["Read the diff<br/><small>what it really touched</small>"]
+  M(["item.merged"]) --> DEPLOY{"deploy truth explicit?"}
+  DEPLOY -->|"not configured, or succeeded"| READ["Read the diff<br/><small>what it really touched</small>"]
+  DEPLOY -->|"pending · failed · timed out<br/>configured-missing · legacy-unknown"| DHOLD["timer withheld<br/><small>inspect or accept manually</small>"]
   READ --> T{"tier"}
-  T -->|framework-internal or no code| A1["auto-accepts silently"]
+  T -->|framework-internal or no code| A1["accepts after a quiet window"]
   T -->|low risk| A2["accepts after a short window"]
   T -->|a surface you would notice| A3["asks you to test"]
   T -->|money · auth · migrations · judge said no| A4["waits for you, indefinitely"]
@@ -521,9 +523,9 @@ flowchart LR
   classDef hold fill:#FBF0DF,stroke:#9C5A06,color:#111820
   classDef stop fill:#FAEAE8,stroke:#9E2B20,color:#111820
   class M term
-  class READ step
+  class READ,DEPLOY step
   class A1,OK pass
-  class A3,HOLD hold
+  class A3,HOLD,DHOLD hold
   class A4,GATE stop
 ```
 
@@ -537,13 +539,20 @@ verdict history — a clean-accept streak shrinks the window, a reported problem
 ceiling of **336**<!--pin:windowCeilingHours--> hours. What you actually experience is calibrated to
 how often you have found something wrong.
 
-**Two gates sit in front of the non-`auto` tiers.**
+**Deployment truth sits in front of every timer-driven tier.** `auto`, `optional`, and `review`
+become timer-eligible only when the merge explicitly records that no deploy was configured, or a
+durable `deploy.succeeded` receipt exists. Pending, failed, timed-out, configured-without-receipt,
+and legacy-unknown deploy states stay visible for inspection or a manual verdict; absence is never
+inferred green. `must` remains manual regardless of deployment truth.
+
+**Two additional gates sit in front of the non-`auto` tiers.**
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:3691`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
-  a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier is
-  never withheld: there is nothing to test, so plane health protects nothing for it.
+  (`packages/core/src/beats/reactor.ts:3829`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier
+  bypasses this *plane-health* gate because there is nothing to test, but it still must satisfy the
+  deployment prerequisite above.
 - **Your unanswered reply.** An item with an open reply or an unresolved proposal is held rather than
   accepted, so work you are actively steering is not silently closed behind you. That hold expires
   after **72**<!--pin:holdMaxHours--> hours so a never-answered reply cannot pin an item forever.
@@ -598,7 +607,7 @@ flowchart TD
 
 - **The request is durable before process hand-off.** The plane appends `deploy.requested` for every
   merged item, awaits that write, and only then spawns
-  (`packages/core/src/deploy.ts:86`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
+  (`packages/core/src/deploy.ts:129`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
   asynchronous process-launch errors append `deploy.failed`. A reactor reconciliation also repairs
   both crash windows: a configured merge missing its request is requested and launched, while a
   still-pending request safely re-invokes the configured self-locking command.
@@ -618,7 +627,7 @@ flowchart TD
   not be trusted on this field.
 - **A silent script becomes an explicit timeout.** Each reactor beat closes a `pending` request
   after **1**<!--pin:deployBehindHours--> hour
-  (`packages/core/src/deploy.ts:217`<!--cite:stalePendingDeployEvents-->), deterministically and once.
+  (`packages/core/src/deploy.ts:267`<!--cite:stalePendingDeployEvents-->), deterministically and once.
   A late success can still supersede that timeout. The separate deploy-freshness SLO
   (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains the checkout-level backstop,
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads

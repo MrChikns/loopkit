@@ -54,6 +54,9 @@ export type AcceptanceItem = {
   touches?: string[];
   touchesTruncated?: boolean;
   deploy: DeployEvidence;
+  /** Whether this row is genuinely timer-eligible under the reactor's deploy prerequisite,
+   * or needs operator attention while deploy truth is unresolved/unhealthy. */
+  acceptanceMode: 'manual' | 'timer' | 'waiting-deploy' | 'deploy-attention';
   /** Explicitly configured product URL; never inferred from a checkout path. */
   surfaceUrl?: string;
   /** Certify-don't-brief payload (item.merged.certification), when present — see
@@ -151,11 +154,12 @@ export function buildAcceptanceVerbActions(
   tier: string | undefined,
   accepted: boolean = false,
   nextPath: string = '/acceptance',
+  manualOverride: boolean = false,
 ): NonNullable<import('../components/EventRow.ts').EventRowProps['actions']> {
   // Already-verdict'd items need no further action — the state transition itself is the
   // record; re-showing "Works — accept" after acceptance is the stale-actions bug (WI-387).
   if (accepted) return [];
-  if (tier === 'auto') return [];
+  if (tier === 'auto' && !manualOverride) return [];
   // nextPath is always a same-origin /command/... path (never user text), so it is used
   // literally — matching the original literal `next=/acceptance` byte for byte
   // when the default applies (pinned by acceptance-projection.test.ts).
@@ -247,7 +251,14 @@ function deliveryEvidenceBlock(i: AcceptanceItem): string {
 }
 
 function acceptanceRow(i: AcceptanceItem): string {
-  const actions = buildAcceptanceVerbActions(i.id, i.title, i.tier);
+  const actions = buildAcceptanceVerbActions(
+    i.id,
+    i.title,
+    i.tier,
+    false,
+    '/acceptance',
+    i.acceptanceMode === 'deploy-attention' || i.acceptanceMode === 'waiting-deploy',
+  );
   return EventRow({
     state: i.badge.state,
     title: i.title,
@@ -263,10 +274,10 @@ function acceptanceRow(i: AcceptanceItem): string {
   });
 }
 
-/** must/review items — these are the ones that actually need the operator's test, so they
- *  render unsorted (already oldest-first from the adapter) and always visible. */
+/** Every item that is not truly timer-eligible stays visible: must/review work plus
+ * optional/auto work waiting on or blocked by deployment truth. */
 function waitingRegion(items: AcceptanceItem[]): string {
-  const waiting = items.filter((i) => !isAutoAcceptTier(i.tier));
+  const waiting = items.filter((i) => i.acceptanceMode !== 'timer');
   const body =
     waiting.length === 0
       ? `<p class="opsui-empty">Nothing waiting on your test.</p>`
@@ -283,12 +294,9 @@ function waitingRegion(items: AcceptanceItem[]): string {
   });
 }
 
-/** optional/auto items — nothing for the operator to do, so the section collapses by default
- *  (zero-JS `<details>`, matching the threads/plane-observability convention) and each row's
- *  badge already carries its own countdown via {@link import('./fold-adapter.ts').mergedItemBadge}.
- *  Omitted entirely when empty so the desk doesn't show an empty collapsed shell. */
+/** Only deploy-safe optional/auto items belong in the collapsed timer section. */
 function autoAcceptingRegion(items: AcceptanceItem[]): string {
-  const autoItems = items.filter((i) => isAutoAcceptTier(i.tier));
+  const autoItems = items.filter((i) => i.acceptanceMode === 'timer');
   if (autoItems.length === 0) return '';
   const rows = autoItems.map((i) => acceptanceRow(i)).join('');
   return (

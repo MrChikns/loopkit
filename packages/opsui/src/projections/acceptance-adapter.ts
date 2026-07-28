@@ -43,6 +43,23 @@ function trustedSurfaceUrl(value: string | undefined): string | undefined {
   }
 }
 
+function evidenceTouches(item: FoldMergedItem): string[] {
+  const declared = item.touches?.split(',').map((t) => t.trim()).filter(Boolean) ?? [];
+  return item.mergeChangedFiles !== undefined ? item.mergeChangedFiles : declared;
+}
+
+function evidenceOrigin(item: FoldMergedItem): ItemOrigin | undefined {
+  const touches = evidenceTouches(item);
+  return deriveOrigin(touches.length ? touches.join(',') : undefined);
+}
+
+export function acceptanceModeFor(item: Pick<FoldMergedItem, 'tier' | 'deployConfigured' | 'deployStatus'>): AcceptanceItem['acceptanceMode'] {
+  if (!isAutoAcceptTier(item.tier)) return 'manual';
+  if (item.deployConfigured === false || item.deployStatus === 'succeeded') return 'timer';
+  if (item.deployStatus === 'pending') return 'waiting-deploy';
+  return 'deploy-attention';
+}
+
 /** Human age of an acceptance item relative to the fold's generation time. */
 function formatAge(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return 'unknown';
@@ -57,10 +74,21 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
   const ageMs = Number.isFinite(mergedMs) ? nowMs - mergedMs : NaN;
   const metadata = [`shipped ${formatAge(ageMs)}`];
   if (item.mergeCommit) metadata.push(item.mergeCommit.slice(0, 7));
-  const origin = deriveOrigin(item.touches);
-  const declaredTouches = item.touches?.split(',').map((t) => t.trim()).filter(Boolean) ?? [];
-  const evidenceTouches = item.mergeChangedFiles?.length ? item.mergeChangedFiles : declaredTouches;
+  const origin = evidenceOrigin(item);
+  const touches = evidenceTouches(item);
   const surfaceUrl = trustedSurfaceUrl(item.surfaceUrl);
+  const acceptanceMode = acceptanceModeFor(item);
+  const deployBadge = acceptanceMode === 'waiting-deploy'
+    ? { state: 'progress' as const, label: 'Deploy pending' }
+    : acceptanceMode === 'deploy-attention'
+      ? {
+          state: item.deployStatus === 'failed' || item.deployStatus === 'timed-out' ? 'critical' as const : 'warning' as const,
+          label: item.deployStatus === 'failed' ? 'Deploy failed'
+            : item.deployStatus === 'timed-out' ? 'Deploy timed out'
+              : item.deployConfigured === true ? 'Deploy status missing'
+                : 'Deploy status unknown',
+        }
+      : undefined;
   return {
     id: item.id,
     title: specLabel(item),
@@ -68,14 +96,15 @@ function toItem(item: FoldMergedItem, nowMs: number, windows: { optional?: numbe
     metadata,
     ...(item.tier ? { tier: item.tier } : {}),
     ...(item.mergeCommit ? { commit: item.mergeCommit } : {}),
-    ...(evidenceTouches.length ? { touches: evidenceTouches } : {}),
+    ...(touches.length ? { touches } : {}),
     ...(item.mergeChangedFilesTruncated ? { touchesTruncated: true } : {}),
     deploy: deployEvidenceFromMerged(item),
+    acceptanceMode,
     ...(surfaceUrl ? { surfaceUrl } : {}),
     // ONE badge deriver (fold-adapter.ts mergedItemBadge): computed here at the fold
     // boundary, not re-derived by the render layer, so the acceptance desk can never say
     // something different than Command's delivery stream for the same merged item.
-    badge: mergedItemBadge(item, windows),
+    badge: deployBadge ?? mergedItemBadge(item, windows),
     ...(origin ? { origin, originChip: originBadge(origin) } : {}),
     // Every accepted slice traces to its deploy; the acceptance script itself is a
     // projection-level evidence chip (below), not per-item. The chip must carry an
@@ -106,12 +135,11 @@ function passesFilter(origin: ItemOrigin | undefined, filter: AcceptanceFilter):
   return origin === 'target' || origin === 'mixed';
 }
 
-// Acceptance-tier tiering (WI-341): the chip must match what the operator actually needs to act on —
-// only must/review items are "to test"; optional/auto auto-accept on a timer and are a
-// side mention, not part of the headline count (they already have their own collapsed
-// "Auto-accepting soon" section below).
+// The headline must match what the operator actually needs to act on. Tier is only one input:
+// optional/auto rows count as timer-driven only when deploy truth satisfies the same fail-closed
+// prerequisite as the reactor.
 function buildGlance(items: AcceptanceItem[], oldestAgeMs: number): GlanceMetric[] {
-  const waiting = items.filter((i) => !isAutoAcceptTier(i.tier));
+  const waiting = items.filter((i) => i.acceptanceMode !== 'timer');
   const autoCount = items.length - waiting.length;
   const oldestHours = Number.isFinite(oldestAgeMs) ? oldestAgeMs / 3_600_000 : 0;
   const oldestState: OperationalState = waiting.length === 0
@@ -178,7 +206,7 @@ export function acceptanceProjectionFromFold(
   // WI-180: the origin toggle filters the queue by where each slice's changes land. The
   // glance + oldest tile reflect the FILTERED set so the counts match what's on screen.
   // Origin is derived once per item and reused for both the count tally and the filter.
-  const origins = ordered.map((m) => deriveOrigin(m.touches));
+  const origins = ordered.map(evidenceOrigin);
   const counts: AcceptanceCounts = {
     all: ordered.length,
     target: origins.filter((o) => passesFilter(o, 'target')).length,
@@ -190,7 +218,7 @@ export function acceptanceProjectionFromFold(
   // The glance's "Oldest" tile mirrors the "Waiting on your test" section (acceptance-tier
   // tiering, WI-341): an old optional/auto item that's about to auto-accept isn't operator debt, so
   // it must not be reported as the oldest thing waiting on the operator.
-  const waitingFiltered = orderedFiltered.filter((m) => !isAutoAcceptTier(m.tier));
+  const waitingFiltered = orderedFiltered.filter((m) => acceptanceModeFor(m) !== 'timer');
   const oldestAgeMs = waitingFiltered.length ? nowMs - mergedAtMs(waitingFiltered[0]!) : NaN;
 
   return {

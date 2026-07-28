@@ -12,6 +12,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { fold } from '../src/fold.js';
 import { makeEvent } from '../src/schema.js';
@@ -150,6 +153,42 @@ test('summary: changed-surface links come only from an explicit HTTP(S) config v
   });
   const invalidRow = (invalid.recentMerged as Array<Record<string, unknown>>)[0]!;
   assert.equal(invalidRow.surfaceUrl, undefined, 'repo paths never become product links');
+});
+
+test('summary: sole-target identity coalescing does not route an untargeted plane item to the target surface', () => {
+  const targetRoot = mkdtempSync(join(tmpdir(), 'loopkit-summary-target-'));
+  try {
+    writeFileSync(join(targetRoot, 'loopkit.target.json'), JSON.stringify({
+      name: 'sole-target',
+      surfaceUrl: 'https://target.example.test/',
+    }), 'utf8');
+    const mergedAt = '2099-06-01T00:00:00.000Z';
+    const events = [
+      makeEvent('cli', 'sole-target', 'target.registered', {
+        targetId: 'tgt-aaaa2345',
+        name: 'sole-target',
+        repoPath: targetRoot,
+        manifestHash: 'h',
+        defaultBranch: 'main',
+      }, mergedAt),
+      makeEvent('cli', 'WI-971', 'item.captured', { source: 'test', text: 'ship plane UI' }, mergedAt),
+      makeEvent('reactor', 'WI-971', 'item.queued', { spec: 'ship plane UI', touches: 'packages/console/' }, mergedAt),
+      makeEvent('dispatch', 'WI-971', 'item.merged', { commit: 'abc971', deployConfigured: false }, mergedAt),
+    ];
+    const result = fold(events);
+    const rec = result.items.get('WI-971')!;
+    assert.equal(rec.target, undefined, 'the item is still routed to the plane');
+    assert.equal(rec.targetId, 'tgt-aaaa2345', 'sole-target inference adds identity attribution only');
+
+    const summary = buildSummary(result, events, {
+      cfg: { ...CONFIG_DEFAULTS, surfaceUrl: 'https://plane.example.test/' },
+      repoRoot: process.cwd(),
+    });
+    const row = (summary.recentMerged as Array<Record<string, unknown>>)[0]!;
+    assert.equal(row.surfaceUrl, 'https://plane.example.test/');
+  } finally {
+    rmSync(targetRoot, { recursive: true, force: true });
+  }
 });
 
 test('summary: WI-185 — the merged record carries the AMENDED bar, not the original', () => {

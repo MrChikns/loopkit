@@ -53,6 +53,8 @@ export type DeployTargetLiveness = {
   state: OperationalState;
   label: string;
   detail: string;
+  /** Current configuration is independent of the latest durable lifecycle receipt. */
+  configured?: boolean;
   itemId?: string;
   surfaceUrl?: string;
 };

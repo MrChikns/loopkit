@@ -284,10 +284,15 @@ export function buildSummary(
           ...(rec.deployFailureReason ? { deployFailureReason: rec.deployFailureReason } : {}),
           ...(() => {
             let configuredUrl: string | undefined;
-            const reg = lookupRegisteredTarget(result.targets, rec);
-            if (reg) {
-              try { configuredUrl = readTargetManifest(reg.repoPath).surfaceUrl; } catch { /* omit unreadable config */ }
-            } else if (!rec.target && !rec.targetId) {
+            // `targetId` alone is identity attribution (default/sole-target coalescing), not
+            // routing. Only an explicit routing name selects a target manifest; the stable id
+            // may disambiguate that route after the boundary has been crossed.
+            if (rec.target) {
+              const reg = lookupRegisteredTarget(result.targets, rec);
+              if (reg) {
+                try { configuredUrl = readTargetManifest(reg.repoPath).surfaceUrl; } catch { /* omit unreadable config */ }
+              }
+            } else {
               configuredUrl = cfg.surfaceUrl;
             }
             const url = trustedSurfaceUrl(configuredUrl);

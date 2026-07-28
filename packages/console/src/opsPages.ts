@@ -35,7 +35,7 @@ import {
   isPlaneArmed,
   readTargetManifest,
 } from '@loopkit/core';
-import type { LoopkitConfig, FoldResult, LedgerEvent, VerdictSummary, SloRow as CoreSloRow } from '@loopkit/core';
+import type { LoopkitConfig, FoldResult, ItemRecord, LedgerEvent, VerdictSummary, SloRow as CoreSloRow } from '@loopkit/core';
 
 import {
   AppShell,
@@ -829,8 +829,8 @@ export function renderAcceptancePage(data: OpsData, theme?: string | null, filte
   const workspace = AcceptanceProjection(envelope);
   const rail = NavigationRail({ destinations, activeId: 'acceptance', expanded: true });
   const topBar = opsTopBar(sectionTitle('acceptance'));
-  const manual = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.tier === 'must' || i.tier === 'review').length;
-  const auto = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.tier === 'optional' || i.tier === 'auto').length;
+  const manual = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.acceptanceMode !== 'timer').length;
+  const auto = envelope.state === 'failed' ? 0 : envelope.data.queue.filter((i) => i.acceptanceMode === 'timer').length;
   const state = envelope.state === 'failed' ? 'critical' : manual ? 'warning' : 'success';
   const freshness = envelope.state === 'failed'
     ? 'Fold unavailable'
@@ -918,7 +918,7 @@ function configuredSurfaceUrl(value: string | undefined): string | undefined {
   }
 }
 
-function buildSystemAxes(
+export function buildSystemAxes(
   data: OpsData,
   board: ReturnType<typeof buildHealthBoard>,
   armed: boolean,
@@ -927,17 +927,47 @@ function buildSystemAxes(
     : board.rollup.status === 'at-risk' ? 'warning'
     : board.rollup.status === 'met' ? 'success'
     : 'neutral';
-  const building = data.fold.active.filter((i) => i.state === 'building').length;
-  const ready = data.fold.active.filter((i) => i.state === 'queued' || i.state === 'gated' || i.state === 'approved').length;
-  const parked = data.fold.active.filter((i) => i.state === 'parked').length;
+  // Mirror Missions' canonical work groups at this page boundary. FoldActiveItem.state is
+  // intentionally open-ended, so testing/blocked remain covered for forward-compatible hosts.
+  const groups = {
+    inProgress: 0,
+    queued: 0,
+    waiting: 0,
+    recovering: 0,
+    decision: 0,
+    held: 0,
+    planning: 0,
+  };
+  for (const item of data.fold.active) {
+    if (item.blockedOn || item.state === 'blocked') groups.waiting++;
+    else if (item.state === 'building' || item.state === 'testing' || item.state === 'gated' || item.state === 'approved') groups.inProgress++;
+    else if (item.state === 'captured' || item.state === 'routed' || item.state === 'queued') groups.queued++;
+    else if (item.state === 'parked' && item.parkKind === 'decision') groups.decision++;
+    else if (item.state === 'parked' && item.parkKind === 'hold') groups.held++;
+    else if (item.state === 'parked' && item.parkKind === 'decomposition') groups.planning++;
+    else if (item.state === 'parked') groups.recovering++;
+  }
+  const parked = groups.recovering + groups.decision + groups.held + groups.planning;
+  const detailParts = [
+    groups.inProgress ? `${groups.inProgress} in progress` : '',
+    groups.queued ? `${groups.queued} queued` : '',
+    groups.waiting ? `${groups.waiting} blocked/waiting` : '',
+    groups.recovering ? `${groups.recovering} recovering` : '',
+    groups.decision ? `${groups.decision} needs decision` : '',
+    groups.held ? `${groups.held} held` : '',
+    groups.planning ? `${groups.planning} planning` : '',
+  ].filter(Boolean);
+  const flowDetail = detailParts.length ? detailParts.join(' · ') : 'No runnable work waiting';
   const flow = !armed
-    ? { state: 'neutral' as const, value: 'Paused', detail: `${building} building · ${ready} ready · kill switch halted` }
-    : building > 0
-      ? { state: 'progress' as const, value: 'Moving', detail: `${building} building · ${ready} ready` }
-      : ready > 0
-        ? { state: 'progress' as const, value: 'Ready', detail: `${ready} item${ready === 1 ? '' : 's'} ready for dispatch` }
+    ? { state: 'neutral' as const, value: 'Paused', detail: `${flowDetail} · kill switch halted` }
+    : groups.waiting > 0
+      ? { state: 'warning' as const, value: 'Blocked', detail: flowDetail }
+      : groups.inProgress > 0
+        ? { state: 'progress' as const, value: 'Moving', detail: flowDetail }
+        : groups.queued > 0
+          ? { state: 'progress' as const, value: 'Ready', detail: flowDetail }
         : parked > 0
-          ? { state: 'warning' as const, value: 'Waiting', detail: `${parked} parked · no build in flight` }
+          ? { state: 'warning' as const, value: 'Waiting', detail: flowDetail }
           : { state: 'success' as const, value: 'Idle', detail: 'No runnable work waiting' };
   return [
     { key: 'service', label: 'Service', state: serviceState, value: board.rollup.label, detail: 'Runtime and SLO probes' },
@@ -952,7 +982,7 @@ function buildSystemAxes(
   ];
 }
 
-function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
+export function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
   const stateView = (status: DeployTargetLiveness['status']): Pick<DeployTargetLiveness, 'state' | 'label'> => {
     if (status === 'succeeded') return { state: 'success', label: 'Succeeded' };
     if (status === 'pending') return { state: 'progress', label: 'Pending' };
@@ -963,8 +993,8 @@ function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
     if (status === 'unknown') return { state: 'neutral', label: 'Legacy status unknown' };
     return { state: 'neutral', label: 'Not configured' };
   };
-  const recordsFor = (targetId?: string) => [...data.result.items.values()]
-    .filter((item) => targetId ? item.targetId === targetId : !item.targetId && !item.target)
+  const recordsFor = (matchesRoute: (item: ItemRecord) => boolean) => [...data.result.items.values()]
+    .filter(matchesRoute)
     .filter((item) => item.state === 'merged' || item.state === 'accepted')
     .sort((a, b) => {
       const at = a.deployCompletedAt ?? a.deployRequestedAt ?? a.mergedAt ?? '';
@@ -978,13 +1008,18 @@ function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
     surfaceUrl?: string,
   ): DeployTargetLiveness => {
     const latest = records[0];
-    const status: DeployTargetLiveness['status'] = !configured
-      ? 'not-configured'
-      : !latest
-        ? 'idle'
-        : latest.deployStatus ?? (latest.deployConfigured === true ? 'unavailable' : 'unknown');
+    // Current configuration and the latest durable receipt are independent axes. Turning a
+    // command off must not erase the last success/failure/pending/legacy fact.
+    const status: DeployTargetLiveness['status'] = !latest
+      ? configured ? 'idle' : 'not-configured'
+      : latest.deployStatus ?? (
+          latest.deployConfigured === true ? 'unavailable'
+            : latest.deployConfigured === false ? 'not-configured'
+              : 'unknown'
+        );
     const view = stateView(status);
-    const detail = status === 'not-configured' ? 'No deploy command configured'
+    const detail = status === 'not-configured'
+      ? latest ? 'Latest merged item recorded no deploy' : 'No deploy command configured; no receipt history'
       : status === 'idle' ? 'Configured; no merged item has requested a deploy'
       : status === 'unavailable' && latest?.deployConfigured === true ? 'Configured deploy request is awaiting reconciliation'
       : status === 'unknown' ? 'Merged before explicit lifecycle receipts were recorded'
@@ -994,19 +1029,26 @@ function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
             : 'Latest durable lifecycle state'
       );
     return {
-      target, status, ...view, detail,
+      target, status, ...view, detail, configured,
       ...(latest ? { itemId: latest.id } : {}),
       ...(surfaceUrl ? { surfaceUrl } : {}),
     };
   };
 
   const rows: DeployTargetLiveness[] = [
-    row('Plane', Boolean(data.cfg.deployCommand), recordsFor(), configuredSurfaceUrl(data.cfg.surfaceUrl)),
+    row('Plane', Boolean(data.cfg.deployCommand), recordsFor((item) => !item.target), configuredSurfaceUrl(data.cfg.surfaceUrl)),
   ];
   for (const target of data.result.targets.values()) {
     try {
       const manifest = readTargetManifest(target.repoPath);
-      rows.push(row(target.name, Boolean(manifest.deployCommand), recordsFor(target.targetId), configuredSurfaceUrl(manifest.surfaceUrl)));
+      rows.push(row(
+        target.name,
+        Boolean(manifest.deployCommand),
+        recordsFor((item) => Boolean(item.target) && (
+          item.targetId ? item.targetId === target.targetId : item.target === target.name
+        )),
+        configuredSurfaceUrl(manifest.surfaceUrl),
+      ));
     } catch {
       rows.push({
         target: target.name,
