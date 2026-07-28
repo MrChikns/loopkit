@@ -56,13 +56,13 @@ function threadMessages(itemId: string, count: number, startTs: string): LedgerE
  *  title) — needed wherever more than one card on the same page can render the same item's
  *  thread/messages, so an unscoped containment check would false-positive across cards. */
 function cardScope(html: string, title: string, nextTitle?: string): string {
-  const start = html.indexOf(`<h3 class="opsui-card__title">${title}</h3>`);
-  const end = nextTitle ? html.indexOf(`<h3 class="opsui-card__title">${nextTitle}</h3>`) : -1;
+  const start = html.indexOf(`<h2 class="opsui-card__title">${title}</h2>`);
+  const end = nextTitle ? html.indexOf(`<h2 class="opsui-card__title">${nextTitle}</h2>`) : -1;
   return html.slice(start, end === -1 ? undefined : end);
 }
 
 /** Like `cardScope`, but the end boundary is an arbitrary literal marker rather than another
- *  card's `<h3>` title — the acceptance desk's "Lower priority" region is a `<details>` summary,
+ *  card's `<h2>` title — the acceptance desk's "Lower priority" region is a `<details>` summary,
  *  not a Card title, so scoping "Waiting on your test" needs a plain substring boundary. */
 function sliceBetween(html: string, startMarker: string, endMarker?: string): string {
   const start = html.indexOf(startMarker);
@@ -674,7 +674,7 @@ test('renderAcceptance: a surface prefix promotes a merge to the review tier, on
   const html = renderAcceptance(result, SURFACE_TIER_CFG, LATER_NOW);
   // WI-103 touches packages/console/ — declared a surface in SURFACE_TIER_CFG → review, which
   // lands in "Waiting on your test", not the collapsed "Lower priority" region.
-  const waiting = sliceBetween(html, '<h3 class="opsui-card__title">Waiting on your test</h3>', '<details class="opsui-acceptance__collapse">');
+  const waiting = sliceBetween(html, '<h2 class="opsui-card__title">Waiting on your test</h2>', '<details class="opsui-acceptance__collapse">');
   assert.match(waiting, /WI-103/);
   assert.match(waiting, /opsui-status--warning/);
 });
@@ -765,7 +765,7 @@ test('renderAcceptance: the glance strip is empty-state safe with no merged item
 test('renderAcceptance: "Waiting on your test" carries must\\/review and excludes optional\\/auto', () => {
   const result = fold(tieredMergeLedger());
   const html = renderAcceptance(result, BARE_TIER_CFG, LATER_NOW);
-  const waiting = sliceBetween(html, '<h3 class="opsui-card__title">Waiting on your test</h3>', '<details class="opsui-acceptance__collapse">');
+  const waiting = sliceBetween(html, '<h2 class="opsui-card__title">Waiting on your test</h2>', '<details class="opsui-acceptance__collapse">');
   // WI-104 (must, judge fail) belongs here.
   assert.match(waiting, /WI-104/);
   // WI-101 (auto) and WI-102 (optional) do not.

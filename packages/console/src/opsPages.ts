@@ -1416,21 +1416,22 @@ function parseDecisionLog(content: string): DecisionCard[] {
 /** One markdown knowledge card: title = label, subtitle = basename + freshness, body an
  *  escaped-text excerpt inside a collapsible <details>. Kept as plain as the legacy
  *  renderKnowledge — minimal structure, escaped content. */
-function knowledgeMarkdownCard(rec: KnowledgeSourceRecord, now: number): string {
+function knowledgeMarkdownCard(rec: KnowledgeSourceRecord, now: number, nested = false): string {
   const age = freshnessAge(rec.mtime, now);
   const base = rec.path.split('/').pop() || rec.path;
   const subtitle = age ? `${base} · ${age}` : base;
   const body =
     `<details class="opsui-knowledge__doc"><summary>Show document</summary>` +
     `<pre class="opsui-knowledge__excerpt">${esc(rec.content)}</pre></details>`;
-  return Card({ title: rec.label, subtitle, body });
+  return Card({ title: rec.label, subtitle, body, ...(nested ? { headingLevel: 3 as const } : {}) });
 }
 
 /** An unreadable source → a small warning card (label + "source unreadable"), never a crash. */
-function knowledgeErrorCard(rec: KnowledgeSourceRecord): string {
+function knowledgeErrorCard(rec: KnowledgeSourceRecord, nested = false): string {
   return Card({
     title: rec.label,
     subtitle: rec.path,
+    ...(nested ? { headingLevel: 3 as const } : {}),
     headerAside: StatusBadge({ state: 'warning', label: 'unreadable' }),
     body: `<p class="opsui-empty">${esc(rec.error ?? 'source unreadable')}</p>`,
   });
@@ -1441,10 +1442,10 @@ function knowledgeErrorCard(rec: KnowledgeSourceRecord): string {
 function knowledgeRegion(records: KnowledgeSourceRecord[], showGroups: boolean, now: number): string {
   const nonDecision = records.filter((r) => r.kind !== 'decision-log' || r.error);
   if (nonDecision.length === 0) return '';
-  const renderCard = (r: KnowledgeSourceRecord): string =>
-    r.error ? knowledgeErrorCard(r) : knowledgeMarkdownCard(r, now);
+  const renderCard = (r: KnowledgeSourceRecord, nested = false): string =>
+    r.error ? knowledgeErrorCard(r, nested) : knowledgeMarkdownCard(r, now, nested);
   if (!showGroups) {
-    return `<div class="opsui-company__knowledge">${nonDecision.map(renderCard).join('')}</div>`;
+    return `<div class="opsui-company__knowledge">${nonDecision.map((rec) => renderCard(rec)).join('')}</div>`;
   }
   const byTarget = new Map<string, KnowledgeSourceRecord[]>();
   for (const r of nonDecision) {
@@ -1457,7 +1458,7 @@ function knowledgeRegion(records: KnowledgeSourceRecord[], showGroups: boolean, 
       Card({
         title: target,
         subtitle: `${recs.length} source${recs.length === 1 ? '' : 's'}`,
-        body: recs.map(renderCard).join(''),
+        body: recs.map((rec) => renderCard(rec, true)).join(''),
       }),
     )
     .join('');
@@ -1762,8 +1763,7 @@ export function renderActivityPage(data: OpsData, now: Date = new Date(), theme?
         .join('\n') + pager
     : emptyState('No ledger activity yet', 'Events land here the moment the first item is captured.');
 
-  const workspace = `<h1 class="opsui-page-title">Activity</h1>
-<p class="opsui-page-updated">${escapeHtml(String(total))} event(s) across the ledger, newest first</p>
+  const workspace = `<p class="opsui-page-updated">${escapeHtml(String(total))} event(s) across the ledger, newest first</p>
 ${Card({ title: 'Activity', body: feed })}`;
 
   return projectionShell(
@@ -1784,14 +1784,13 @@ ${Card({ title: 'Activity', body: feed })}`;
  * the view the operator came from: on a zero-JS console a dead-end error page would strand them.
  */
 export function renderErrorPage(data: OpsData, message: string, backHref: string, theme?: string | null): string {
-  const workspace = `<h1 class="opsui-page-title">Cannot do that</h1>
-<p>${escapeHtml(message)}</p>
+  const workspace = `<p>${escapeHtml(message)}</p>
 <p><a href="${escapeHtml(backHref)}">← Back</a></p>`;
   return projectionShell('command', 'Cannot do that', workspace, 'failed', new Date().toISOString(), 'Action failed', theme, targetNamesFrom(data));
 }
 
 /** 404 envelope, on the shared opsui shell. */
 export function renderNotFoundPage(data: OpsData, path: string, theme?: string | null): string {
-  const workspace = `<h1 class="opsui-page-title">404</h1><p>No route for <code>${escapeHtml(path)}</code>.</p>`;
+  const workspace = `<p>No route for <code>${escapeHtml(path)}</code>.</p>`;
   return projectionShell('command', '404 — not found', workspace, 'failed', new Date().toISOString(), 'Not found', theme, targetNamesFrom(data));
 }

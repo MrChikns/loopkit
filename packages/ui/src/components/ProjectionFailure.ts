@@ -63,7 +63,7 @@ export function ProjectionFailure(props: ProjectionFailureProps): string {
   return (
     `<section class="${className}" role="alert" data-state="critical">` +
     `<header class="opsui-projfail__head">` +
-    `<h3 class="opsui-projfail__title">${esc(props.projection)} could not render</h3>${badge}</header>` +
+    `<h2 class="opsui-projfail__title">${esc(props.projection)} could not render</h2>${badge}</header>` +
     `<dl class="opsui-projfail__facts">${rows}</dl>${evidence}</section>`
   );
 }

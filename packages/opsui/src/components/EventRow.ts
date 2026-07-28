@@ -113,7 +113,7 @@ export function EventRow(props: EventRowProps): string {
     `<span class="opsui-eventrow__rail" aria-hidden="true"></span>` +
     `<div class="opsui-eventrow__content">` +
     `<div class="opsui-eventrow__head">` +
-    `<h4 class="opsui-eventrow__title">${esc(props.title)}</h4>` +
+    `<h3 class="opsui-eventrow__title">${esc(props.title)}</h3>` +
     (badge || originChip
       ? `<span class="opsui-eventrow__badges">${badge}${originChip}</span>`
       : '') +

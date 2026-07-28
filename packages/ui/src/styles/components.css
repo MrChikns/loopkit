@@ -13,6 +13,30 @@
   text-decoration: none;
   color: inherit;
 }
+.opsui-root a:focus-visible,
+.opsui-root summary:focus-visible,
+.opsui-root input:not([type="hidden"]):focus-visible,
+.opsui-root textarea:focus-visible,
+.opsui-root select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.opsui-root summary { min-height: 24px; }
+
+/* Text-sized drill links are still operator controls. Give the visible target at
+ * least WCAG 2.2's 24px minimum instead of relying on surrounding whitespace. */
+.opsui-topbar__crumb,
+.opsui-eventrow__metaitem--link,
+.opsui-dref,
+.opsui-opsparks__note-link,
+.opsui-composer__captured-link,
+.opsui-intent-strip__link,
+.opsui-empty > a,
+.opsui-work__park-note a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
 
 /* ---- Button ---------------------------------------------------------------- */
 .opsui-btn {
@@ -499,7 +523,7 @@
   font-family: inherit;
   font-size: 15px;
 }
-.opsui-palette__input:focus-visible { outline: none; }
+.opsui-palette__input:focus-visible { outline-offset: -2px; }
 .opsui-palette__scroll { overflow-y: auto; padding: 6px; }
 .opsui-palette__results { list-style: none; margin: 0; padding: 0; }
 .opsui-palette__options { list-style: none; margin: 0; padding: 0; }
@@ -802,7 +826,9 @@
 /* Timeline drill-through — demoted to a small secondary link BELOW the details block
  * (operator feedback: details are primary, timeline is the secondary drill, not the lead). */
 .opsui-work__timeline-link {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   margin: 2px 0 0 15px;
   font-size: 11px;
   font-family: var(--font-mono);
@@ -911,6 +937,9 @@
 .opsui-provenance__meta { margin: 0; font-size: 12px; color: var(--text-2); font-family: var(--font-mono); }
 .opsui-provenance__chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .opsui-provenance__chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   font-size: 11px;
   color: var(--text-2);
   font-family: var(--font-mono);
@@ -949,7 +978,9 @@
 }
 .opsui-projfail__val { margin: 0; font-size: 13px; color: var(--text); font-family: var(--font-mono); }
 .opsui-projfail__evidence {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   margin-top: 12px;
   font-size: 12px;
   color: var(--critical-fg);

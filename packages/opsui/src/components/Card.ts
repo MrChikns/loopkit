@@ -18,6 +18,8 @@ export type CardProps = {
    *  client JS to target one specific card instance (e.g. an in-place AJAX swap). Purely
    *  additive: no visual effect, so callers that omit it are byte-identical to before. */
   id?: string;
+  /** Heading level for the card title. Pages default to h2; nested cards opt into h3. */
+  headingLevel?: 2 | 3;
 };
 
 export function Card(props: CardProps): string {
@@ -27,9 +29,10 @@ export function Card(props: CardProps): string {
 
   let header = '';
   if (props.title || props.headerAside) {
+    const headingTag = `h${props.headingLevel ?? 2}`;
     const titleBlock = props.title
       ? `<div class="opsui-card__titles">` +
-        `<h3 class="opsui-card__title">${esc(props.title)}</h3>` +
+        `<${headingTag} class="opsui-card__title">${esc(props.title)}</${headingTag}>` +
         (props.subtitle
           ? `<p class="opsui-card__subtitle">${esc(props.subtitle)}</p>`
           : '') +

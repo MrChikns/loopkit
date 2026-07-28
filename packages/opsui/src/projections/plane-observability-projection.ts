@@ -98,7 +98,7 @@ function howToReadRegion(): string {
 <strong>projections</strong> of those events — they never modify anything, they
 count and summarise what already happened.</p>
 
-<h4>Loop labels</h4>
+<h2>Loop labels</h2>
 <ul>
 <li><strong>reactor</strong> — 30 s heartbeat: routes intents, fires founder verbs, merges approved branches, heals stalls, sends acceptance nudges.</li>
 <li><strong>dispatch</strong> — 60 s heartbeat: picks Touches-disjoint queued items, spawns worker agents in git worktrees, gates finished builds.</li>
@@ -108,7 +108,7 @@ count and summarise what already happened.</p>
 <li><strong>consult / founder-manual</strong> — Codex CLI sessions. "consult" is Codex dispatched from inside this project via a manual/consulting CLI session; "founder-manual" is the founder's own personal Codex CLI use. Both draw on the same subscription quota — see the Codex card.</li>
 </ul>
 
-<h4>What each section tells you</h4>
+<h2>What each section tells you</h2>
 <ul>
 <li><strong>Spend</strong> — metering so budgets can be set from measurement, not guesses. The ceiling is unset while the baseline is being measured.</li>
 <li><strong>Judge (advisory)</strong> — no power to block merges until its false-alarm rate is proven near zero over a calibration window. Watch <em>false alarms</em> (trend toward 0) and <em>agreement</em> (trend toward high once outcomes accumulate).</li>
@@ -126,7 +126,7 @@ count and summarise what already happened.</p>
 <li><strong>Token usage</strong> — raw transcript token and cost data from the Claude sessions driving the plane.</li>
 </ul>
 
-<h4>Kill switch</h4>
+<h2>Kill switch</h2>
 <p>Set <code>LOOPKIT_AUTONOMY=off</code> in the environment used by the scheduler that launches
 reactor and dispatch to pause the plane; set it to <code>on</code> and reload the scheduler to
 resume. For a standalone plane, set <code>LOOPKIT_HOME</code> in that same scheduler environment;
@@ -134,7 +134,7 @@ loopkit then reads configuration from <code>$LOOPKIT_HOME/config/loopkit.json</c
 and projections remain readable while halted. If <code>LOOPKIT_AUTONOMY</code> is unset, the beats
 default to <code>off</code> as a fail-safe.</p>
 
-<h4>Operator controls</h4>
+<h2>Operator controls</h2>
 <ol>
 <li><strong>Budget ceiling</strong> — set <code>budget.dispatchDailyUsd</code> in <code>loopkit.config.json</code> once a few days of baseline spend data have accumulated (see Spend section).</li>
 <li><strong>Judge status</strong> — only advisory mode is configurable today. A merge-blocking judge remains a future change, not an operator control.</li>

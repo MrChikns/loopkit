@@ -303,7 +303,7 @@ function autoAcceptingRegion(items: AcceptanceItem[]): string {
     `<details class="opsui-card opsui-acceptance__auto">` +
     `<summary class="opsui-card__header opsui-acceptance__auto-summary">` +
     `<div class="opsui-card__titles">` +
-    `<h3 class="opsui-card__title">Auto-accepting soon</h3>` +
+    `<h2 class="opsui-card__title">Auto-accepting soon</h2>` +
     `<p class="opsui-card__subtitle">No action needed — click to expand</p>` +
     `</div>` +
     `<div class="opsui-card__aside">${StatusBadge({ state: 'neutral', label: `${autoItems.length}` })}</div>` +

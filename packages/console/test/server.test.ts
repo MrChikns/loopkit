@@ -2465,7 +2465,7 @@ test('POST /item/<id>/feedback (multipart) — blank text stores no attachment a
 // shell-aware for that one remaining legacy route: the sidebar/topbar/no-inline-script contract
 // holds on BOTH shells, but each shell emits a different (still self-hosted, allowlisted) script
 // set, and only the old shell carries the no-JS TopBar fallback twins.
-const OPSUI_ROUTES = ['/command', '/work', '/acceptance', '/health', '/observability', '/company', '/timeline', '/item/WI-001', '/activity'];
+const OPSUI_ROUTES = ['/command', '/work', '/acceptance', '/health', '/observability', '/company', '/threads', '/timeline', '/item/WI-001', '/activity'];
 const LEGACY_SHELL_ROUTES: string[] = [];
 const ALL_ROUTES = [...OPSUI_ROUTES, ...LEGACY_SHELL_ROUTES];
 
@@ -2515,6 +2515,48 @@ function assertOnlyAllowedExternalScripts(body: string, route: string): void {
   }
 }
 
+function visibleControlName(controlHtml: string): string {
+  const withoutHidden = controlHtml.replace(
+    /<([a-z][a-z0-9]*)\b[^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/\1>/gi,
+    '',
+  );
+  return withoutHidden.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/** String-level route contract; real layout/keyboard behavior belongs to the Q2 browser gate. */
+function assertAccessiblePageStructure(body: string, route: string): void {
+  const headingLevels = [...body.matchAll(/<h([1-6])\b/gi)].map((match) => Number(match[1]));
+  assert.equal(
+    headingLevels.filter((level) => level === 1).length,
+    1,
+    `${route}: page must expose exactly one h1`,
+  );
+  assert.equal(headingLevels[0], 1, `${route}: first heading must be the page h1`);
+  for (let i = 1; i < headingLevels.length; i++) {
+    assert.ok(
+      headingLevels[i]! <= headingLevels[i - 1]! + 1,
+      `${route}: heading level skips from h${headingLevels[i - 1]} to h${headingLevels[i]}`,
+    );
+  }
+
+  assert.match(
+    body,
+    /<input\b(?=[^>]*role="combobox")(?=[^>]*aria-label="Search commands and destinations")[^>]*>/,
+    `${route}: command search needs an explicit accessible name`,
+  );
+
+  for (const match of body.matchAll(/<(button|a|summary)\b([^>]*)>[\s\S]*?<\/\1>/gi)) {
+    const [, element, attributes = ''] = match;
+    const namedByAttribute =
+      /\baria-label="[^"]+"/i.test(attributes) ||
+      /\baria-labelledby="[^"]+"/i.test(attributes);
+    assert.ok(
+      namedByAttribute || visibleControlName(match[0]).length > 0,
+      `${route}: <${element}> control lacks an accessible name`,
+    );
+  }
+}
+
 for (const route of ALL_ROUTES) {
   test(`GET ${route} — renders the sidebar (NavigationRail) and the top bar (TopBar)`, async () => {
     await withLedger((ledgerDir) =>
@@ -2539,6 +2581,16 @@ for (const route of ALL_ROUTES) {
         const res = await fetch(`${base}${route}`);
         const body = await res.text();
         assertOnlyAllowedExternalScripts(body, route);
+      }),
+    );
+  });
+
+  test(`GET ${route} — exposes coherent headings and named operator controls`, async () => {
+    await withLedger((ledgerDir) =>
+      withServer(ledgerDir, async (base) => {
+        const res = await fetch(`${base}${route}`);
+        assert.equal(res.status, 200);
+        assertAccessiblePageStructure(await res.text(), route);
       }),
     );
   });
@@ -2572,6 +2624,7 @@ test('GET /404-check — the not-found page also renders the shell, external-src
       const body = await res.text();
       assert.match(body, /class="opsui-rail[^"]*"[^>]*aria-label="Primary"/);
       assertOnlyAllowedExternalScripts(body, '/does-not-exist');
+      assertAccessiblePageStructure(body, '/does-not-exist');
     }),
   );
 });

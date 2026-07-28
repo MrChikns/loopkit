@@ -30,6 +30,7 @@ details.opsui-threads__card { padding: 0; display: block; }
   cursor: pointer;
   list-style: none;
   user-select: none;
+  min-height: 24px;
 }
 .opsui-threads__card-summary::-webkit-details-marker { display: none; }
 .opsui-threads__card[open] .opsui-threads__card-summary {
@@ -78,6 +79,9 @@ details.opsui-threads__card { padding: 0; display: block; }
   flex-wrap: wrap;
 }
 .opsui-threads__card-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   font-weight: 600;
   font-size: 13px;
   color: var(--text);
@@ -196,6 +200,9 @@ details.opsui-threads__card { padding: 0; display: block; }
   display: block;
 }
 .opsui-threads__attachment-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
   font-size: 12px;
   color: var(--accent);
   text-decoration: none;

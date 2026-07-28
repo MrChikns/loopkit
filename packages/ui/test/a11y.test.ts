@@ -8,7 +8,9 @@ import { test } from 'node:test';
 
 import { BottomNav } from '../src/components/BottomNav.ts';
 import { Button } from '../src/components/Button.ts';
+import { Card } from '../src/components/Card.ts';
 import { CommandPalette } from '../src/components/CommandPalette.ts';
+import { EventRow } from '../src/components/EventRow.ts';
 import { MetricTile } from '../src/components/MetricTile.ts';
 import { NavigationRail } from '../src/components/NavigationRail.ts';
 import { StatusBadge } from '../src/components/StatusBadge.ts';
@@ -71,9 +73,23 @@ test('CommandPalette is a labelled modal dialog with combobox + listbox semantic
   });
   assert.match(open, /role="dialog"[^>]*aria-modal="true"/);
   assert.match(open, /aria-label="Command palette"/);
-  assert.match(open, /role="combobox"[^>]*aria-expanded/);
+  assert.match(open, /role="combobox"[^>]*aria-expanded[^>]*aria-label="Search commands and destinations"/);
   assert.match(open, /role="listbox"[^>]*aria-label="Results"/);
   assert.match(open, /role="option"/);
+});
+
+test('shared page regions establish h1 → h2 → h3 hierarchy', () => {
+  const html =
+    TopBar({ title: 'Command' }) +
+    Card({
+      title: 'Decision desk',
+      body: EventRow({ state: 'warning', title: 'Choose a path', metadata: [] }),
+    });
+  assert.deepEqual(
+    [...html.matchAll(/<h([1-6])\b/g)].map((m) => Number(m[1])),
+    [1, 2, 3],
+  );
+  assert.match(Card({ title: 'Nested evidence', body: '', headingLevel: 3 }), /<h3 class="opsui-card__title">/);
 });
 
 test('decorative glyphs are hidden from assistive tech', () => {
