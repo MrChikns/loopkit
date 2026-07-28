@@ -66,6 +66,7 @@ import { LedgerMaxIds } from '../doctor.js';
 import { readEpochStampFile } from '../slo.js';
 import { withLock } from '../ledger.js';
 import { mintSessionId } from '../session.js';
+import { requireCleanCheckout } from '../git-safety.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -909,8 +910,13 @@ export function closeMergedCluster(
   mergeDestination: string,
   commitMessage: string,
 ): { ok: true; commit: string }
+  | { ok: false; stage: 'precondition'; reason: string }
   | { ok: false; stage: 'checkout'; reason: string }
   | { ok: false; stage: 'merge'; reason: string } {
+  const precondition = requireCleanCheckout(gitRoot);
+  if (!precondition.ok) {
+    return { ok: false, stage: 'precondition', reason: precondition.reason };
+  }
   const co = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
   if (co.status !== 0) {
     return { ok: false, stage: 'checkout', reason: co.stderr?.toString().trim() ?? '' };
@@ -2575,8 +2581,10 @@ async function finalizeTargetBuild(
   const closeResult = closeMergedCluster(gitRoot, wtPath, branch, manifest.defaultBranch, `feat(dispatch): ${rec.id} (target ${manifest.name})`);
   if (!closeResult.ok) {
     removeWorktree(gitRoot, wtPath);
-    if (closeResult.stage === 'checkout') {
-      const reason = `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${closeResult.reason}`;
+    if (closeResult.stage === 'precondition' || closeResult.stage === 'checkout') {
+      const reason = closeResult.stage === 'precondition'
+        ? `infra: target merge precondition failed: ${closeResult.reason}`
+        : `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${closeResult.reason}`;
       await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
       return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
     }
@@ -4644,59 +4652,64 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           // reactor.ts's non-FF recovery (same invariant: no build reaches master without a
           // gate that covers all commits since the branch point).
           spawnSync('git', ['fetch', 'origin', 'master'], { cwd: opts.repoRoot, stdio: 'pipe' });
-          const freshBase = spawnSync('git', ['rev-parse', 'origin/master'], { cwd: opts.repoRoot, stdio: 'pipe' })
-            .stdout.toString().trim();
-          spawnSync('git', ['reset', '--hard', 'origin/master'], { cwd: opts.repoRoot, stdio: 'pipe' });
-          const remerge = spawnSync(
-            'git', ['merge', '--no-ff', '-m', `feat(dispatch): ${ids}`, w.branch],
-            { cwd: opts.repoRoot, stdio: 'pipe' },
-          );
-          if (remerge.status !== 0) {
-            spawnSync('git', ['merge', '--abort'], { cwd: opts.repoRoot, stdio: 'pipe' });
-            const reason = `infra: post-push-race merge conflict on ${w.branch}`;
-            gateEvents = forItems(id => [
-              makeEvent('dispatch', id, 'gate.failed', { reason }),
-              makeEvent('dispatch', id, 'item.parked', { reason, parkKind: 'ops' }),
-            ]);
-            await appendEvents(opts.ledgerDir, gateEvents);
-            removeWorktree(opts.repoRoot, w.wtPath);
-            results.push({
-              item: rec.id, dispatched: true, branch: w.branch,
-              gateOutcome: 'failed', eventsWritten: gateEvents.length, detail: reason,
-            });
-            continue;
-          }
-          // Re-gate against the FRESHLY-fetched origin/master, not the stale pre-race
-          // branchBase — otherwise .ai/gate.sh scopes its suites off the wrong diff base and
-          // mis-scopes what it runs. Recompute the changed-files list against the same fresh base.
-          const freshChangedFiles = freshBase
-            ? getChangedFiles(opts.repoRoot, freshBase)
-            : changedFiles;
-          const reGateOutcome = opts.nonFfGateResult
-            ?? runLaneGate(gateId, cfg, opts.repoRoot, false, freshBase || branchBase, freshChangedFiles);
-          if (!reGateOutcome.passed) {
-            const reason = `post-push-race tests-red: ${reGateOutcome.reason}`;
-            gateEvents = forItems(id => [
-              makeEvent('dispatch', id, 'gate.failed', { reason }),
-              makeEvent('dispatch', id, 'item.parked', { reason, parkKind: 'ops' }),
-            ]);
-            await appendEvents(opts.ledgerDir, gateEvents);
-            removeWorktree(opts.repoRoot, w.wtPath);
-            results.push({
-              item: rec.id, dispatched: true, branch: w.branch,
-              gateOutcome: 'failed', eventsWritten: gateEvents.length, detail: reason,
-            });
-            continue;
-          }
-          commitSha = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
-            cwd: opts.repoRoot, stdio: 'pipe',
-          }).stdout.toString().trim();
-          const retryPush = doPush();
-          if (retryPush.status === 0) {
-            recovered = true;
+          const resetPrecondition = requireCleanCheckout(opts.repoRoot);
+          if (!resetPrecondition.ok) {
+            finalReason = `push-race recovery stopped: ${resetPrecondition.reason}`;
           } else {
-            const retryWhy = retryPush.stderr?.toString().trim() ?? 'unknown';
-            finalReason = `push to origin failed after post-push-race re-merge: ${retryWhy}`;
+            const freshBase = spawnSync('git', ['rev-parse', 'origin/master'], { cwd: opts.repoRoot, stdio: 'pipe' })
+              .stdout.toString().trim();
+            spawnSync('git', ['reset', '--hard', 'origin/master'], { cwd: opts.repoRoot, stdio: 'pipe' });
+            const remerge = spawnSync(
+              'git', ['merge', '--no-ff', '-m', `feat(dispatch): ${ids}`, w.branch],
+              { cwd: opts.repoRoot, stdio: 'pipe' },
+            );
+            if (remerge.status !== 0) {
+              spawnSync('git', ['merge', '--abort'], { cwd: opts.repoRoot, stdio: 'pipe' });
+              const reason = `infra: post-push-race merge conflict on ${w.branch}`;
+              gateEvents = forItems(id => [
+                makeEvent('dispatch', id, 'gate.failed', { reason }),
+                makeEvent('dispatch', id, 'item.parked', { reason, parkKind: 'ops' }),
+              ]);
+              await appendEvents(opts.ledgerDir, gateEvents);
+              removeWorktree(opts.repoRoot, w.wtPath);
+              results.push({
+                item: rec.id, dispatched: true, branch: w.branch,
+                gateOutcome: 'failed', eventsWritten: gateEvents.length, detail: reason,
+              });
+              continue;
+            }
+            // Re-gate against the FRESHLY-fetched origin/master, not the stale pre-race
+            // branchBase — otherwise .ai/gate.sh scopes its suites off the wrong diff base and
+            // mis-scopes what it runs. Recompute the changed-files list against the same fresh base.
+            const freshChangedFiles = freshBase
+              ? getChangedFiles(opts.repoRoot, freshBase)
+              : changedFiles;
+            const reGateOutcome = opts.nonFfGateResult
+              ?? runLaneGate(gateId, cfg, opts.repoRoot, false, freshBase || branchBase, freshChangedFiles);
+            if (!reGateOutcome.passed) {
+              const reason = `post-push-race tests-red: ${reGateOutcome.reason}`;
+              gateEvents = forItems(id => [
+                makeEvent('dispatch', id, 'gate.failed', { reason }),
+                makeEvent('dispatch', id, 'item.parked', { reason, parkKind: 'ops' }),
+              ]);
+              await appendEvents(opts.ledgerDir, gateEvents);
+              removeWorktree(opts.repoRoot, w.wtPath);
+              results.push({
+                item: rec.id, dispatched: true, branch: w.branch,
+                gateOutcome: 'failed', eventsWritten: gateEvents.length, detail: reason,
+              });
+              continue;
+            }
+            commitSha = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+              cwd: opts.repoRoot, stdio: 'pipe',
+            }).stdout.toString().trim();
+            const retryPush = doPush();
+            if (retryPush.status === 0) {
+              recovered = true;
+            } else {
+              const retryWhy = retryPush.stderr?.toString().trim() ?? 'unknown';
+              finalReason = `push to origin failed after post-push-race re-merge: ${retryWhy}`;
+            }
           }
         }
 

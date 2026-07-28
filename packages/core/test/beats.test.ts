@@ -3674,6 +3674,11 @@ test('dispatch: post-integration re-gate fails when master advances → parked',
 
 function setUpOriginWithConcurrentPush(repoRoot: string, tmpDir: string): void {
   const g = (args: string[], cwd = repoRoot) => spawnSync('git', args, { cwd, stdio: 'pipe' });
+  // Real plane repos ignore runtime evidence. Model that contract so the clean-checkout
+  // precondition sees only operator work, not dispatch's own run logs.
+  writeFileSync(join(repoRoot, '.gitignore'), '.ai/runs/\n', 'utf8');
+  g(['add', '.gitignore']);
+  g(['commit', '-m', 'chore: ignore runtime evidence']);
   const originRoot = join(tmpDir, 'origin.git');
   spawnSync('git', ['init', '--bare', '-b', 'master', originRoot], { stdio: 'pipe' });
   g(['remote', 'add', 'origin', originRoot]);
@@ -3758,6 +3763,79 @@ test('dispatch: non-FF push rejection triggers re-merge+re-gate; on green, item 
     const log = spawnSync('git', ['log', '--oneline', 'master'], { cwd: repoRoot, stdio: 'pipe' }).stdout.toString();
     assert.ok(log.includes('concurrent push race'),
       'recovered merge must include the commit that raced ahead on origin');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch: non-FF recovery refuses reset on a dirty primary checkout and preserves exact evidence', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dispatch-nonff-dirty-'));
+  try {
+    const repoRoot = join(tmpDir, 'repo');
+    const ledgerDir = join(tmpDir, 'ledger');
+    mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(repoRoot, 'operator.txt'), 'committed\n', 'utf8');
+    g(['add', 'operator.txt']);
+    g(['commit', '-m', 'init']);
+    setUpOriginWithConcurrentPush(repoRoot, tmpDir);
+
+    // This state belongs to the operator. The initial non-overlapping merge may succeed, but
+    // push-race recovery must never hard-reset it away.
+    writeFileSync(join(repoRoot, 'operator.txt'), 'operator draft\n', 'utf8');
+
+    await seedLedger(ledgerDir, [
+      makeEvent('cli', 'WI-124', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-124', 'item.queued', {
+        spec: 'do X', touches: 'src/',
+      }, '2026-01-01T00:01:00Z'),
+    ]);
+
+    const provider: LlmProvider = {
+      name: 'fake',
+      async run(req: ProviderRequest): Promise<ProviderResult> {
+        const cwd = req.cwd!;
+        mkdirSync(join(cwd, 'src'), { recursive: true });
+        writeFileSync(join(cwd, 'src', 'x.ts'), '// x', 'utf8');
+        spawnSync('git', ['add', 'src/x.ts'], { cwd, stdio: 'pipe' });
+        spawnSync('git', ['commit', '-m', 'feat(WI-124): x'], { cwd, stdio: 'pipe' });
+        return { ok: true, text: 'done' };
+      },
+    };
+
+    let pushCallCount = 0;
+    await runDispatch({
+      repoRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      gateResult: { passed: true, reason: 'initial gate green' },
+      nonFfGateResult: { passed: true, reason: 'must not be reached' },
+      branchProbe: () => 'master',
+      pushProbe: () => {
+        pushCallCount++;
+        return { status: 1 as number | null, stderr: Buffer.from('rejected (non-fast-forward)') };
+      },
+      config: makeTestConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(pushCallCount, 1, 'dirty precondition must stop before the retry push');
+    assert.equal(fold(events).items.get('WI-124')?.state, 'queued',
+      'the item remains retryable after the non-destructive recovery stop');
+    const transient = events.find(e => e.type === 'merge.transient-fail' && e.item === 'WI-124');
+    assert.ok(transient, 'the stop reason must be durable');
+    const reason = (transient!.data as { reason: string }).reason;
+    assert.match(reason, /push-race recovery stopped/);
+    assert.match(reason, / M operator\.txt/);
+    assert.equal(readFileSync(join(repoRoot, 'operator.txt'), 'utf8'), 'operator draft\n');
+    assert.doesNotMatch(g(['log', '--oneline', 'master']).stdout.toString(), /concurrent push race/,
+      'origin/master must not be reset into the primary checkout after the guard fails');
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

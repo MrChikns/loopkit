@@ -60,6 +60,7 @@ import { LedgerMaxIds } from '../doctor.js';
 import { captureWorktreeDiff, captureCommitRangeDiff, buildJudgePrompt, runJudge, mergeVerdictData } from '../judge.js';
 import { CRITERIA_CONTRACT, criteriaGate, normalizeCriteria } from '../criteria.js';
 import { buildPathologyPrompt, parsePathologyOutput, runPathology, formatEventTrail, TrailEvent } from '../pathology.js';
+import { requireCleanCheckout } from '../git-safety.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2810,6 +2811,12 @@ function applyApprovedTargetMerge(
     // Advance the target's defaultBranch to the exact gated merge commit (shared object
     // store — the commit already exists in the target repo). Fast-forward only: if the
     // branch advanced concurrently, retry next beat rather than landing an ungated tree.
+    const precondition = requireCleanCheckout(targetRoot);
+    if (!precondition.ok) {
+      events.push(...mergeTransientEvents(rec,
+        `target merge precondition failed: ${precondition.reason}`));
+      return { events, merged: false };
+    }
     const checkout = spawnSync('git', ['checkout', manifest.defaultBranch], { cwd: targetRoot, stdio: 'pipe' });
     if (checkout.status !== 0) {
       events.push(...mergeTransientEvents(rec,

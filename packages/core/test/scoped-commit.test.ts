@@ -481,7 +481,8 @@ test('non-FF push recovery (smoke): still merges successfully with the fresh-bas
     g(['config', 'user.email', 't@t']);
     g(['config', 'user.name', 't']);
     writeFileSync(join(repoRoot, 'base.txt'), 'base', 'utf8');
-    g(['add', 'base.txt']);
+    writeFileSync(join(repoRoot, '.gitignore'), '.ai/runs/\n', 'utf8');
+    g(['add', 'base.txt', '.gitignore']);
     g(['commit', '-m', 'init']);
 
     // A real second "origin" so `git fetch origin master` + `rev-parse origin/master` resolve

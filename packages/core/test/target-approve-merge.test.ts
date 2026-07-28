@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -124,6 +124,51 @@ test('reactor: an approved target item merges into the TARGET repo defaultBranch
       'recorded merge commit must exist in the target repo');
     assert.notEqual(git(targetRoot, ['branch', '--list', branch]).stdout.toString().trim().length > 0, true,
       'the merged branch must be deleted from the target repo');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('reactor: approved target merge preserves a dirty operator checkout and records exact evidence', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-appr-dirty-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeTargetRepo(targetRoot);
+
+    const branch = 'loop-wi-101-a1';
+    git(targetRoot, ['checkout', '-b', branch]);
+    writeFileSync(join(targetRoot, 'feature.txt'), 'built\n', 'utf8');
+    git(targetRoot, ['add', 'feature.txt']);
+    git(targetRoot, ['commit', '-m', 'feat: polish notes']);
+    git(targetRoot, ['checkout', '-b', 'operator-work', 'main']);
+    writeFileSync(join(targetRoot, 'notes.txt'), 'operator draft\n', 'utf8');
+    const mainBefore = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+
+    await appendEvents(ledgerDir, seedEvents(targetRoot, branch));
+
+    await runReactor({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: null,
+      config: testConfig(),
+      gateRunner: () => ({ passed: true, timedOut: false, reason: 'green' }),
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'item.merged' && e.item === 'WI-101').length, 0);
+    const transient = events.find(e => e.type === 'merge.transient-fail' && e.item === 'WI-101');
+    assert.ok(transient, 'dirty destination must produce durable retry evidence');
+    const reason = (transient!.data as { reason: string }).reason;
+    assert.match(reason, /target merge precondition failed/);
+    assert.match(reason, / M notes\.txt/);
+    assert.equal(git(targetRoot, ['branch', '--show-current']).stdout.toString().trim(), 'operator-work');
+    assert.equal(readFileSync(join(targetRoot, 'notes.txt'), 'utf8'), 'operator draft\n');
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), mainBefore);
+    assert.doesNotMatch(git(targetRoot, ['log', '--oneline', 'main']).stdout.toString(), /approved merge/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

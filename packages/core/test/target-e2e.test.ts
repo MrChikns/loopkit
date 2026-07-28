@@ -495,6 +495,66 @@ test('WI-183: the target lane branches from the manifest default branch, not the
   }
 });
 
+test('target lane: dirty operator checkout blocks destination checkout/merge and records exact evidence', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-dirty-dest-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    git(targetRoot, ['checkout', '-b', 'operator-work']);
+    writeFileSync(join(targetRoot, 'src', 'notes.js'), '// operator draft\n', 'utf8');
+    const mainBefore = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-184', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-184', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 12;\n' }],
+      manifest: {
+        wi: 'WI-184',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-184): add marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig({ judge: { enabled: false, model: 'sonnet', timeoutMs: 240_000, maxDiffChars: 20_000 } }),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-184');
+    assert.equal(rec?.state, 'parked', 'dirty operator state must stop the target merge');
+    assert.equal(rec?.parkKind, 'ops');
+    assert.match(rec?.parkReason ?? '', /target merge precondition failed/);
+    assert.match(rec?.parkReason ?? '', / M src\/notes\.js/,
+      'the durable park reason must carry exact porcelain path evidence');
+    assert.equal(git(targetRoot, ['branch', '--show-current']).stdout.toString().trim(), 'operator-work');
+    assert.equal(readFileSync(join(targetRoot, 'src', 'notes.js'), 'utf8'), '// operator draft\n');
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), mainBefore);
+    assert.doesNotMatch(git(targetRoot, ['log', '--oneline', 'main']).stdout.toString(), /WI-184/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('WI-178: a LONE detached targeted build with an EMPTY queue is still collected (was stranded in building forever)', async () => {
   const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-lone-detached-'));
   try {
