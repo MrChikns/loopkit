@@ -180,6 +180,17 @@ export function buildSummary(
         queuedAt: rec.queuedAt,
         parkedAt: rec.parkedAt,
         approvedAt: rec.approvedAt,
+        // Semantic dependency edge for the Work board. The victim remains parked while
+        // blocked, so state/parkKind alone cannot distinguish recovery from a dependency
+        // wait. Carry the blocker id and its current folded state; missing stays explicit
+        // rather than being guessed from the park reason.
+        ...(rec.blockedOn ? {
+          blockedOn: rec.blockedOn,
+          blockerState: result.items.get(rec.blockedOn)?.state ?? 'missing',
+          ...(result.items.get(rec.blockedOn)?.parkKind
+            ? { blockerParkKind: result.items.get(rec.blockedOn)!.parkKind }
+            : {}),
+        } : {}),
         // Interim-status detection (mirrors isInterimApprovedStatus) needs this alongside
         // parkedAt to tell "just unparked, awaiting dispatch" apart from "queued for an
         // unrelated reason" — never cleared, see fold.ts.

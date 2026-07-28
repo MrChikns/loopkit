@@ -210,6 +210,20 @@ test('GET /work — renders 200 with the Missions marker', async () => {
   );
 });
 
+test('GET /work group query renders the selected semantic group with zero-JS links', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const res = await fetch(`${base}/work?group=needs-decision&decisionPage=99`);
+      assert.equal(res.status, 200);
+      const body = await res.text();
+      assert.match(body, /aria-label="Filter work groups"/);
+      assert.match(body, /data-work-group="needs-decision"/);
+      assert.match(body, /group=needs-decision#work-board" aria-current="page"/);
+      assert.doesNotMatch(body, /data-work-group="recovering"/);
+    }),
+  );
+});
+
 // The four renamed console paths 301 to their canonical opsui routes so old bookmarks keep
 // working — checked with redirect:'manual' so a passing test can never be a silent follow.
 for (const [from, to] of [

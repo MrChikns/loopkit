@@ -17,13 +17,14 @@
 import { Card } from '../components/Card.ts';
 import { EventRow } from '../components/EventRow.ts';
 import { MetricTile } from '../components/MetricTile.ts';
+import { Pagination } from '../components/Pagination.ts';
 import { ProjectionFailure } from '../components/ProjectionFailure.ts';
 import { StatusBadge } from '../components/StatusBadge.ts';
 import { esc } from '../render/html.ts';
-import { toTouchList, unblockNote } from './fold-adapter.ts';
+import { toTouchList } from './fold-adapter.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
-import type { WorkLedgerData, WorkItem, QueueBlockingRow } from './work-adapter.ts';
+import type { WorkGroupPage, WorkLedgerData, WorkItem, QueueBlockingRow } from './work-adapter.ts';
 import type { BeatRecord, BuildRecord, BreakerRecord } from './workforce-adapter.ts';
 import { backlogStateToOp } from './planner-adapter.ts';
 import type { BacklogRow } from './planner-adapter.ts';
@@ -55,19 +56,18 @@ function contextBlock(item: WorkItem): string {
 }
 
 function evidenceDrill(item: WorkItem): string {
-  // The timeline is demoted: spec + park reason + context manifest render OPEN and primary
-  // (no click needed); the Timeline drill-through demotes to a small secondary link BELOW
-  // the details.
+  // Full spec/context is drill depth. Rows stay compact by default; the item hub remains the
+  // canonical detail surface.
   const link = `<a class="opsui-work__timeline-link" href="${esc(item.evidence.href)}">${esc(item.evidence.label)}</a>`;
   const specBlock = item.spec
     ? `<p class="opsui-work__drill-spec">${esc(item.spec)}</p>`
     : '';
-  const parkBlock = item.summary
-    ? `<p class="opsui-work__drill-park"><strong>Park reason:</strong> ${esc(item.summary)}</p>`
+  const parkBlock = item.reason
+    ? `<p class="opsui-work__drill-park"><strong>Reason:</strong> ${esc(item.reason)}</p>`
     : '';
   const body = `${specBlock}${parkBlock}${contextBlock(item)}`;
   return (
-    `<details class="opsui-work__drill" open>` +
+    `<details class="opsui-work__drill">` +
     `<summary class="opsui-work__drill-summary">Details</summary>` +
     `<div class="opsui-work__drill-body">${body}</div>` +
     `</details>` +
@@ -101,23 +101,6 @@ function parkedBadge(item: WorkItem): { state: OperationalState; label: string; 
   return { state: item.operationalState, label: item.stateLabel, emphasis: item.emphasisForBadge };
 }
 
-/** A short pointer note under decision-parked rows — the SAME item is also actionable from
- *  the founder's decision desk, so acting here and there both resolve it (never two sources
- *  of truth, just two doors onto the one park event). */
-function decisionDeskNote(item: WorkItem): string {
-  if (item.parkKind !== 'decision') return '';
-  return `<p class="opsui-work__park-note">Also on your decision desk → <a href="/command">/command</a></p>`;
-}
-
-/** parkKind-aware "what unblocks this" line — every parked row on Missions
- *  carries it, not just decision parks (those also keep {@link decisionDeskNote} pointing
- *  at the desk). Shares the ONE `unblockNote` helper (fold-adapter.ts, imported via
- *  work-adapter.ts) rather than re-deriving the copy per surface. */
-function unblockNoteRegion(item: WorkItem): string {
-  const text = unblockNote(item.parkKind, item.summary);
-  return `<p class="opsui-work__unblock-note">${esc(text)}</p>`;
-}
-
 /** Build a building item's in-flight body — the phase checklist + touch chips a run card
  *  carries (Workers used to render these on a separate page; the nav collapse (WI-350)
  *  re-merges them into this ONE board so a building item is never duplicated across two
@@ -130,55 +113,94 @@ function inflightBody(id: string, inflight: BuildRecord[] | undefined): string {
   return `${phaseChecklist(build.branch)}${touchChips(build.touches)}`;
 }
 
-function boardRegion(items: WorkItem[], shippedThisWeek: number, inflight: BuildRecord[] | undefined): string {
+function groupFilterRegion(data: WorkLedgerData): string {
+  if (!data.groupFilters?.length) return '';
+  const links = data.groupFilters.map((filter) =>
+    `<a class="opsui-work__filter${filter.active ? ' opsui-work__filter--active' : ''}"` +
+    ` href="${esc(filter.href)}"${filter.active ? ' aria-current="page"' : ''}>` +
+    `<span>${esc(filter.label)}</span><span class="opsui-work__filter-count">${filter.count}</span></a>`,
+  ).join('');
+  return `<nav class="opsui-work__filters" aria-label="Filter work groups">${links}</nav>`;
+}
+
+function nextActionRegion(item: WorkItem): string {
+  if (!item.nextAction) return '';
+  const blockerLink = item.blocker
+    ? ` <a href="/item/${esc(encodeURIComponent(item.blocker.id))}">Open ${esc(item.blocker.id)} →</a>`
+    : '';
+  return `<p class="opsui-work__next"><strong>Next:</strong> ${esc(item.nextAction)}${blockerLink}</p>`;
+}
+
+function compactWorkRow(item: WorkItem, inflight: BuildRecord[] | undefined): string {
+  const isParked = item.state === 'parked';
+  const isBuilding = item.state === 'building';
+  const badge = isParked ? parkedBadge(item) : {
+    state: item.operationalState,
+    label: item.stateLabel,
+    emphasis: item.emphasisForBadge,
+  };
+  const rowBody = isBuilding ? inflightBody(item.id, inflight) : '';
+  const row = EventRow({
+    state: item.operationalState,
+    title: item.title,
+    metadata: item.metadata,
+    ...(item.reason ? { summary: item.reason } : {}),
+    badge,
+    ...(item.originChip ? { originChip: item.originChip } : {}),
+    ...(rowBody ? { body: rowBody } : {}),
+    ...(!(isParked && item.parkKind === 'decomposition') && item.actions?.length
+      ? { actions: item.actions }
+      : {}),
+  });
+  return `<div class="opsui-work__item">${row}${nextActionRegion(item)}${evidenceDrill(item)}</div>`;
+}
+
+function workGroupRegion(group: WorkGroupPage, inflight: BuildRecord[] | undefined): string {
+  const body = group.items.length > 0
+    ? group.items.map((item) => compactWorkRow(item, inflight)).join('')
+    : `<p class="opsui-empty">No work in ${esc(group.label.toLowerCase())}.</p>`;
+  const pager = Pagination({
+    page: group.page,
+    pageCount: group.pageCount,
+    total: group.total,
+    itemNoun: 'items',
+    label: `${group.label} pages`,
+    hrefFor: (page) => page < group.page
+      ? group.prevHref ?? `/work#work-group-${group.id}`
+      : group.nextHref ?? `/work#work-group-${group.id}`,
+  });
+  return (
+    `<section class="opsui-work__group" id="work-group-${esc(group.id)}" data-work-group="${esc(group.id)}">` +
+    `<header class="opsui-work__group-header"><div><h3>${esc(group.label)}</h3>` +
+    `<p>${esc(group.description)}</p></div>` +
+    StatusBadge({ state: group.id === 'needs-decision' && group.total > 0 ? 'critical' : 'neutral', label: `${group.total}` }) +
+    `</header>${body}${pager}</section>`
+  );
+}
+
+function boardRegion(data: WorkLedgerData, inflight: BuildRecord[] | undefined): string {
+  const items = data.active;
   const headerAside = StatusBadge({
     state: items.length ? 'neutral' : 'success',
     label: items.length ? `${items.length} active` : 'Lane clear',
   });
-  const emptyMsg = shippedThisWeek > 0
-    ? `<p class="opsui-empty">${shippedThisWeek} shipped this week — nothing active in the lane.</p>`
+  const emptyMsg = data.shippedThisWeek > 0
+    ? `<p class="opsui-empty">${data.shippedThisWeek} shipped this week — nothing active in the lane.</p>`
     : `<p class="opsui-empty">Lane is clear — no items building or queued.</p>`;
-
-  // Nav collapse 9→5 (WI-350): Missions re-absorbs Workers — the ONE board now carries
-  // every state's valid run-control verbs (building: Stop/Escalate; queued: Hold/Escalate;
-  // parked: Approve/Decline (decision), Requeue/Dismiss (ops), Resume (hold); decomposition
-  // parks stay button-less/calm). `item.actions` already carries the correct verb set per
-  // state (buildRunControlActions, work-adapter.ts) — this renderer no longer filters them
-  // down to parked-only, so nothing needs re-deciding here, only rendering.
+  const visibleGroups = data.groups?.filter((group) =>
+    data.groupFilter && data.groupFilter !== 'all'
+      ? group.id === data.groupFilter
+      : group.total > 0,
+  );
   const body = items.length === 0
     ? emptyMsg
-    : items.map((item) => {
-        const isParked = item.state === 'parked';
-        const isBuilding = item.state === 'building';
-        const badge = isParked ? parkedBadge(item) : {
-          state: item.operationalState,
-          label: item.stateLabel,
-          emphasis: item.emphasisForBadge,
-        };
-        const summary = isParked && item.parkKind === 'ops' && !item.summary
-          ? 'no reason recorded'
-          : item.summary;
-        const rowBody = isBuilding ? inflightBody(item.id, inflight) : '';
-        const row = EventRow({
-          state: item.operationalState,
-          title: item.title,
-          metadata: item.metadata,
-          ...(summary ? { summary } : {}),
-          badge,
-          ...(item.originChip ? { originChip: item.originChip } : {}),
-          ...(rowBody ? { body: rowBody } : {}),
-          ...(!(isParked && item.parkKind === 'decomposition') && item.actions && item.actions.length > 0
-            ? { actions: item.actions }
-            : {}),
-        });
-        const unblock = isParked ? unblockNoteRegion(item) : '';
-        const note = isParked ? decisionDeskNote(item) : '';
-        return `<div class="opsui-work__item">${row}${unblock}${note}${evidenceDrill(item)}</div>`;
-      }).join('');
+    : visibleGroups?.length
+      ? `${groupFilterRegion(data)}${visibleGroups.map((group) => workGroupRegion(group, inflight)).join('')}`
+      : items.map((item) => compactWorkRow(item, inflight)).join('');
 
   return Card({
-    title: 'Board',
-    subtitle: 'Building → queued → parked',
+    title: 'Work board',
+    subtitle: 'Decide, observe, wait, or resume — grouped by what happens next',
     headerAside,
     body,
   });
@@ -459,7 +481,7 @@ export function WorkProjection(env: ProjectionEnvelope<WorkLedgerData>): string 
   return (
     `<div class="opsui-work" data-projection="work" data-state="${env.state}">` +
     glanceRegion(d.glance) +
-    boardRegion(d.active, d.shippedThisWeek, d.workforce?.inflight) +
+    boardRegion(d, d.workforce?.inflight) +
     (d.backlog?.length ? backlogRegion(d.backlog) : '') +
     answeredRegion(d.answered ?? []) +
     engineRegion(d.queueBlocking, d.workforce?.beats, d.workforce?.breakerStates) +

@@ -386,6 +386,29 @@ test('loopctl summary --json: parkKind round-trips fold → summary active[]', a
   }
 });
 
+test('loopctl summary --json: blocked victims carry the blocker id, state, and park kind', async () => {
+  const dir = makeTemp('summary-blocked-edge');
+  try {
+    await appendEvent(dir, makeEvent('cli', 'WI-083', 'item.captured', { source: 'cli', text: 'victim' }));
+    await appendEvent(dir, makeEvent('dispatch', 'WI-083', 'item.parked', { reason: 'gate red', parkKind: 'ops' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-083', 'item.blocked', { onItem: 'WI-084', reason: 'plane repair' }));
+    await appendEvent(dir, makeEvent('cli', 'WI-084', 'item.captured', { source: 'cli', text: 'repair' }));
+    await appendEvent(dir, makeEvent('reactor', 'WI-084', 'item.parked', { reason: 'operator paused repair', parkKind: 'hold' }));
+
+    const out = await runLoopctl(dir, 'summary', '--json');
+    const summary = JSON.parse(out) as {
+      active: Array<{ id: string; blockedOn?: string; blockerState?: string; blockerParkKind?: string }>;
+    };
+    const victim = summary.active.find((item) => item.id === 'WI-083');
+    assert.ok(victim, 'blocked victim must remain in active[]');
+    assert.equal(victim!.blockedOn, 'WI-084');
+    assert.equal(victim!.blockerState, 'parked');
+    assert.equal(victim!.blockerParkKind, 'hold');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Unaccepted merged items never age out of recentMerged
 // ---------------------------------------------------------------------------

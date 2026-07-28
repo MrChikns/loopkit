@@ -30,3 +30,80 @@
 .opsui-work__engine-summary { cursor: pointer; list-style: none; }
 .opsui-work__engine-summary::-webkit-details-marker { display: none; }
 .opsui-work__engine-body { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+
+/* Semantic work groups — compact by default, with URL-driven filters and one independent
+ * pager per group. */
+.opsui-work__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.opsui-work__filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  color: var(--neutral-fg);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.opsui-work__filter:hover { border-color: var(--line-strong); }
+.opsui-work__filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.opsui-work__filter--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.opsui-work__filter-count {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.opsui-work__group + .opsui-work__group {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.opsui-work__group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.opsui-work__group-header h3,
+.opsui-work__group-header p { margin: 0; }
+.opsui-work__group-header h3 {
+  color: var(--text);
+  font-size: 14px;
+}
+.opsui-work__group-header p {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.opsui-work__item + .opsui-work__item { margin-top: 8px; }
+.opsui-work__next {
+  margin: 4px 0 0;
+  padding: 0 10px;
+  color: var(--neutral-fg);
+  font-size: 12px;
+}
+.opsui-work__next a { margin-left: 4px; }
+
+.opsui-work__drill { margin: 4px 10px 0; }
+.opsui-work__timeline-link {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  margin: 2px 10px 0;
+}

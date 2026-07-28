@@ -53,6 +53,9 @@ import {
   AcceptanceProjection,
   workProjectionFromFold,
   WorkProjection,
+  WORK_GROUP_IDS,
+  WORK_GROUP_PAGE_PARAMS,
+  parseWorkGroup,
   registryDestinations,
   formatLocal,
   workforceProjectionFromSummary,
@@ -103,6 +106,7 @@ import type {
   PlaneExecutionConfigRow,
   PlaneAgentRuntimeData,
   DecisionCard,
+  WorkGroupId,
 } from '@loopkit/opsui';
 
 // WI-055: legacy-shell convergence reuses views.ts's page-slicer/row-renderer (one paginator,
@@ -843,16 +847,33 @@ export function renderAcceptancePage(data: OpsData, theme?: string | null, filte
 
 /** "Missions" projection — ONE EventRow board (building → queued → parked) with run-control
  *  verbs, glance metrics, backlog, and the collapsed Engine section (beats + breakers). */
-export function renderWorkPage(data: OpsData, ctx: OpsPageContext, theme?: string | null): string {
+export function renderWorkPage(
+  data: OpsData,
+  ctx: OpsPageContext,
+  theme?: string | null,
+  groupParam?: string | null,
+  pages: Partial<Record<WorkGroupId, number>> = {},
+): string {
   const budgetMin = data.cfg.buildTimeoutMinutes ?? 40;
   const workforceSummary = buildWorkforceSummary(data.fold, ctx.runDir, Date.now(), budgetMin);
   const workforceEnvelope = workforceProjectionFromSummary(workforceSummary, { ledgerSequence: 0, staleAfterSeconds: 45 });
   const workforce = workforceEnvelope.state === 'failed' ? undefined : workforceEnvelope.data;
   const backlog = foldBacklog(data.fold);
+  const group = parseWorkGroup(groupParam);
+  const workQuery = new URLSearchParams();
+  if (group !== 'all') workQuery.set('group', group);
+  for (const id of WORK_GROUP_IDS) {
+    const page = pages[id] ?? 1;
+    if (page > 1) workQuery.set(WORK_GROUP_PAGE_PARAMS[id], String(page));
+  }
+  const nextPath = `/work${workQuery.size > 0 ? `?${workQuery.toString()}` : ''}`;
   const envelope = workProjectionFromFold(data.fold, {
     ledgerSequence: 0, staleAfterSeconds: 45,
     ...(workforce ? { workforce } : {}),
     ...(backlog.length ? { backlog } : {}),
+    group,
+    pages,
+    nextPath,
   });
   const destinations = opsDestinations();
   const workspace = WorkProjection(envelope);

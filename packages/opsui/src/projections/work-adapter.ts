@@ -11,6 +11,7 @@ import { deriveItemStatus, emphasisForTone } from '../states/status-catalog.ts';
 import type { OperationalState } from '../states/operational-state.ts';
 import type { GlanceMetric } from './command-projection.ts';
 import { approveActionLabel, deriveOrigin, isFoldSummary, isInterimApprovedStatus, originBadge, parseDecompositionSuccessor, unblockNote } from './fold-adapter.ts';
+import type { FoldActiveItem } from './fold-adapter.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 import type { BacklogRow } from './planner-adapter.ts';
 import type {
@@ -146,6 +147,66 @@ export type WorkItemAction = {
   form?: { action: string; intent: string; confirm?: string };
 };
 
+export const WORK_GROUP_IDS = [
+  'needs-decision',
+  'in-progress',
+  'waiting-dependency',
+  'queued',
+  'recovering',
+  'held',
+  'planning',
+] as const;
+
+export type WorkGroupId = typeof WORK_GROUP_IDS[number];
+export type WorkGroupFilter = WorkGroupId | 'all';
+export const WORK_GROUP_PAGE_SIZE = 8;
+
+export const WORK_GROUP_PAGE_PARAMS: Record<WorkGroupId, string> = {
+  'needs-decision': 'decisionPage',
+  'in-progress': 'progressPage',
+  'waiting-dependency': 'dependencyPage',
+  queued: 'queuedPage',
+  recovering: 'recoveringPage',
+  held: 'heldPage',
+  planning: 'planningPage',
+};
+
+const WORK_GROUP_META: Record<WorkGroupId, { label: string; description: string }> = {
+  'needs-decision': { label: 'Needs decision', description: 'One concrete operator call' },
+  'in-progress': { label: 'In progress', description: 'Building, gating, or landing now' },
+  'waiting-dependency': { label: 'Waiting on dependency', description: 'Blocked by a named work item or active scope' },
+  queued: { label: 'Queued', description: 'Ready and waiting for capacity' },
+  recovering: { label: 'Recovering', description: 'Plane-owned retry or breaker recovery' },
+  held: { label: 'Held', description: 'Deliberately paused' },
+  planning: { label: 'Planning', description: 'Waiting for planner decomposition' },
+};
+
+export function parseWorkGroup(value: string | null | undefined): WorkGroupFilter {
+  return value && (WORK_GROUP_IDS as readonly string[]).includes(value)
+    ? value as WorkGroupId
+    : 'all';
+}
+
+export type WorkGroupPage = {
+  id: WorkGroupId;
+  label: string;
+  description: string;
+  total: number;
+  page: number;
+  pageCount: number;
+  items: WorkItem[];
+  prevHref?: string;
+  nextHref?: string;
+};
+
+export type WorkGroupFilterLink = {
+  id: WorkGroupFilter;
+  label: string;
+  count: number;
+  href: string;
+  active: boolean;
+};
+
 /** One active work item in the work ledger projection. */
 export type WorkItem = {
   id: string;
@@ -155,6 +216,11 @@ export type WorkItem = {
   emphasisForBadge: 'default' | 'blocking' | 'recommended';
   title: string;
   metadata: string[];
+  group?: WorkGroupId;
+  reason?: string;
+  age?: string;
+  blocker?: { id: string; state?: string; parkKind?: string };
+  nextAction?: string;
   summary?: string;
   spec?: string;
   /** WI-180 origin chip (target / plane / mixed), derived from touches at the boundary. */
@@ -202,6 +268,10 @@ export type QueueBlockingRow = { id: string; runnable: boolean; reason?: string 
 export type WorkLedgerData = {
   glance: GlanceMetric[];
   active: WorkItem[];
+  /** Adapter-owned semantic groups. Optional only for compatibility with older fixtures. */
+  groups?: WorkGroupPage[];
+  groupFilter?: WorkGroupFilter;
+  groupFilters?: WorkGroupFilterLink[];
   answered: WorkItem[];
   shippedThisWeek: number;
   /** Console consolidation 1/4: the former standalone Workforce page's sections. */
@@ -214,35 +284,11 @@ export type WorkLedgerData = {
   queueBlocking?: QueueBlockingRow[];
 };
 
-// Primary sort order within the active board: operator-attention order (WI-102). Five groups,
-// top to bottom: (0) decision parks — the only rows that genuinely need the operator's
-// judgment; (1) in-flight (building/testing/gated, then approved) — progressing, worth
-// watching; (2) blocked — stalled, may need a nudge; (3) queued/routed/captured — waiting its
-// turn; (4) plane-owned parks (ops/hold/decomposition, and any parked item with an
-// unrecognized/missing parkKind — plane-owned by default, never assumed to need the operator).
-// `decision` parks are carved out of the `parked` state into their own top group by
-// `attentionGroup` below; STATE_SORT only decides groups 1-4 for every OTHER state (including
-// non-decision parked rows, which land in group 4 regardless of what STATE_SORT says for
-// 'parked' — kept here only as the fallback group number for that state).
-const STATE_SORT: Record<string, number> = {
-  building: 1, testing: 1, gated: 1, approved: 1,
-  blocked: 2,
-  queued: 3, routed: 3, captured: 3,
-  parked: 4,
-};
-
 // Sub-tier within the in-flight group (group 1, WI-102): building/testing/gated (still running)
 // ahead of approved (already decided, just waiting to land) — checked before PRIORITY_SORT so
 // priority never pulls an approved row above an actively-building one.
 const IN_FLIGHT_SUBSORT: Record<string, number> = {
   building: 0, testing: 0, gated: 0, approved: 1,
-};
-
-// Secondary sort within the plane-owned park group (group 4, WI-102): ops/hold parks ahead of
-// decomposition parks, which need nothing from anyone (already routed to the planner). An
-// unrecognized/missing parkKind falls through to the same tier as ops/hold (plane-owned).
-const PARK_KIND_SORT: Record<string, number> = {
-  ops: 0, hold: 0, decomposition: 1,
 };
 
 // Secondary sort within every group (WI-102): priority — blocker items surface first even
@@ -251,13 +297,34 @@ const PRIORITY_SORT: Record<string, number> = {
   blocker: 0, high: 1, medium: 2, low: 3,
 };
 
-/** Operator-attention group for a work item (WI-102): 0 = decision parks (need the operator),
- *  1 = in-flight, 2 = blocked, 3 = queued/routed/captured, 4 = plane-owned parks (ops/hold/
- *  decomposition, and any parked item with an unrecognized/missing parkKind — plane-owned by
- *  default, never assumed to need the operator). */
-function attentionGroup(state: string, parkKind: string | undefined): number {
-  if (state === 'parked' && parkKind === 'decision') return 0;
-  return STATE_SORT[state] ?? 3;
+const WORK_GROUP_ORDER = new Map<WorkGroupId, number>(
+  WORK_GROUP_IDS.map((id, index) => [id, index]),
+);
+
+function blockerIdFromReason(reason: string | undefined): string | undefined {
+  if (!reason) return undefined;
+  return /(?:waiting|blocked)\s+on\s+(WI-\d+)/iu.exec(reason)?.[1];
+}
+
+/** The one Work-board semantic classifier. Scheduling evidence can refine a queued item into
+ *  a dependency wait or an exhausted item into a decision, but presentation never re-decides
+ *  the group. */
+export function classifyWorkGroup(
+  item: Pick<FoldActiveItem, 'state' | 'parkKind' | 'blockedOn'>,
+  queueBlocking?: QueueBlockingRow,
+): WorkGroupId {
+  if (item.state === 'parked' && item.parkKind === 'decision') return 'needs-decision';
+  if (queueBlocking?.reason?.includes('needs fresh unpark')) return 'needs-decision';
+  if (item.state === 'parked' && item.parkKind === 'hold') return 'held';
+  if (item.state === 'parked' && item.parkKind === 'decomposition') return 'planning';
+  if (item.blockedOn || item.state === 'blocked' || blockerIdFromReason(queueBlocking?.reason)) {
+    return 'waiting-dependency';
+  }
+  if (item.state === 'building' || item.state === 'testing' || item.state === 'gated' || item.state === 'approved') {
+    return 'in-progress';
+  }
+  if (item.state === 'parked') return 'recovering';
+  return 'queued';
 }
 
 /** Truthful "Parked" glance split: the count of parked items is not, by
@@ -306,6 +373,89 @@ function buildGlance(counts: Record<string, number>, parkedKinds: Record<string,
   ];
 }
 
+function workAge(
+  item: Pick<FoldActiveItem, 'state' | 'createdAt' | 'queuedAt' | 'buildingAt' | 'parkedAt' | 'approvedAt'>,
+  nowMs: number,
+): string | undefined {
+  const at = item.state === 'building'
+    ? item.buildingAt
+    : item.state === 'approved'
+      ? item.approvedAt
+      : item.state === 'parked'
+        ? item.parkedAt
+        : item.queuedAt ?? item.createdAt;
+  if (!at) return undefined;
+  const atMs = Date.parse(at);
+  return Number.isFinite(atMs) ? formatAge(nowMs - atMs) : undefined;
+}
+
+function workReason(
+  group: WorkGroupId,
+  stateLabel: string,
+  parkReason: string,
+  queueBlocking: QueueBlockingRow | undefined,
+  blockerId: string | undefined,
+): string {
+  if (group === 'waiting-dependency') {
+    return queueBlocking?.reason ?? (blockerId ? `Blocked on ${blockerId}` : 'Waiting on a dependency');
+  }
+  if (group === 'queued') return queueBlocking?.reason ?? 'Ready; waiting for worker capacity';
+  if (group === 'in-progress') return stateLabel;
+  if (parkReason) return parkReason;
+  if (group === 'held') return 'Deliberately paused';
+  if (group === 'planning') return 'Waiting for planner decomposition';
+  if (group === 'recovering') return 'No recovery reason recorded';
+  return 'Decision reason not recorded';
+}
+
+function nextActionFor(
+  group: WorkGroupId,
+  parkKind: string | undefined,
+  parkReason: string,
+  blocker: { id: string; state?: string; parkKind?: string } | undefined,
+): string {
+  switch (group) {
+    case 'needs-decision':
+      return parkKind === 'decision' ? 'Approve or decline' : 'Escalate for a fresh unpark';
+    case 'in-progress':
+      return 'Plane gates and lands it';
+    case 'waiting-dependency':
+      if (!blocker) return 'Wait for the active scope conflict to clear';
+      if (blocker.parkKind === 'hold') return `Resume ${blocker.id} first`;
+      if (blocker.parkKind === 'decision') return `Resolve ${blocker.id} first`;
+      if (blocker.state === 'rejected' || blocker.state === 'answered' || blocker.state === 'done' || blocker.state === 'missing') {
+        return 'Plane escalates after the dependency wait window';
+      }
+      return `Wait for ${blocker.id} to land`;
+    case 'queued':
+      return 'Plane starts it when capacity and scope are available';
+    case 'recovering':
+      return parkReason.startsWith('breaker:') ? 'Requeue now or dismiss' : 'Plane retries; breaker escalates';
+    case 'held':
+      return 'Resume when ready';
+    case 'planning': {
+      const successor = parseDecompositionSuccessor(parkReason);
+      return successor ? `Wait for planner item ${successor}` : 'Planner creates the next slice';
+    }
+  }
+}
+
+function pageHref(
+  group: WorkGroupId,
+  targetPage: number,
+  selected: WorkGroupFilter,
+  pages: Record<WorkGroupId, number>,
+): string {
+  const query: string[] = [];
+  if (selected !== 'all') query.push(`group=${encodeURIComponent(selected)}`);
+  for (const id of WORK_GROUP_IDS) {
+    const page = id === group ? targetPage : pages[id];
+    if (page > 1) query.push(`${WORK_GROUP_PAGE_PARAMS[id]}=${page}`);
+  }
+  const qs = query.length > 0 ? `?${query.join('&')}` : '';
+  return `/work${qs}#work-group-${group}`;
+}
+
 /** Build the work ledger envelope from a raw fold summary.
  *  Malformed input yields a `failed` envelope (loud fold failure).
  *  `opts.workforce` (console consolidation 1/4) is passed through untouched into
@@ -319,7 +469,16 @@ function buildGlance(counts: Record<string, number>, parkedKinds: Record<string,
  *  `/workers` so its own action buttons return to Workers. */
 export function workProjectionFromFold(
   raw: unknown,
-  opts: { ledgerSequence: number; staleAfterSeconds?: number; workforce?: WorkforceSection; backlog?: BacklogRow[]; nextPath?: string } = { ledgerSequence: 0 },
+  opts: {
+    ledgerSequence: number;
+    staleAfterSeconds?: number;
+    workforce?: WorkforceSection;
+    backlog?: BacklogRow[];
+    nextPath?: string;
+    group?: string | null;
+    pages?: Partial<Record<WorkGroupId, number>>;
+    pageSize?: number;
+  } = { ledgerSequence: 0 },
 ): ProjectionEnvelope<WorkLedgerData> {
   const staleAfter = opts.staleAfterSeconds ?? 45;
   const nextPath = opts.nextPath ?? '/work';
@@ -342,27 +501,23 @@ export function workProjectionFromFold(
   const generatedAt = fold.generatedAt;
   const nowMs = new Date(generatedAt).getTime();
   const freshUntil = new Date(nowMs + staleAfter * 1000).toISOString();
+  const queueBlockingById = new Map(
+    (fold.queueBlocking ?? []).map((row) => [row.id, row]),
+  );
 
-  // Operator-attention order (WI-102): group first, then the group's own state sub-tier (in-
-  // flight: building/testing/gated ahead of approved; plane-owned parks: ops/hold ahead of
-  // decomposition), then priority within that sub-tier, then the existing relative order
-  // (Array.prototype.sort is stable in Node, so ties fall through unchanged — no explicit
-  // tertiary key needed).
+  // Adapter-owned semantic group order, then in-progress substate, then priority. Stable sort
+  // preserves ledger order when all explicit attention keys tie.
   const sorted = [...fold.active].sort((a, b) => {
-    const ga = attentionGroup(a.state, a.parkKind);
-    const gb = attentionGroup(b.state, b.parkKind);
+    const groupA = classifyWorkGroup(a, queueBlockingById.get(a.id));
+    const groupB = classifyWorkGroup(b, queueBlockingById.get(b.id));
+    const ga = WORK_GROUP_ORDER.get(groupA) ?? WORK_GROUP_IDS.length;
+    const gb = WORK_GROUP_ORDER.get(groupB) ?? WORK_GROUP_IDS.length;
     if (ga !== gb) return ga - gb;
-    if (ga === 1) {
+    if (groupA === 'in-progress') {
       // Within in-flight: building/testing/gated ahead of approved.
       const ia = IN_FLIGHT_SUBSORT[a.state] ?? 0;
       const ib = IN_FLIGHT_SUBSORT[b.state] ?? 0;
       if (ia !== ib) return ia - ib;
-    }
-    if (ga === 4) {
-      // Within the plane-owned park group: ops/hold ahead of decomposition.
-      const pa = PARK_KIND_SORT[a.parkKind ?? ''] ?? 0;
-      const pb = PARK_KIND_SORT[b.parkKind ?? ''] ?? 0;
-      if (pa !== pb) return pa - pb;
     }
     const prioA = PRIORITY_SORT[a.priority ?? ''] ?? 4;
     const prioB = PRIORITY_SORT[b.priority ?? ''] ?? 4;
@@ -397,6 +552,9 @@ export function workProjectionFromFold(
     const queuedAt   = typeof ext['queuedAt']   === 'string' ? ext['queuedAt']   : '';
     const parkedAt   = typeof ext['parkedAt']   === 'string' ? ext['parkedAt']   : undefined;
     const lastUnparkedAt = typeof ext['lastUnparkedAt'] === 'string' ? ext['lastUnparkedAt'] : undefined;
+    const blockedOn  = typeof ext['blockedOn']  === 'string' ? ext['blockedOn']  : undefined;
+    const blockerState = typeof ext['blockerState'] === 'string' ? ext['blockerState'] : undefined;
+    const blockerParkKind = typeof ext['blockerParkKind'] === 'string' ? ext['blockerParkKind'] : undefined;
     const branch     = typeof ext['branch']     === 'string' ? ext['branch']     : undefined;
     const branchAlive = typeof ext['branchAlive'] === 'boolean' ? ext['branchAlive'] : undefined;
     const touches    = Array.isArray(ext['touches'])
@@ -433,15 +591,36 @@ export function workProjectionFromFold(
     const opState  = status.tone;
     const label    = status.label;
     const emphasis = emphasisForTone(opState);
+    const queueBlocking = queueBlockingById.get(id);
+    const group = classifyWorkGroup({
+      state,
+      ...(parkKind ? { parkKind } : {}),
+      ...(blockedOn ? { blockedOn } : {}),
+    }, queueBlocking);
+    const reasonBlocker = blockerIdFromReason(queueBlocking?.reason);
+    const blockerId = blockedOn ?? reasonBlocker;
+    const blocker = blockerId
+      ? {
+          id: blockerId,
+          ...(blockedOn && blockerState ? { state: blockerState } : {}),
+          ...(blockedOn && blockerParkKind ? { parkKind: blockerParkKind } : {}),
+        }
+      : undefined;
+    const age = workAge({
+      state,
+      ...(typeof ext['createdAt'] === 'string' ? { createdAt: ext['createdAt'] } : {}),
+      ...(queuedAt ? { queuedAt } : {}),
+      ...(buildingAt ? { buildingAt } : {}),
+      ...(parkedAt ? { parkedAt } : {}),
+      ...(typeof ext['approvedAt'] === 'string' ? { approvedAt: ext['approvedAt'] } : {}),
+    }, nowMs);
+    const reason = workReason(group, label, parkReason, queueBlocking, blockerId);
+    const nextAction = nextActionFor(group, parkKind, parkReason, blocker);
 
     const metadata: string[] = [];
     if (priority && priority !== 'unset') metadata.push(`${priority} priority`);
-    if (state === 'building' && buildingAt) {
-      metadata.push(`${formatAge(nowMs - new Date(buildingAt).getTime())} in flight`);
-    }
-    if ((state === 'queued' || state === 'routed') && queuedAt) {
-      metadata.push(`queued ${formatAge(nowMs - new Date(queuedAt).getTime())}`);
-    }
+    if (age) metadata.push(`age ${age}`);
+    if (blocker) metadata.push(`blocked by ${blocker.id}${blocker.state ? ` · ${blocker.state}` : ''}`);
     if (attempts > 1) metadata.push(`attempt ${attempts}`);
 
     const title = spec
@@ -459,7 +638,12 @@ export function workProjectionFromFold(
       emphasisForBadge: emphasis,
       title,
       metadata,
-      ...(parkReason ? { summary: parkReason } : {}),
+      group,
+      reason,
+      ...(age ? { age } : {}),
+      ...(blocker ? { blocker } : {}),
+      nextAction,
+      summary: reason,
       ...(spec       ? { spec }               : {}),
       ...(origin     ? { originChip: originBadge(origin) } : {}),
       ...(brief      ? { brief }              : {}),
@@ -484,6 +668,63 @@ export function workProjectionFromFold(
     const k = item.parkKind ?? 'unknown';
     parkedKinds[k] = (parkedKinds[k] ?? 0) + 1;
   }
+
+  const groupFilter = parseWorkGroup(opts.group);
+  const pageSize = Number.isFinite(opts.pageSize) && (opts.pageSize ?? 0) > 0
+    ? Math.floor(opts.pageSize!)
+    : WORK_GROUP_PAGE_SIZE;
+  const requestedPages = Object.fromEntries(
+    WORK_GROUP_IDS.map((id) => {
+      const rawPage = opts.pages?.[id] ?? 1;
+      return [id, Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1];
+    }),
+  ) as Record<WorkGroupId, number>;
+
+  const groups: WorkGroupPage[] = WORK_GROUP_IDS.map((id) => {
+    const allItems = active.filter((item) => item.group === id);
+    const pageCount = Math.max(1, Math.ceil(allItems.length / pageSize));
+    const page = Math.min(requestedPages[id], pageCount);
+    requestedPages[id] = page;
+    const start = (page - 1) * pageSize;
+    const meta = WORK_GROUP_META[id];
+    return {
+      id,
+      label: meta.label,
+      description: meta.description,
+      total: allItems.length,
+      page,
+      pageCount,
+      items: allItems.slice(start, start + pageSize),
+    };
+  });
+
+  // Pagination links preserve every other group's current page, so paging Recovering never
+  // resets Needs decision (and vice versa). Filters intentionally reset pagination: switching
+  // attention modes always starts at the first row.
+  for (const group of groups) {
+    if (group.page > 1) {
+      group.prevHref = pageHref(group.id, group.page - 1, groupFilter, requestedPages);
+    }
+    if (group.page < group.pageCount) {
+      group.nextHref = pageHref(group.id, group.page + 1, groupFilter, requestedPages);
+    }
+  }
+  const groupFilters: WorkGroupFilterLink[] = [
+    {
+      id: 'all',
+      label: 'All',
+      count: active.length,
+      href: '/work',
+      active: groupFilter === 'all',
+    },
+    ...groups.map((group) => ({
+      id: group.id,
+      label: group.label,
+      count: group.total,
+      href: `/work?group=${encodeURIComponent(group.id)}#work-board`,
+      active: groupFilter === group.id,
+    })),
+  ];
 
   const shippedThisWeek = (fold.recentMerged ?? []).filter((m) => {
     const t = m.mergedAt ? new Date(m.mergedAt).getTime() : NaN;
@@ -524,7 +765,13 @@ export function workProjectionFromFold(
     freshUntil,
     state: 'fresh',
     data: {
-      glance: buildGlance(fold.counts, parkedKinds), active, answered, shippedThisWeek,
+      glance: buildGlance(fold.counts, parkedKinds),
+      active,
+      groups,
+      groupFilter,
+      groupFilters,
+      answered,
+      shippedThisWeek,
       ...(opts.workforce ? { workforce: opts.workforce } : {}),
       ...(opts.backlog ? { backlog: opts.backlog } : {}),
       queueBlocking: fold.queueBlocking ?? [],

@@ -93,7 +93,14 @@ import {
   renderNotFoundPage,
 } from './opsPages.js';
 import type { OpsPageContext, KnowledgeSourceRecord, OpsData } from './opsPages.js';
-import { generateTokensCss as opsuiGenerateTokensCss, registeredStylesheets, isResolvableExternalRef, commandProjectionFromFold } from '@loopkit/opsui';
+import {
+  generateTokensCss as opsuiGenerateTokensCss,
+  registeredStylesheets,
+  isResolvableExternalRef,
+  commandProjectionFromFold,
+  WORK_GROUP_IDS,
+  WORK_GROUP_PAGE_PARAMS,
+} from '@loopkit/opsui';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1167,7 +1174,19 @@ async function handleRequest(
     }
 
     if (pathname === '/work') {
-      return send(res, 200, renderWorkPage(data, ctx, theme));
+      const workPages = Object.fromEntries(
+        WORK_GROUP_IDS.map((id) => {
+          const rawPage = Number(url.searchParams.get(WORK_GROUP_PAGE_PARAMS[id]) ?? '1');
+          return [id, Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1];
+        }),
+      );
+      return send(res, 200, renderWorkPage(
+        data,
+        ctx,
+        theme,
+        url.searchParams.get('group'),
+        workPages,
+      ));
     }
 
     if (pathname === '/acceptance') {

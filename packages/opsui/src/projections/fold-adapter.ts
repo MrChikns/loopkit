@@ -50,6 +50,12 @@ export type FoldActiveItem = {
   buildingAt?: string;
   parkedAt?: string;
   approvedAt?: string;
+  /** Semantic dependency edge from item.blocked. The item itself remains parked, so this is
+   *  the authoritative signal that it belongs in Work's waiting-dependency group. */
+  blockedOn?: string;
+  /** Current folded state of blockedOn, or the explicit compatibility value "missing". */
+  blockerState?: string;
+  blockerParkKind?: string;
   /** Timestamp of the most recent item.unparked (loopkit ItemRecord.lastUnparkedAt),
    *  never cleared once set. Paired with `parkedAt` by the missions board's
    *  interim-status check (WI-362, mirrors @loopkit/core src/fold.ts's isInterimApprovedStatus)
