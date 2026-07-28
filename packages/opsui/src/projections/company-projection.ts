@@ -4,9 +4,11 @@
 // nothing else.
 
 import { Card } from '../components/Card.ts';
+import { Button } from '../components/Button.ts';
 import { EventRow } from '../components/EventRow.ts';
 import { MetricTile } from '../components/MetricTile.ts';
 import { ProjectionFailure } from '../components/ProjectionFailure.ts';
+import { Pagination } from '../components/Pagination.ts';
 import { StatusBadge } from '../components/StatusBadge.ts';
 import { esc } from '../render/html.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
@@ -19,8 +21,8 @@ function glanceRegion(data: CompanyData): string {
   const tiles = data.glance.map((m) => MetricTile(m)).join('');
   return Card({
     variant: 'glance',
-    title: 'Knowledge',
-    subtitle: 'Active decisions from the configured decision log',
+    title: 'Decisions & docs',
+    subtitle: 'Current operating decisions and their supporting sources',
     body: `<div class="opsui-glancegrid">${tiles}</div>`,
   });
 }
@@ -28,14 +30,27 @@ function glanceRegion(data: CompanyData): string {
 // Each decision row carries provenance — id, title, date, status, and a used-by count
 // when non-zero. `usedByCount` is omitted (never a fabricated "0 uses") when nothing in
 // the already-loaded ledger corpus cites it.
-function decisionsRegion(decisions: DecisionCard[]): string {
-  const activeCount = decisions.filter((d) => d.status === 'Active').length;
+function filterLinks(label: string, links: CompanyData['statusLinks']): string {
+  return (
+    `<div class="opsui-acceptance__filter" role="group" aria-label="${esc(label)}">` +
+    `<span class="opsui-acceptance__filter-label">${esc(label)}</span>` +
+    links.map((link) => {
+      const cls = `opsui-acceptance__filter-btn${link.active ? ' opsui-acceptance__filter-btn--active' : ''}`;
+      return `<a class="${cls}" href="${esc(link.href)}"${link.active ? ' aria-current="true"' : ''}>${esc(link.label)}</a>`;
+    }).join('') +
+    `</div>`
+  );
+}
+
+function decisionsRegion(data: CompanyData): string {
+  const decisions = data.decisions;
+  const activeCount = decisions.filter((d) => d.status.toLowerCase().startsWith('active')).length;
   const headerAside = StatusBadge({
     state: activeCount ? 'success' : 'neutral',
     label: activeCount ? `${activeCount} active` : 'None active',
   });
   const body = decisions.length === 0
-    ? `<p class="opsui-empty">No decisions loaded.</p>`
+    ? `<p class="opsui-empty">No decisions match these filters.</p>`
     : decisions.map((d) => {
         const op = decisionStatusToOp(d.status);
         const metadata = [d.date, d.status];
@@ -54,13 +69,33 @@ function decisionsRegion(decisions: DecisionCard[]): string {
           `</div>`
         );
       }).join('');
+  const search =
+    `<form class="opsui-company__search" method="get" action="/company">` +
+    `<label for="company-query">Search decisions and docs</label>` +
+    `<input id="company-query" name="q" type="search" value="${esc(data.query)}" placeholder="ID, title, status, target, or document text">` +
+    (data.statusFilter !== 'active' ? `<input type="hidden" name="status" value="${esc(data.statusFilter)}">` : '') +
+    (data.targetFilter ? `<input type="hidden" name="target" value="${esc(data.targetFilter)}">` : '') +
+    Button({ label: 'Search', type: 'submit', variant: 'primary', size: 'sm' }) +
+    (data.query ? Button({ label: 'Clear', href: data.clearQueryHref, variant: 'ghost', size: 'sm' }) : '') +
+    `</form>`;
+  const pager = Pagination({
+    page: data.page,
+    pageCount: data.pageCount,
+    total: data.decisionTotal,
+    itemNoun: 'decisions',
+    hrefFor: (page) => page < data.page ? (data.prevHref ?? '/company') : (data.nextHref ?? '/company'),
+    label: 'Decision pages',
+  });
   return (
     `<div class="opsui-company__decisions">` +
+    search +
+    filterLinks('Status', data.statusLinks) +
+    filterLinks('Target', data.targetLinks) +
     Card({
       title:       'Decisions',
-      subtitle:    'Active and recently superseded decision entries, with provenance',
+      subtitle:    'Newest first; superseded decisions stay hidden until requested',
       headerAside,
-      body,
+      body: body + pager,
     }) +
     `</div>`
   );
@@ -96,7 +131,7 @@ export function CompanyProjection(env: ProjectionEnvelope<CompanyData>): string 
   if (env.state === 'failed') {
     const foldEvidence = env.evidence[0];
     return ProjectionFailure({
-      projection:       'Knowledge',
+      projection:       'Decisions & docs',
       reason:           `fold ${env.foldVersion} did not fold cleanly`,
       lastGoodSequence: env.ledgerSequence,
       lastGoodAt:       env.generatedAt,
@@ -111,7 +146,7 @@ export function CompanyProjection(env: ProjectionEnvelope<CompanyData>): string 
   return (
     `<div class="opsui-company" data-projection="company" data-state="${env.state}">` +
     glanceRegion(d) +
-    decisionsRegion(d.decisions) +
+    decisionsRegion(d) +
     provenanceRegion(env) +
     `</div>`
   );

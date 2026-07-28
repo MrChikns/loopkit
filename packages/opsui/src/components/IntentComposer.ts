@@ -93,11 +93,11 @@ export function IntentComposer(props: IntentComposerProps): string {
       `</select></label>`
     : '';
   // WI-178: the captured-as chip resolves into the recent-intents strip below — it links
-  // to the item's ledger timeline so a fresh capture is never a dead end (the chip itself
+  // to the canonical item hub so a fresh capture is never a dead end (the chip itself
   // is cleared from the URL by composer.js so a refresh doesn't re-show a stale confirm).
   const captured = props.capturedId
     ? `<p class="opsui-composer__captured" role="status">Captured as ` +
-      `<a class="opsui-composer__captured-link" href="/timeline?item=${esc(props.capturedId)}">` +
+      `<a class="opsui-composer__captured-link" href="/item/${esc(props.capturedId)}">` +
       `<strong>${esc(props.capturedId)}</strong></a> — routing…</p>`
     : '';
   return (

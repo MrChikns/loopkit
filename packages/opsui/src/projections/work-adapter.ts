@@ -306,6 +306,12 @@ function blockerIdFromReason(reason: string | undefined): string | undefined {
   return /(?:waiting|blocked)\s+on\s+(WI-\d+)/iu.exec(reason)?.[1];
 }
 
+function isDependencyWaitReason(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return blockerIdFromReason(reason) !== undefined ||
+    /waiting on an in-flight build\b/iu.test(reason);
+}
+
 /** The one Work-board semantic classifier. Scheduling evidence can refine a queued item into
  *  a dependency wait or an exhausted item into a decision, but presentation never re-decides
  *  the group. */
@@ -317,7 +323,7 @@ export function classifyWorkGroup(
   if (queueBlocking?.reason?.includes('needs fresh unpark')) return 'needs-decision';
   if (item.state === 'parked' && item.parkKind === 'hold') return 'held';
   if (item.state === 'parked' && item.parkKind === 'decomposition') return 'planning';
-  if (item.blockedOn || item.state === 'blocked' || blockerIdFromReason(queueBlocking?.reason)) {
+  if (item.blockedOn || item.state === 'blocked' || isDependencyWaitReason(queueBlocking?.reason)) {
     return 'waiting-dependency';
   }
   if (item.state === 'building' || item.state === 'testing' || item.state === 'gated' || item.state === 'approved') {
@@ -778,7 +784,7 @@ export function workProjectionFromFold(
     },
     evidence: [
       { id: 'fold-summary',  kind: 'fold-definition', label: 'loopctl summary --json' },
-      { id: 'work-ledger',   kind: 'ledger-events',   label: 'Ledger timeline', href: '/timeline' },
+      { id: 'work-ledger',   kind: 'ledger-events',   label: 'Ledger activity', href: '/activity' },
     ],
   };
 }

@@ -661,9 +661,7 @@ test('GET /health — renders 200 with the System marker (the SLO/health board)'
 });
 
 test('GET /activity — renders 200 with the newest ledger events across every item', async () => {
-  // Phase-1 dual-shell note: /activity still renders through the OLD console shell
-  // (renderActivity/views.ts) — the opsui cross-item view is /timeline (linked from /work).
-  // The System→activity cross-link was dropped in the shell adoption; /activity is reached directly.
+  // /activity is the canonical, paginated global event history.
   await withLedger((ledgerDir) =>
     withServer(ledgerDir, async (base) => {
       const res = await fetch(`${base}/activity`);
@@ -672,6 +670,20 @@ test('GET /activity — renders 200 with the newest ledger events across every i
       assert.match(body, /Activity/);
       assert.match(body, /item\.merged/);
       assert.match(body, /<a class="opsui-eventrow__metaitem opsui-eventrow__metaitem--link" href="\/item\/WI-004">WI-004<\/a>/);
+    }),
+  );
+});
+
+test('GET /timeline — redirects global history to canonical /activity; item history stays on its hub', async () => {
+  await withLedger((ledgerDir) =>
+    withServer(ledgerDir, async (base) => {
+      const global = await fetch(`${base}/timeline`, { redirect: 'manual' });
+      assert.equal(global.status, 301);
+      assert.equal(global.headers.get('location'), '/activity');
+
+      const item = await fetch(`${base}/timeline?item=WI-004`, { redirect: 'manual' });
+      assert.equal(item.status, 301);
+      assert.equal(item.headers.get('location'), '/item/WI-004');
     }),
   );
 });
@@ -1836,7 +1848,7 @@ test('GET /company — a decision-log source feeds the Decisions region with the
   ].join('\n');
   const config = { knowledge: { paths: [{ path: 'docs/decisions.md', kind: 'decision-log', label: 'Decision log' }] } };
   await withCompanyRepo(config, { 'docs/decisions.md': log }, {}, async (base) => {
-    const res = await fetch(`${base}/company`);
+    const res = await fetch(`${base}/company?status=all`);
     const body = await res.text();
     // All three parsed decisions render in the Decisions region.
     assert.match(body, /D-001 — Adopt event sourcing/);
@@ -1871,7 +1883,7 @@ test('GET /company — a date-headed decision log (metadata-line ID/Status) feed
   ].join('\n');
   const config = { knowledge: { paths: [{ path: 'docs/decisions.md', kind: 'decision-log', label: 'Decision log' }] } };
   await withCompanyRepo(config, { 'docs/decisions.md': log }, {}, async (base) => {
-    const res = await fetch(`${base}/company`);
+    const res = await fetch(`${base}/company?status=all`);
     const body = await res.text();
     assert.match(body, /D-007 — Adopt message bus/);
     assert.match(body, /D-008 — Retire the legacy queue/);
@@ -1916,7 +1928,7 @@ test('GET /company — a mixed-format log (id-in-heading + date-headed) parses b
   ].join('\n');
   const config = { knowledge: { paths: [{ path: 'docs/decisions.md', kind: 'decision-log', label: 'Decision log' }] } };
   await withCompanyRepo(config, { 'docs/decisions.md': log }, {}, async (base) => {
-    const res = await fetch(`${base}/company`);
+    const res = await fetch(`${base}/company?status=all`);
     const body = await res.text();
     assert.match(body, /D-001 — Adopt event sourcing/);
     assert.match(body, /D-002 — Use a single fold/);
@@ -1980,7 +1992,7 @@ test('GET /company — an id-in-heading log with a generic ADR-NNN prefix parses
   ].join('\n');
   const config = { knowledge: { paths: [{ path: 'docs/decisions.md', kind: 'decision-log', label: 'Decision log' }] } };
   await withCompanyRepo(config, { 'docs/decisions.md': log }, {}, async (base) => {
-    const res = await fetch(`${base}/company`);
+    const res = await fetch(`${base}/company?status=all`);
     const body = await res.text();
     assert.match(body, /ADR-001 — Adopt event sourcing/);
     assert.match(body, /ADR-002 — Use a single fold/);
@@ -2018,7 +2030,7 @@ test('GET /company — a glob decision-log source object expands to one card per
     knowledge: { paths: [{ path: 'docs/decisions/*.md', kind: 'decision-log', label: 'Decision log' }] },
   };
   await withCompanyRepo(config, files, {}, async (base) => {
-    const res = await fetch(`${base}/company`);
+    const res = await fetch(`${base}/company?status=all`);
     assert.equal(res.status, 200);
     const body = await res.text();
     assert.match(body, /ADR-001 — One default plane per machine/);
@@ -2167,6 +2179,48 @@ test('GET /company — target chips render, and ?target= filters to that target'
       assert.match(web, /web-only content/);
       assert.ok(!/api-only content/.test(web), '?target=acme-web must hide the other target');
       assert.match(web, /aria-current="true"/);
+    },
+  );
+});
+
+test('GET /company — defaults to active decisions; status and query filters are explicit and composable', async () => {
+  const log = [
+    '## D-001 — Current ledger policy',
+    'Status: Active',
+    'Date: 2026-01-05',
+    '',
+    '## D-002 — Retired queue policy',
+    'Status: Superseded by D-001',
+    'Date: 2026-02-10',
+  ].join('\n');
+  const config = {
+    knowledge: {
+      paths: [
+        { path: 'docs/decisions.md', kind: 'decision-log', label: 'Decision log' },
+        { path: 'docs/runbook.md', label: 'Ledger runbook' },
+      ],
+    },
+  };
+  await withCompanyRepo(
+    config,
+    {
+      'docs/decisions.md': log,
+      'docs/runbook.md': '# Runbook\n\nLedger recovery procedure.',
+    },
+    {},
+    async (base) => {
+      const defaults = await (await fetch(`${base}/company`)).text();
+      assert.match(defaults, /D-001 — Current ledger policy/);
+      assert.doesNotMatch(defaults, /D-002 — Retired queue policy/);
+
+      const superseded = await (await fetch(`${base}/company?status=superseded&q=queue`)).text();
+      assert.match(superseded, /D-002 — Retired queue policy/);
+      assert.doesNotMatch(superseded, /D-001 — Current ledger policy/);
+      assert.match(superseded, /q=queue&amp;status=all|status=all&amp;q=queue/);
+
+      const docs = await (await fetch(`${base}/company?q=recovery`)).text();
+      assert.match(docs, /Ledger recovery procedure/);
+      assert.doesNotMatch(docs, /D-001 — Current ledger policy/);
     },
   );
 });

@@ -519,7 +519,7 @@ function capturedBannerRegion(capturedId: string | undefined): string {
   if (!capturedId) return '';
   return (
     `<p class="opsui-composer__captured" role="status">Captured as ` +
-    `<a class="opsui-composer__captured-link" href="/timeline?item=${esc(capturedId)}">` +
+    `<a class="opsui-composer__captured-link" href="/item/${esc(capturedId)}">` +
     `<strong>${esc(capturedId)}</strong></a> — routing…</p>`
   );
 }

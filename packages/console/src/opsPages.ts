@@ -69,7 +69,6 @@ import {
   companyProjectionFromInput,
   CompanyProjection,
   timelineProjectionFromInput,
-  TimelineProjection,
   ThreadDetailProjection,
   threadsProjectionFromFold,
   ThreadsProjection,
@@ -1251,28 +1250,6 @@ function parseDecisionLog(content: string): DecisionCard[] {
   return cards.reverse();
 }
 
-/** The target switcher chips — "All" plus one chip per registered target name, driving
- *  `?target=<name>`. Mirrors the acceptance filter pattern (WI-180) with the same `.opsui`
- *  filter classes, no new visual language. */
-function knowledgeTargetChips(targetNames: string[], active: string | null): string {
-  const options: Array<{ value: string | null; label: string }> = [
-    { value: null, label: 'All' },
-    ...targetNames.map((n) => ({ value: n, label: n })),
-  ];
-  const links = options
-    .map((o) => {
-      const isActive = (o.value ?? null) === (active ?? null);
-      const href = o.value === null ? '?' : `?target=${encodeURIComponent(o.value)}`;
-      const cls = `opsui-acceptance__filter-btn${isActive ? ' opsui-acceptance__filter-btn--active' : ''}`;
-      return `<a class="${cls}" href="${esc(href)}"` + (isActive ? ` aria-current="true"` : '') + `>${esc(o.label)}</a>`;
-    })
-    .join('');
-  return (
-    `<div class="opsui-acceptance__filter" role="group" aria-label="Filter by target">` +
-    `<span class="opsui-acceptance__filter-label">Target</span>${links}</div>`
-  );
-}
-
 /** One markdown knowledge card: title = label, subtitle = basename + freshness, body an
  *  escaped-text excerpt inside a collapsible <details>. Kept as plain as the legacy
  *  renderKnowledge — minimal structure, escaped content. */
@@ -1327,33 +1304,38 @@ function knowledgeRegion(records: KnowledgeSourceRecord[], showGroups: boolean, 
 /**
  * Knowledge projection — decision cards + operator-configured knowledge
  * sources. `sources` (server.ts collectKnowledge) are read from the plane's `knowledge`
- * config; undefined → today's honest empty state, unchanged. `?target=` filters the view to
- * one registered target (null = All).
+ * config; undefined → today's honest empty state, unchanged. Query/status/target/page are
+ * ordinary GET parameters so this complete read-only surface remains useful with JS disabled.
  */
 export function renderCompanyPage(
   data: OpsData,
   theme?: string | null,
   sources?: KnowledgeSourceRecord[],
-  targetFilter?: string | null,
+  url: URL = new URL('http://localhost/company'),
 ): string {
   const now = Date.now();
   const targetNames = targetNamesFrom(data);
-  // A ?target= naming an actually-registered target (or 'Plane repo' when paths are configured)
-  // filters; anything else falls back to All rather than an empty view.
   const knownTargets = new Set([...targetNames, 'Plane repo']);
-  const active = targetFilter && knownTargets.has(targetFilter) ? targetFilter : null;
+  const requestedTarget = url.searchParams.get('target');
+  const active = requestedTarget && knownTargets.has(requestedTarget) ? requestedTarget : null;
+  const query = (url.searchParams.get('q') ?? '').trim();
+  const queryLower = query.toLowerCase();
+  const requestedPage = Number(url.searchParams.get('page') ?? '1');
+  const page = Number.isFinite(requestedPage) && requestedPage >= 1 ? Math.floor(requestedPage) : 1;
 
   const all = sources ?? [];
-  const filtered = active ? all.filter((r) => r.targetName === active) : all;
 
   // Decision-log sources → DecisionCards; a decision log that parsed to nothing falls back to
   // a markdown card (handled by knowledgeRegion, which keeps unparsed decision-log records
   // only when they errored — so we re-tag unparseable ones as markdown here).
   let decisions: DecisionCard[] = [];
   const renderRecords: KnowledgeSourceRecord[] = [];
-  for (const rec of filtered) {
+  for (const rec of all) {
     if (rec.kind === 'decision-log' && !rec.error) {
-      const parsed = parseDecisionLog(rec.content);
+      const parsed = parseDecisionLog(rec.content).map((decision) => ({
+        ...decision,
+        targetName: rec.targetName,
+      }));
       if (parsed.length) {
         decisions.push(...parsed);
       } else {
@@ -1381,6 +1363,15 @@ export function renderCompanyPage(
     return numB - numA;
   });
 
+  // Documents share the page's target/query model. Status applies only to decisions because
+  // markdown sources have no lifecycle state.
+  const visibleRecords = renderRecords.filter((record) => {
+    if (active && record.targetName !== active) return false;
+    if (!queryLower) return true;
+    return [record.label, record.path, record.content, record.error ?? '']
+      .some((value) => value.toLowerCase().includes(queryLower));
+  });
+
   // Evidence labels are derived from the actually-configured sources (WI-054 residue kill),
   // not hardcoded doc paths — the adapter's default is a single generic chip.
   const evidenceLabels = [...new Set(all.map((r) => r.label))];
@@ -1392,22 +1383,30 @@ export function renderCompanyPage(
       decisions,
       evidence,
     },
-    { ledgerSequence: 0, generatedAt: new Date().toISOString(), staleAfterSeconds: 300 },
+    {
+      ledgerSequence: 0,
+      generatedAt: new Date().toISOString(),
+      staleAfterSeconds: 300,
+      query,
+      status: url.searchParams.get('status'),
+      target: active,
+      targetNames: [...knownTargets],
+      page,
+    },
   );
 
-  const activeCount = decisions.filter((d) => d.status === 'Active').length;
+  const activeCount = decisions.filter((d) => d.status.toLowerCase().startsWith('active')).length;
   const stateLabel =
     sources === undefined
       ? 'no sources configured'
       : activeCount
         ? `${activeCount} active decision${activeCount === 1 ? '' : 's'}`
-        : renderRecords.length
-          ? `${renderRecords.length} knowledge source${renderRecords.length === 1 ? '' : 's'}`
+        : visibleRecords.length
+          ? `${visibleRecords.length} document source${visibleRecords.length === 1 ? '' : 's'}`
           : 'no decisions loaded';
 
-  const chips = sources === undefined ? '' : knowledgeTargetChips(targetNames, active);
-  const knowledge = knowledgeRegion(renderRecords, active === null, now);
-  const workspace = chips + CompanyProjection(envelope) + knowledge;
+  const knowledge = knowledgeRegion(visibleRecords, active === null, now);
+  const workspace = CompanyProjection(envelope) + knowledge;
 
   return projectionShell('company', sectionTitle('company'), workspace, envelope.state,
     envelope.generatedAt, stateLabel, theme, targetNames);
@@ -1558,22 +1557,6 @@ export function renderItemHubPage(data: OpsData, ctx: OpsPageContext, itemId: st
     targetNamesFrom(data),
     ctx.env,
   );
-}
-
-/** Timeline projection — all-items view: most recent 200 events across all work items. */
-export function renderTimelinePage(data: OpsData, theme?: string | null): string {
-  const recent = [...data.events].slice(-200).reverse();
-  const generatedAt = new Date().toISOString();
-  const envelope = timelineProjectionFromInput(
-    { events: recent as never, generatedAt },
-    { ledgerSequence: 0, staleAfterSeconds: 45 },
-  );
-  const rows = envelope.state === 'failed' ? 0 : envelope.data.rows.length;
-  const stateLabel = envelope.state === 'failed'
-    ? 'Ledger unavailable'
-    : `${rows} recent event${rows !== 1 ? 's' : ''}`;
-  return projectionShell('work', 'Timeline', TimelineProjection(envelope), envelope.state,
-    envelope.generatedAt, stateLabel, theme, targetNamesFrom(data));
 }
 
 // ---------------------------------------------------------------------------

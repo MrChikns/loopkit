@@ -1,10 +1,43 @@
-/* Knowledge projection — decision cards. Colours via token vars only — no raw
+/* Decisions & docs projection. Colours via token vars only — no raw
  * values. Both themes handled by the :root (dark) / html[data-theme="light"] token
  * override in canonical/tokens.css. */
 
 .opsui-company { display: flex; flex-direction: column; gap: 12px; }
 
-/* EventRow bottom spacing inside each section card. */
-.opsui-company__decisions .opsui-card__body > .opsui-eventrow { margin-bottom: 8px; }
+.opsui-company__search {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.opsui-company__search label {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.opsui-company__search input[type='search'] {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--sunken);
+  color: var(--text);
+  font: inherit;
+}
+.opsui-company__search input[type='search']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
-.opsui-company__decisions .opsui-card__body > .opsui-eventrow:last-child { margin-bottom: 0; }
+/* EventRow bottom spacing inside each section card. */
+.opsui-company__decisions .opsui-card__body > div > .opsui-eventrow { margin-bottom: 8px; }
+
+.opsui-company__decisions .opsui-card__body > div:last-of-type > .opsui-eventrow { margin-bottom: 0; }
+
+@media (max-width: 640px) {
+  .opsui-company__search { grid-template-columns: 1fr auto; }
+  .opsui-company__search input[type='search'] { grid-column: 1 / -1; }
+}

@@ -87,7 +87,6 @@ import {
   renderThreadsPage,
   renderThreadDetailPage,
   renderItemHubPage,
-  renderTimelinePage,
   renderActivityPage,
   renderErrorPage,
   renderNotFoundPage,
@@ -1199,7 +1198,7 @@ async function handleRequest(
 
     if (pathname === '/company') {
       const sources = await collectKnowledge(data.cfg.knowledge, data.result, repoRoot);
-      return send(res, 200, renderCompanyPage(data, theme, sources, url.searchParams.get('target')));
+      return send(res, 200, renderCompanyPage(data, theme, sources, url));
     }
 
     if (pathname === '/observability') {
@@ -1242,7 +1241,9 @@ async function handleRequest(
         res.end();
         return;
       }
-      return send(res, 200, renderTimelinePage(data, theme));
+      res.writeHead(301, { Location: '/activity', 'Content-Length': '0' });
+      res.end();
+      return;
     }
 
     if (pathname === '/activity') {

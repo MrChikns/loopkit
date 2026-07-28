@@ -21,6 +21,8 @@ export type DecisionCard = {
   title: string;
   date: string;
   status: 'Active' | 'Superseded' | string;
+  /** Configured plane/target that supplied the decision. */
+  targetName?: string;
   usedByCount?: number;
 };
 
@@ -64,20 +66,66 @@ export function withUsedByCounts(decisions: DecisionCard[], counts: Map<string, 
 export type CompanyData = {
   glance: GlanceMetric[];
   decisions: DecisionCard[];
+  decisionTotal: number;
+  page: number;
+  pageCount: number;
+  query: string;
+  statusFilter: CompanyStatusFilter;
+  targetFilter: string | null;
+  statusLinks: CompanyFilterLink[];
+  targetLinks: CompanyFilterLink[];
+  clearQueryHref: string;
+  prevHref: string | null;
+  nextHref: string | null;
+};
+
+export type CompanyStatusFilter = 'active' | 'superseded' | 'all';
+
+export type CompanyFilterLink = {
+  value: string;
+  label: string;
+  href: string;
+  active: boolean;
 };
 
 // ─── State maps ───────────────────────────────────────────────────────────────
 
 export function decisionStatusToOp(status: string): OperationalState {
-  if (status === 'Active') return 'success';
-  if (status === 'Superseded') return 'neutral';
+  if (status.toLowerCase().startsWith('active')) return 'success';
+  if (status.toLowerCase().startsWith('superseded')) return 'neutral';
   return 'neutral';
+}
+
+function statusKind(status: string): Exclude<CompanyStatusFilter, 'all'> | 'other' {
+  const normalized = status.trim().toLowerCase();
+  if (normalized.startsWith('active')) return 'active';
+  if (normalized.startsWith('superseded')) return 'superseded';
+  return 'other';
+}
+
+function normalizeStatus(value: string | null | undefined): CompanyStatusFilter {
+  return value === 'superseded' || value === 'all' ? value : 'active';
+}
+
+function companyHref(filters: {
+  query: string;
+  status: CompanyStatusFilter;
+  target: string | null;
+  page?: number;
+}): string {
+  const params = new URLSearchParams();
+  if (filters.query) params.set('q', filters.query);
+  if (filters.status !== 'active') params.set('status', filters.status);
+  if (filters.target) params.set('target', filters.target);
+  if ((filters.page ?? 1) > 1) params.set('page', String(filters.page));
+  const query = params.toString();
+  return query ? `/company?${query}` : '/company';
 }
 
 // ─── Glance builder ───────────────────────────────────────────────────────────
 
 function buildGlance(decisions: DecisionCard[]): GlanceMetric[] {
-  const activeDecisions = decisions.filter((d) => d.status === 'Active').length;
+  const activeDecisions = decisions.filter((d) => d.status.toLowerCase().startsWith('active')).length;
   return [
     {
       label: 'Active decisions',
@@ -100,11 +148,45 @@ export function companyProjectionFromInput(
      *  knowledge sources. Omitted → a generic single-chip default. */
     evidence?: ProjectionEvidenceRef[];
   },
-  opts: { ledgerSequence: number; generatedAt: string; staleAfterSeconds?: number },
+  opts: {
+    ledgerSequence: number;
+    generatedAt: string;
+    staleAfterSeconds?: number;
+    query?: string | null;
+    status?: string | null;
+    target?: string | null;
+    targetNames?: string[];
+    page?: number;
+    pageSize?: number;
+  },
 ): ProjectionEnvelope<CompanyData> {
   const staleAfter = opts.staleAfterSeconds ?? 300;
   const generatedAt = opts.generatedAt;
   const freshUntil = new Date(new Date(generatedAt).getTime() + staleAfter * 1000).toISOString();
+  const query = (opts.query ?? '').trim();
+  const status = normalizeStatus(opts.status);
+  const knownTargets = [...new Set(opts.targetNames ?? input.decisions.map((d) => d.targetName).filter((v): v is string => Boolean(v)))];
+  const target = opts.target && knownTargets.includes(opts.target) ? opts.target : null;
+  const queryLower = query.toLowerCase();
+  const filtered = input.decisions.filter((decision) => {
+    if (target && decision.targetName !== target) return false;
+    if (status !== 'all' && statusKind(decision.status) !== status) return false;
+    if (!queryLower) return true;
+    return [decision.id, decision.title, decision.status, decision.targetName ?? '']
+      .some((value) => value.toLowerCase().includes(queryLower));
+  });
+  const pageSize = Math.max(1, Math.floor(opts.pageSize ?? 20));
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const requestedPage = Math.max(1, Math.floor(opts.page ?? 1));
+  const page = Math.min(requestedPage, pageCount);
+  const decisions = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const hrefFor = (next: { status?: CompanyStatusFilter; target?: string | null; page?: number }) =>
+    companyHref({
+      query,
+      status: next.status ?? status,
+      target: next.target === undefined ? target : next.target,
+      ...(next.page === undefined ? {} : { page: next.page }),
+    });
 
   return {
     projectionId: 'company',
@@ -116,7 +198,35 @@ export function companyProjectionFromInput(
     state: 'fresh',
     data: {
       glance: buildGlance(input.decisions),
-      decisions: input.decisions,
+      decisions,
+      decisionTotal: filtered.length,
+      page,
+      pageCount,
+      query,
+      statusFilter: status,
+      targetFilter: target,
+      statusLinks: ([
+        ['active', 'Active'],
+        ['superseded', 'Superseded'],
+        ['all', 'All statuses'],
+      ] as const).map(([value, label]) => ({
+        value,
+        label,
+        href: hrefFor({ status: value, page: 1 }),
+        active: status === value,
+      })),
+      targetLinks: [
+        { value: '', label: 'All targets' },
+        ...knownTargets.map((value) => ({ value, label: value })),
+      ].map(({ value, label }) => ({
+        value,
+        label,
+        href: hrefFor({ target: value || null, page: 1 }),
+        active: (target ?? '') === value,
+      })),
+      clearQueryHref: companyHref({ query: '', status, target }),
+      prevHref: page > 1 ? hrefFor({ page: page - 1 }) : null,
+      nextHref: page < pageCount ? hrefFor({ page: page + 1 }) : null,
     },
     // Evidence labels are derived by the binding layer from the actually-configured
     // knowledge sources. A generic label stands in when a caller passes no sources;

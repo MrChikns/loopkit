@@ -1,6 +1,6 @@
 // Live-reply client (WI-053): after a capture round-trip the page renders a captured
 // confirmation banner (`.opsui-composer__captured`, the item id linked as
-// `/timeline?item=<id>`). This opens the server's read-only SSE tail
+// `/item/<id>`). This opens the server's read-only SSE tail
 // (`/item/<id>/live`) and, on the first reply, hands off to the existing
 // `opsui:live-reply` handler in opsui-shell.js (which re-labels the banner to
 // "reply received"). Progressive enhancement: with no JS the banner still links to
@@ -39,15 +39,15 @@
     return document.querySelector('.opsui-composer__captured');
   }
 
-  // The captured item id lives in the banner's link href (`/timeline?item=<id>`) —
+  // The captured item id lives in the banner's canonical item-hub link (`/item/<id>`) —
   // the same marker the server-rendered confirmation emits after `?captured=<id>`.
   function capturedItemId() {
     var el = capturedBanner();
     if (!el) return null;
-    var link = el.querySelector('a[href*="item="]');
+    var link = el.querySelector('a[href^="/item/"]');
     if (!link) return null;
     var href = link.getAttribute('href') || '';
-    var m = /[?&]item=([^&]+)/.exec(href);
+    var m = /^\/item\/([^/?#]+)/.exec(href);
     return m ? decodeURIComponent(m[1]) : null;
   }
 

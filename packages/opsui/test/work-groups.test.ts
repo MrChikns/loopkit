@@ -35,6 +35,7 @@ test('Work group classifier pins every semantic group', () => {
     { label: 'building', item: { id: 'WI-3', state: 'building' }, expected: 'in-progress' },
     { label: 'blocked edge', item: { id: 'WI-4', state: 'parked', parkKind: 'ops', blockedOn: 'WI-40' }, expected: 'waiting-dependency' },
     { label: 'scope wait', item: { id: 'WI-5', state: 'queued' }, queue: { id: 'WI-5', runnable: false, reason: 'waiting on WI-3 (touches src)' }, expected: 'waiting-dependency' },
+    { label: 'anonymous active-scope wait', item: { id: 'WI-51', state: 'queued' }, queue: { id: 'WI-51', runnable: false, reason: 'waiting on an in-flight build (touches overlap)' }, expected: 'waiting-dependency' },
     { label: 'queued', item: { id: 'WI-6', state: 'queued' }, expected: 'queued' },
     { label: 'ops recovery', item: { id: 'WI-7', state: 'parked', parkKind: 'ops' }, expected: 'recovering' },
     { label: 'legacy recovery', item: { id: 'WI-8', state: 'parked' }, expected: 'recovering' },
