@@ -532,6 +532,7 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'checkTouchesOverstep', file: 'dispatch', mustContain: 'function checkTouchesOverstep(' },
   { id: 'checkSpine', file: 'dispatch', mustContain: 'function checkSpine(' },
   { id: 'postIntegrationRegate', file: 'dispatch', mustContain: 'opts.postIntegrationGateResult' },
+  { id: 'targetPostIntegrationRegate', file: 'dispatch', mustContain: 'const reGate = runGate(' },
   { id: 'pushRaceReset', file: 'dispatch', mustContain: "['reset', '--hard', 'origin/master']" },
   { id: 'pushRaceRegate', file: 'dispatch', mustContain: 'opts.nonFfGateResult' },
   { id: 'queuedClaimDeference', file: 'dispatch', mustContain: '!isClaimActive(r, foldResult.sessions, Date.now())' },

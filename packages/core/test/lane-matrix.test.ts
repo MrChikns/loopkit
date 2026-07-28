@@ -56,9 +56,9 @@ import {
  *     followed by a second `runLaneGate` before the merge (plus the push-race repeat).
  *   - conductor `claim (claimItems)` — runConduct reserves via the shared session verb;
  *     `gate-once` — runCluster gates its branch then `closeMergedCluster`s it, no replay.
- *   - target `none` / `gate-once` — runTargetLane and finalizeTargetBuild contain no claim code
- *     at all (runDispatch's shared pick list defers on their behalf, but never reserves) and
- *     merge via `closeMergedCluster` straight after their single gate.
+ *   - target `none` / `gate-once` — this was the pre-hardening state: runTargetLane and
+ *     finalizeTargetBuild contained no claim code and merged via `closeMergedCluster` straight
+ *     after their single gate.
  *   - planning `none` / `n/a (no merge)` — queues child items; no claim, no git merge.
  * A change in ANY of these four cells is a real lane-invariant change (e.g. WI-186 porting
  * claim-before-pick to the target lane would flip target's claimArbitration) — update the cell
@@ -95,6 +95,11 @@ import {
  * allowlist) is a real lane-invariant change — update deliberately, cell by cell, never by
  * pasting the regen.
  *
+ * Target post-integration hardening: finalizeTargetBuild now re-reads the target destination,
+ * rebases onto an advanced tip, recomputes the actual diff and runs the target's deterministic
+ * gate again before closeMergedCluster. The target postIntegrationRegate cell is therefore
+ * deliberately `re-gate`; its judge remains one-shot and advisory.
+ *
  * ADR-013 (conductor deleted): the `conductor` row is GONE, not changed — `conductor.ts` and
  * `loopctl conduct` were removed outright because the lane had never produced a single ledger
  * event and the clustering it named already ships as batch co-location. Everything above about
@@ -117,7 +122,7 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     touchesOverstep: true, spineCheck: false, judge: true, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'runGate (declared)', commitSide: 'dispatch (declared)',
-    claimArbitration: 'claim (shared pick, via batch)', postIntegrationRegate: 'gate-once',
+    claimArbitration: 'claim (shared pick, via batch)', postIntegrationRegate: 're-gate',
   },
   batch: {
     touchesOverstep: true, spineCheck: true, judge: true, scout: true, push: true,
@@ -470,6 +475,15 @@ test('post-integration re-gate: a merge with no replay is gate-once, both merge 
   assert.equal(cellOf(helper, 'target', 'postIntegrationRegate'), 'gate-once');
   const inline = matrixWithBodies({ batch: `spawnSync('git', ['merge', '--no-ff', '-m', msg, branch], { cwd: root });` });
   assert.equal(cellOf(inline, 'batch', 'postIntegrationRegate'), 'gate-once');
+});
+
+test('post-integration re-gate: target rebase followed by its plain runGate counts', () => {
+  const target = matrixWithBodies({
+    target: `spawnSync('git', ['rebase', destinationSha], { cwd: wtPath, stdio: 'pipe' });
+  const reGate = runGate(manifest.gateCommand, manifest.gateWorkdir, wtPath, false, destinationSha);
+  closeMergedCluster(gitRoot, wtPath, branch, manifest.defaultBranch, message, destinationSha);`,
+  });
+  assert.equal(cellOf(target, 'target', 'postIntegrationRegate'), 're-gate');
 });
 
 test('post-integration re-gate: ORDER is enforced — a gate BEFORE the replay does not count as a re-gate', () => {

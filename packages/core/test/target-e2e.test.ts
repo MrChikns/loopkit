@@ -66,6 +66,19 @@ function makePlaneRepo(root: string): void {
   git(root, ['commit', '-m', 'init plane']);
 }
 
+function installCountingGate(targetRoot: string, counterPath: string, failWhenConcurrent = false): void {
+  const manifestPath = join(targetRoot, 'loopkit.target.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+  manifest.gateCommand = `printf x >> ${counterPath}${failWhenConcurrent ? '; test ! -f concurrent.txt' : ''}`;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  git(targetRoot, ['add', 'loopkit.target.json']);
+  git(targetRoot, ['commit', '-m', 'test: install counting gate']);
+}
+
+function gateRunCount(counterPath: string): number {
+  return existsSync(counterPath) ? readFileSync(counterPath, 'utf8').length : 0;
+}
+
 function testConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
   return { ...CONFIG_DEFAULTS, promptsDir: '.ai/loops/prompts', notifyHook: '.ai/notify-phone.sh', ...overrides };
 }
@@ -550,6 +563,212 @@ test('target lane: dirty operator checkout blocks destination checkout/merge and
     assert.equal(readFileSync(join(targetRoot, 'src', 'notes.js'), 'utf8'), '// operator draft\n');
     assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), mainBefore);
     assert.doesNotMatch(git(targetRoot, ['log', '--oneline', 'main']).stdout.toString(), /WI-184/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('target lane: destination advance rebases and re-gates combined state before merging', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-regate-green-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const gateCounter = join(base, 'gate-count');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+    installCountingGate(targetRoot, gateCounter);
+
+    const manifest = readTargetManifest(targetRoot);
+    const originalBase = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-185', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-185', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    let concurrentSha = '';
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      assertRequest: () => {
+        writeFileSync(join(targetRoot, 'concurrent.txt'), 'landed while build ran\n', 'utf8');
+        git(targetRoot, ['add', 'concurrent.txt']);
+        git(targetRoot, ['commit', '-m', 'feat: concurrent target advance']);
+        concurrentSha = git(targetRoot, ['rev-parse', 'HEAD']).stdout.toString().trim();
+      },
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 13;\n' }],
+      manifest: {
+        wi: 'WI-185',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-185): add marker',
+      },
+      judgeUsage: { in: 40, out: 20, usd: 0.0004 },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(fold(events).items.get('WI-185')?.state, 'merged');
+    assert.equal(gateRunCount(gateCounter), 2,
+      'the target gate must run on the build branch and again after replay onto the moved destination');
+    assert.notEqual(concurrentSha, originalBase, 'fixture must actually advance the target destination');
+    assert.equal(git(targetRoot, ['cat-file', '-e', 'main:concurrent.txt']).status, 0);
+    assert.equal(git(targetRoot, ['cat-file', '-e', 'main:src/extra.js']).status, 0);
+
+    const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-185');
+    assert.ok(merged);
+    const evidence = merged!.data as { baseSha?: string; changedFiles?: string[] };
+    assert.equal(evidence.baseSha, concurrentSha,
+      'merge evidence must be based on the destination commit the combined-state gate covered');
+    assert.deepEqual(evidence.changedFiles, ['src/extra.js'],
+      'concurrent destination files are context, not attributed as this build\'s changes');
+    assert.equal(events.filter(e => e.type === 'review.verdict' && e.item === 'WI-185').length, 1,
+      'the advisory judge runs once, before deterministic integration replay');
+    assert.equal(events.filter(e =>
+      e.type === 'cost.usage' && e.item === 'WI-185' && (e.data as { loop?: string }).loop === 'judge').length, 1,
+    'judge cost is not duplicated by the post-integration re-gate');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('target lane: red combined-state re-gate parks and never merges past disagreement', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-regate-red-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const gateCounter = join(base, 'gate-count');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+    installCountingGate(targetRoot, gateCounter, true);
+
+    const manifest = readTargetManifest(targetRoot);
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-186', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-186', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    let concurrentSha = '';
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      assertRequest: () => {
+        writeFileSync(join(targetRoot, 'concurrent.txt'), 'makes combined gate red\n', 'utf8');
+        git(targetRoot, ['add', 'concurrent.txt']);
+        git(targetRoot, ['commit', '-m', 'feat: concurrent incompatible advance']);
+        concurrentSha = git(targetRoot, ['rev-parse', 'HEAD']).stdout.toString().trim();
+      },
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 14;\n' }],
+      manifest: {
+        wi: 'WI-186',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-186): add marker',
+      },
+      judgeUsage: { in: 10, out: 5, usd: 0.0001 },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-186');
+    assert.equal(rec?.state, 'parked');
+    assert.match(rec?.parkReason ?? '', /target post-integration tests-red/);
+    assert.equal(gateRunCount(gateCounter), 2);
+    assert.equal(events.filter(e => e.type === 'item.merged' && e.item === 'WI-186').length, 0);
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), concurrentSha);
+    assert.notEqual(git(targetRoot, ['cat-file', '-e', 'main:src/extra.js']).status, 0,
+      'the build must not land when only its combined state is red');
+    assert.equal(events.filter(e => e.type === 'review.verdict' && e.item === 'WI-186').length, 1);
+    assert.equal(events.filter(e =>
+      e.type === 'cost.usage' && e.item === 'WI-186' && (e.data as { loop?: string }).loop === 'judge').length, 1);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('target lane: post-integration rebase conflict parks before the second gate or merge', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-regate-conflict-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const gateCounter = join(base, 'gate-count');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+    installCountingGate(targetRoot, gateCounter);
+
+    const manifest = readTargetManifest(targetRoot);
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-187', 'item.captured', { source: 'cli', text: 'rewrite notes', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-187', 'item.queued', { spec: 'rewrite notes', touches: 'src/notes.js' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    let concurrentSha = '';
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      assertRequest: () => {
+        writeFileSync(join(targetRoot, 'src', 'notes.js'), 'export const notes = \"concurrent\";\n', 'utf8');
+        git(targetRoot, ['add', 'src/notes.js']);
+        git(targetRoot, ['commit', '-m', 'feat: concurrent notes rewrite']);
+        concurrentSha = git(targetRoot, ['rev-parse', 'HEAD']).stdout.toString().trim();
+      },
+      files: [{ path: 'src/notes.js', contents: 'export const notes = \"worker\";\n' }],
+      manifest: {
+        wi: 'WI-187',
+        filesTouched: ['src/notes.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'rewrote notes',
+        subject: 'feat(WI-187): rewrite notes',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-187');
+    assert.equal(rec?.state, 'parked');
+    assert.match(rec?.parkReason ?? '', /target post-integration rebase conflict/);
+    assert.equal(gateRunCount(gateCounter), 1,
+      'a replay conflict stops before any combined-state gate can run');
+    assert.equal(events.filter(e => e.type === 'item.merged' && e.item === 'WI-187').length, 0);
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), concurrentSha);
+    assert.equal(readFileSync(join(targetRoot, 'src', 'notes.js'), 'utf8'), 'export const notes = "concurrent";\n');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

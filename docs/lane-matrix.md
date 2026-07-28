@@ -19,7 +19,7 @@ blindly accepting whatever the regen produces) before committing both together.
 | lane | Touches-overstep | spine check | judge | scout | git push | alreadyShippedCommit | denialNote | gate wrapper | commit side | claim arbitration | post-integration re-gate |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | planning | no | no | no | no | no | no | no | none | n/a (no code diff) | none | n/a (no merge) |
-| target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) | claim (shared pick, via batch) | gate-once |
+| target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) | claim (shared pick, via batch) | re-gate |
 | batch | yes | yes | yes | yes | yes | yes | yes | runLaneGate | dispatch (declared) | arbitrate+claim | re-gate |
 
 ## Reading the columns

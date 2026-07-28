@@ -909,9 +909,11 @@ export function closeMergedCluster(
   branch: string,
   mergeDestination: string,
   commitMessage: string,
+  expectedDestinationSha?: string,
 ): { ok: true; commit: string }
   | { ok: false; stage: 'precondition'; reason: string }
   | { ok: false; stage: 'checkout'; reason: string }
+  | { ok: false; stage: 'destination-moved'; reason: string }
   | { ok: false; stage: 'merge'; reason: string } {
   const precondition = requireCleanCheckout(gitRoot);
   if (!precondition.ok) {
@@ -920,6 +922,17 @@ export function closeMergedCluster(
   const co = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
   if (co.status !== 0) {
     return { ok: false, stage: 'checkout', reason: co.stderr?.toString().trim() ?? '' };
+  }
+  if (expectedDestinationSha) {
+    const actual = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' });
+    const actualSha = actual.status === 0 ? actual.stdout.toString().trim() : '';
+    if (actualSha !== expectedDestinationSha) {
+      return {
+        ok: false,
+        stage: 'destination-moved',
+        reason: `destination '${mergeDestination}' moved from ${expectedDestinationSha || '(unknown)'} to ${actualSha || '(unresolvable)'}`,
+      };
+    }
   }
   const merge = spawnSync('git', ['merge', '--no-ff', '-m', commitMessage, branch], { cwd: gitRoot, stdio: 'pipe' });
   if (merge.status !== 0) {
@@ -2559,8 +2572,6 @@ async function finalizeTargetBuild(
     ]);
     return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: guardOutcome.reason };
   }
-  const gate = { passed: true, reason: guardOutcome.gateReason };
-
   // WI-177: read the worker's manifest BEFORE the worktree is removed below — the target lane has
   // no manifestByItem map (it is the batch lane's), and after `removeWorktree` the file is gone.
   // Fail-open: an absent/malformed manifest simply defers nothing.
@@ -2574,11 +2585,96 @@ async function finalizeTargetBuild(
   if (judgeEvents.length > 0) await appendEvents(opts.ledgerDir, judgeEvents);
 
   // ── Merge into the target's default branch (in the target repo) ───────────
-  // WI-172: shared git mechanics (closeMergedCluster) — mergeDestination passed IN
-  // (manifest.defaultBranch), never derived. Event-count asymmetry between checkout-failure
-  // (1 event) and merge-conflict (2 events) is this call site's own pre-existing shape,
-  // reproduced unchanged via the `stage` discriminant.
-  const closeResult = closeMergedCluster(gitRoot, wtPath, branch, manifest.defaultBranch, `feat(dispatch): ${rec.id} (target ${manifest.name})`);
+  // Re-read the destination at the terminal, after the branch's own gate and advisory judge.
+  // If it moved during the build, replay the approved branch onto that exact tip and gate the
+  // combined state. The judge is intentionally NOT re-run: it is advisory evidence about the
+  // submitted diff, while this second deterministic gate is the merge-safety authority.
+  let integrationBase = baseSha;
+  let targetChangedFiles = guardOutcome.changedFiles;
+  let finalGateReason = guardOutcome.gateReason;
+  let closeResult: ReturnType<typeof closeMergedCluster> | undefined;
+  for (let terminalAttempt = 0; terminalAttempt < 3; terminalAttempt++) {
+    const destination = spawnSync('git', ['rev-parse', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
+    if (destination.status !== 0) {
+      const reason = `infra: target default branch '${manifest.defaultBranch}' became unresolvable before merge: ${destination.stderr?.toString().trim() ?? 'unknown'}`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
+    const destinationSha = destination.stdout.toString().trim();
+
+    if (destinationSha !== integrationBase) {
+      const rebase = spawnSync('git', ['rebase', destinationSha], { cwd: wtPath, stdio: 'pipe' });
+      if (rebase.status !== 0) {
+        const conflict = [
+          rebase.stdout?.toString().trim(),
+          rebase.stderr?.toString().trim(),
+        ].filter(Boolean).join('\n').slice(0, 800);
+        spawnSync('git', ['rebase', '--abort'], { cwd: wtPath, stdio: 'pipe' });
+        const reason = `target post-integration rebase conflict after '${manifest.defaultBranch}' advanced${conflict ? `: ${conflict}` : ''}`;
+        removeWorktree(gitRoot, wtPath);
+        await appendEvents(opts.ledgerDir, [
+          makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+          makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+        ]);
+        return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+      }
+
+      targetChangedFiles = getChangedFiles(wtPath, destinationSha);
+      const reGate = runGate(
+        manifest.gateCommand,
+        manifest.gateWorkdir,
+        wtPath,
+        false,
+        destinationSha,
+      );
+      if (!reGate.passed) {
+        persistGateLog(targetRunDir, rec.id, attempt, reGate.output ?? '');
+        persistDiff(targetRunDir, rec.id, attempt, wtPath, destinationSha);
+        const reason = `target post-integration tests-red after '${manifest.defaultBranch}' advanced: ${reGate.reason}`;
+        removeWorktree(gitRoot, wtPath);
+        await appendEvents(opts.ledgerDir, [
+          makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+          makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+        ]);
+        return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+      }
+      integrationBase = destinationSha;
+      finalGateReason = `post-integration green: ${reGate.reason}`;
+    }
+
+    closeResult = closeMergedCluster(
+      gitRoot,
+      wtPath,
+      branch,
+      manifest.defaultBranch,
+      `feat(dispatch): ${rec.id} (target ${manifest.name})`,
+      integrationBase,
+    );
+    if (closeResult.ok || closeResult.stage !== 'destination-moved') break;
+    // A second writer advanced the destination between our re-read and checkout. Loop back,
+    // replay onto the newly observed tip and re-gate; never merge a combination the gate did
+    // not cover. Three bounded attempts prevent an actively moving target from pinning a beat.
+  }
+
+  if (!closeResult) {
+    const reason = `infra: target merge terminal produced no result`;
+    removeWorktree(gitRoot, wtPath);
+    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
+    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
+  }
+  if (!closeResult.ok && closeResult.stage === 'destination-moved') {
+    const reason = `infra: target destination kept moving during bounded integration attempts: ${closeResult.reason}`;
+    removeWorktree(gitRoot, wtPath);
+    await appendEvents(opts.ledgerDir, [
+      makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+      makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+    ]);
+    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+  }
   if (!closeResult.ok) {
     removeWorktree(gitRoot, wtPath);
     if (closeResult.stage === 'precondition' || closeResult.stage === 'checkout') {
@@ -2602,10 +2698,9 @@ async function finalizeTargetBuild(
   spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
 
   // TRUST-HARDENING: actual-diff evidence for the target-lane merge.
-  const targetChangedFiles = baseSha ? getChangedFiles(gitRoot, baseSha) : [];
-  const targetEvidence = mergeEvidence(baseSha, mergeCommit, targetChangedFiles, manifest.gateCommand);
+  const targetEvidence = mergeEvidence(integrationBase, mergeCommit, targetChangedFiles, manifest.gateCommand);
   await appendEvents(opts.ledgerDir, [
-    makeEvent('dispatch', rec.id, 'gate.passed', { tests: gate.reason }),
+    makeEvent('dispatch', rec.id, 'gate.passed', { tests: finalGateReason }),
     makeEvent('dispatch', rec.id, 'build.finished', { commit: mergeCommit }),
     // WI-176: `deployed: false` at merge, on EVERY lane. This used to be
     // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED —

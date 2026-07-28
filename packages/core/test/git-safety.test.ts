@@ -76,3 +76,31 @@ test('closeMergedCluster refuses a dirty destination before checkout or merge an
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('closeMergedCluster refuses a destination that moved after the caller gated its expected tip', () => {
+  const root = makeRepo();
+  try {
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    git(root, ['checkout', '-b', 'build']);
+    writeFileSync(join(root, 'built.txt'), 'built\n', 'utf8');
+    git(root, ['add', 'built.txt']);
+    git(root, ['commit', '-m', 'built']);
+    git(root, ['checkout', 'main']);
+    writeFileSync(join(root, 'concurrent.txt'), 'advanced\n', 'utf8');
+    git(root, ['add', 'concurrent.txt']);
+    git(root, ['commit', '-m', 'concurrent advance']);
+    const advancedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+
+    const result = closeMergedCluster(root, root, 'build', 'main', 'merge build', expectedMain);
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.stage, 'destination-moved');
+    assert.match(result.reason, new RegExp(expectedMain));
+    assert.match(result.reason, new RegExp(advancedMain));
+    assert.equal(git(root, ['rev-parse', 'main']).stdout.toString().trim(), advancedMain);
+    assert.equal(git(root, ['merge-base', '--is-ancestor', 'build', 'main']).status, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
