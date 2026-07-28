@@ -355,6 +355,14 @@ export const NUMERIC_CLAIMS: NumericClaim[] = [
     sites: [{ file: 'verdicts', pattern: /^export const JUDGE_CALIBRATION_SAMPLE = (\d+);/m }],
   },
   {
+    id: 'JUDGE_ARM_AGREEMENT',
+    doc: 'plane-flows',
+    what: 'minimum judge agreement rate before the advisory judge is considered arm-able',
+    sites: [{ file: 'verdicts', pattern: /^export const JUDGE_ARM_AGREEMENT = ([\d.]+);/m }],
+    transform: n => n * 100,
+    transformNote: 'source fraction rendered as a percentage',
+  },
+  {
     id: 'maxTransientRequeues',
     doc: 'plane-flows',
     what: "the pathologist's transient-infra requeue budget (a counter of its own, not rec.attempts)",

@@ -15,8 +15,8 @@ as though it worked. A diagram that flatters the system is useless when somethin
 | 🟠 | known gap, recorded and unfixed |
 | ⚪ | not built, or off by default |
 
-**Every number below is pinned to the constant it describes.** A bolded threshold on this page
-carries an invisible marker naming its source constant, and
+**Every shipped-default threshold below is bolded and pinned to the constant it describes.** A
+bolded threshold on this page carries an invisible marker naming its source constant, and
 [`doc-claims.test.ts`](../packages/core/test/doc-claims.test.ts) fails CI when the two disagree —
 the same discipline [`lane-matrix.md`](lane-matrix.md) already applies to the guard matrix. Every
 `file.ts:NNN` citation is checked the same way: the test reads the cited line and asserts it still
@@ -347,8 +347,10 @@ touching the plane's own configured spine pattern for your decision. It is an en
 
 **Where the merge goes, and whether it pushes**
 
-Both are **derived from the item's target**, never chosen: your repo's default branch, or the plane's
-own. Push happens only where a target declares a remote.
+The lane owns both decisions; the worker never chooses them. The target lane integrates locally into
+the target manifest's declared default branch and does not push. The engineering lane integrates into
+the plane repository's `master` branch and runs its configured Git push. Neither path lets a model
+redirect the destination or invent a publication step.
 
 - 🔵 **The scout ran zero times in 2,627 events** before being fixed — it lived in one code path while
   all real work went through another. Same cause for the judge.
@@ -371,11 +373,12 @@ own. Push happens only where a target declares a remote.
   longer someone's memory. `loopctl verdicts` and the brief both report arm-ability
   (`packages/core/src/verdicts.ts:70`<!--cite:calibrationProgress-->), which needs **three**
   conditions, all of them: **30**<!--pin:JUDGE_CALIBRATION_SAMPLE--> judged items carrying a recorded
-  *human* outcome, an agreement rate at or above 90%, and at least one judged-`fail` item with an
-  outcome. The third is the one worth stating: a judge that has never disagreed with you has an empty
-  false-alarm cell, so its agreement rate is 100% by construction and measures nothing — that is an
-  untested judge, not a calibrated one. Provisional self-accepts are excluded from the sample for the
-  same reason. Read "advisory" as *measured, and the measurement is now visible*.
+  *human* outcome, an agreement rate at or above
+  **90**<!--pin:JUDGE_ARM_AGREEMENT-->%, and at least one judged-`fail` item with an outcome. The
+  third is the one worth stating: a judge that has never disagreed with you has an empty false-alarm
+  cell, so its agreement rate is 100% by construction and measures nothing — that is an untested
+  judge, not a calibrated one. Provisional self-accepts are excluded from the sample for the same
+  reason. Read "advisory" as *measured, and the measurement is now visible*.
 - The judge's one lever today is the acceptance floor — Plate 09.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
@@ -387,9 +390,13 @@ own. Push happens only where a target declares a remote.
 
 ## Plate 07 — Integration: the gate runs again
 
-Nothing in this system reaches master on the strength of a gate that ran against a base which has
-since moved. This is the strongest correctness property the plane has, and no earlier version of this
-page drew it.
+Nothing in this system reaches its destination on the strength of a gate that ran against a base
+which has since moved. This is the strongest correctness property the plane has, and no earlier
+version of this page drew it.
+
+The diagram is the engineering lane's `master` merge-and-push path. The target lane has no push:
+it constructs and gates an exact no-fast-forward candidate, then publishes the target's configured
+default-branch ref by compare-and-swap, as described below.
 
 ```mermaid
 flowchart TD
@@ -624,8 +631,8 @@ flowchart TD
   class BAD,TIME stop
 ```
 
-- **The request is durable before process hand-off.** The plane appends `deploy.requested` for every
-  merged item, awaits that write, and only then spawns
+- **The request is durable before process hand-off.** For every merged item whose deploy command is
+  configured, the plane appends `deploy.requested`, awaits that write, and only then spawns
   (`packages/core/src/deploy.ts:138`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
   asynchronous process-launch errors append `deploy.failed`. A reactor reconciliation also repairs
   both crash windows: a configured merge missing its request is requested and launched, while a
@@ -662,36 +669,40 @@ flowchart TD
 
 ---
 
-## Plate 11 — The only switch
+## Plate 11 — One autonomy switch, two ways to start work
 
-There is no mode. There is a running plane and a stopped plane, and two ways work starts down the
-lanes on Plate 02.
+`LOOPKIT_AUTONOMY` gates only the background reactor and dispatch beats. Attended work is an
+orthogonal path: it may coexist with armed beats, and it remains available while the beats are
+halted.
 
 ```mermaid
 flowchart LR
-  T1["Plane running<br/><small>a beat picks work on a timer</small>"] --> ONE["The same lanes<br/><small>Plates 04–09</small>"]
-  T2["You drive it<br/><small>an agent claims and builds, now</small>"] --> ONE
-  ONE --> BOARD["One board<br/><small>one history, recorded evidence</small>"]
+  T1["Autonomy armed<br/><small>beats pick work on timers</small>"] --> BEAT["Beat lanes<br/><small>full automated guard trail</small>"]
+  T2["You drive it<br/><small>an agent claims and builds now</small>"] --> ATT["Attended coordinator<br/><small>documented procedure</small>"]
+  BEAT --> BOARD["One ledger + board<br/><small>shared acceptance projection</small>"]
+  ATT --> BOARD
 
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
-  class T1,T2,ONE step
+  class T1,T2,BEAT,ATT step
   class BOARD pass
 ```
 
-Claims stop the two from colliding, so they may overlap — there is no switch to flip. Work you drove
-by hand lands on the same ledger and board, but it has the full automated build/gate/judge trail
-only when the coordinator records equivalent evidence.
+Claims stop the two paths from colliding, so they may overlap. Work driven by hand lands on the same
+ledger, board and acceptance projection, but the repo-local coordinator helper records one
+evidence-carrying `item.merged` event rather than the beat's full
+`build.dispatched → gate.* → item.merged` trail.
 
 - An attended drain is **coordinated by an agent, not by a lane**. There used to be a CLI drain
   (`loopctl conduct`) running its own copy of this procedure; it was deleted in
   [ADR-013](decisions/ADR-013-delete-the-conductor.md) — it had never produced a ledger event, and
   the `Touches` clustering it offered already ships inside the engineering lane as batch
   co-location (off by default, and today reachable only for untargeted items — see ADR-013's
-  amendment). What remains is the coordinator: it claims through the same lease
-  kernel, builds in worktrees, and appends the same events.
-- Everything that appears to differ between the two — where a merge goes, whether it pushes, whether
-  the plane's own spine is in scope — is a property of the **item**, not a mode you choose.
+  amendment). What remains is the coordinator: it claims through the same lease kernel, builds in
+  worktrees, proves an exact merge candidate, and appends its merge evidence to the ledger.
+- Destination and acceptance tier remain properties of the item. Execution guards and publication
+  are properties of the path: the attended helper does not inherit the beat's complete guard set and
+  explicitly never pushes to a public remote as part of a drain.
 - 🟠 What the coordinator does *not* get is the lane's guard set: it is an agent following a
   documented procedure, so its guarantees are the guarantees of whoever is driving. The
   guard-carrying path is the beat. See [`lane-matrix.md`](lane-matrix.md) for what each lane
@@ -706,7 +717,9 @@ the item. Start from the reason, find its diamond, and the plate tells you what 
 that moment — then the ledger has the events to confirm or contradict it.
 
 If the queue has simply gone quiet with nothing on your desk, the candidates are, in order: an item
-waiting on Plate 05, a degraded pick mode on Plate 04, and the unreachable-collection gap on Plate 08.
+waiting on Plate 05, a degraded pick mode on Plate 04, or an in-flight build waiting for collection or
+recovery on Plate 08. The historical detached-target reachability gap described there is fixed; do
+not presume it has returned without ledger or beat evidence.
 
 Thresholds shown are the shipped defaults, pinned to source by
 [`doc-claims.test.ts`](../packages/core/test/doc-claims.test.ts). See
