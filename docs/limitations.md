@@ -79,15 +79,18 @@ says exist are checked the same way, against the symbol that backs them.
 
 ## Integration-lane invariants (target lane)
 
-- **The target lane does not re-gate the combined destination state.** The engineering lane will not
-  merge a branch whose base moved without rebasing and re-running the gate over the combined state,
-  and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4936`<!--cite:postIntegrationRegate-->). The target build lane
-  does not carry that invariant: it gates its isolated target branch once and then merges it into
-  the declared destination without a post-integration re-gate. *Bounded:* it is an opt-in path that
-  runs against the target's own repo and still gates before merging. *Matters when:* the destination
-  branch advances during the build — the merged result is then a combination nothing ever tested.
-  Porting the engineering lane's terminal to the target lane is the fix.
+- **Both integration terminals re-gate the exact combined destination state.** The engineering
+  lane will not merge a branch whose base moved without rebasing and re-running the gate over the
+  combined state, and recovers a push race the same way
+  (`packages/core/src/beats/dispatch.ts:4936`<!--cite:postIntegrationRegate-->). The target lane now
+  re-reads its declared default branch, replays onto a moved tip, constructs and gates the exact
+  no-fast-forward candidate, then updates the local destination with an expected-old-SHA
+  compare-and-swap (`packages/core/src/beats/dispatch.ts:2735`). A CAS loss repeats that bounded
+  replay → candidate → gate cycle; conflicts or a red combined-state gate park instead of merging.
+  *Bounded:* unlike the engineering terminal, the target terminal publishes only the target's
+  **local** default-branch ref; syncing that target repository to a remote remains outside this
+  lane. *Matters when:* a workflow expects the target merge to appear remotely without a separate,
+  operator-controlled push.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
@@ -211,12 +214,6 @@ says exist are checked the same way, against the symbol that backs them.
   continuing in the worker's context. The honest framing: mid-flight re-planning is a capability an
   in-context orchestrator has and this one trades away for durability — see
   [method](method.md#orchestrator-workers--with-the-orchestrator-as-a-fold-not-a-context-window).
-
-- **Target merges do not yet have an engineering-style post-integration re-gate.** The target lane
-  gates the build worktree, then merges it into the target default branch. If that destination moved
-  since the build branched, git combines the changes but the target gate is not re-run over the
-  combined result. Target repos that accept concurrent destination writes should keep merge
-  serialization outside the plane until this lane gains the same rebase → re-gate invariant.
 
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
