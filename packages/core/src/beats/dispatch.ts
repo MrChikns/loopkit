@@ -2795,6 +2795,33 @@ async function finalizeTargetBuild(
       ]);
       return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
     }
+    // The command is allowed to be an arbitrary repository-local script. A nominal zero exit
+    // is not proof that it left the exact candidate intact: it may check out another ref or
+    // modify/stage tracked files as a side effect. Publication is permitted only while HEAD is
+    // still the candidate that was gated and its tracked index/worktree remain clean.
+    const postGateHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wtPath, stdio: 'pipe' });
+    const observedGateHead = postGateHead.status === 0 ? postGateHead.stdout.toString().trim() : '';
+    const postGateStatus = spawnSync(
+      'git',
+      ['status', '--porcelain', '--untracked-files=no'],
+      { cwd: wtPath, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER },
+    );
+    const trackedGateResidue = postGateStatus.stdout.toString().trim();
+    if (observedGateHead !== candidate.commit || postGateStatus.status !== 0 || trackedGateResidue) {
+      const reason = observedGateHead !== candidate.commit
+        ? `target exact merge-candidate gate moved HEAD from ${candidate.commit} to ${
+          observedGateHead || '(unresolvable)'
+        }`
+        : `target exact merge-candidate gate left tracked worktree/index changes: ${
+          trackedGateResidue.split('\n').slice(0, 5).join('; ') || 'git status failed'
+        }`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
     integrationBase = destinationSha;
     finalGateReason = `${destinationAdvanced ? 'post-integration' : 'exact merge-candidate'} green: ${exactGate.reason}`;
 
@@ -2857,7 +2884,7 @@ async function finalizeTargetBuild(
 
   // TRUST-HARDENING: actual-diff evidence for the target-lane merge.
   const targetEvidence = mergeEvidence(integrationBase, mergeCommit, targetChangedFiles, manifest.gateCommand);
-  await appendEvents(opts.ledgerDir, [
+  const mergeEvents: ReturnType<typeof makeEvent>[] = [
     makeEvent('dispatch', rec.id, 'gate.passed', { tests: finalGateReason }),
     makeEvent('dispatch', rec.id, 'build.finished', { commit: mergeCommit }),
     // WI-176: `deployed: false` at merge, on EVERY lane. This used to be
@@ -2872,7 +2899,13 @@ async function finalizeTargetBuild(
       deployConfigured: Boolean(manifest.deployCommand),
       ...targetEvidence,
     }),
-  ]);
+  ];
+  if (publishWarning) {
+    mergeEvents.push(makeEvent('dispatch', rec.id, 'msg.out', {
+      text: `Target publication warning: ${publishWarning}`,
+    }));
+  }
+  await appendEvents(opts.ledgerDir, mergeEvents);
   // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
   // (never queued) against the SAME target the partial slice shipped to.
   if (targetDeferred) {
@@ -2888,10 +2921,17 @@ async function finalizeTargetBuild(
     repoRoot: gitRoot,
     deployCommand: manifest.deployCommand,
     wiIds: [rec.id],
+    ...(!closeResult.checkoutSynced && manifest.deployCommand
+      ? {
+        preflightFailure:
+          `deploy handoff blocked: target '${manifest.name}' published ${mergeCommit}, but its primary checkout ` +
+          `could not synchronize without overwriting an intervening editor write; no deploy command was launched`,
+      }
+      : {}),
   });
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
-    eventsWritten: 3 + deploy.eventsWritten,
+    eventsWritten: mergeEvents.length + deploy.eventsWritten,
     detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})${
       publishWarning ? `; ${publishWarning}` : ''
     }`,

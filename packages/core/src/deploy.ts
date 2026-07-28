@@ -22,6 +22,13 @@ export interface DeployRequest {
   deployCommand: string;
   wiIds: string[];
   spawnDeploy?: DeploySpawn;
+  /**
+   * A caller-side handoff precondition failed after merge (for example, the primary
+   * checkout could not be synchronized to the published commit without overwriting an
+   * editor's intervening write). The request receipt is still claimed durably, then closed
+   * as deploy.failed without invoking the command from a checkout known to be stale.
+   */
+  preflightFailure?: string;
   /** Test seam for deterministic persistence-failure coverage. */
   persistEvents?: typeof appendEvents;
 }
@@ -143,6 +150,20 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
       started: false,
       eventsWritten: 0,
       reason: 'deploy request already terminal or lacks current configuration evidence',
+    };
+  }
+
+  if (request.preflightFailure) {
+    const failure = await persistPendingDeployFailureIfStillPending(
+      request,
+      launchIds,
+      request.preflightFailure,
+    );
+    return {
+      configured: true,
+      started: false,
+      eventsWritten: claim.claimed.length + failure.eventsWritten,
+      reason: failure.reason,
     };
   }
 

@@ -79,6 +79,15 @@ function gateRunCount(counterPath: string): number {
   return existsSync(counterPath) ? readFileSync(counterPath, 'utf8').length : 0;
 }
 
+function installShaRecordingGate(targetRoot: string, counterPath: string, shaPath: string): void {
+  const manifestPath = join(targetRoot, 'loopkit.target.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+  manifest.gateCommand = `printf x >> ${counterPath}; git rev-parse HEAD > ${shaPath}`;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  git(targetRoot, ['add', 'loopkit.target.json']);
+  git(targetRoot, ['commit', '-m', 'test: install sha-recording gate']);
+}
+
 function testConfig(overrides: Partial<LoopkitConfig> = {}): LoopkitConfig {
   return { ...CONFIG_DEFAULTS, promptsDir: '.ai/loops/prompts', notifyHook: '.ai/notify-phone.sh', ...overrides };
 }
@@ -575,9 +584,10 @@ test('target lane: destination advance rebases and re-gates combined state befor
     const targetRoot = join(base, 'notes');
     const ledgerDir = join(base, 'ledger');
     const gateCounter = join(base, 'gate-count');
+    const gateSha = join(base, 'gate-sha');
     makePlaneRepo(planeRoot);
     makeNotesTargetRepo(targetRoot);
-    installCountingGate(targetRoot, gateCounter);
+    installShaRecordingGate(targetRoot, gateCounter, gateSha);
 
     const manifest = readTargetManifest(targetRoot);
     const originalBase = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
@@ -651,9 +661,10 @@ test('target lane: publication-boundary CAS loss recomputes and re-gates the exa
     const targetRoot = join(base, 'notes');
     const ledgerDir = join(base, 'ledger');
     const gateCounter = join(base, 'gate-count');
+    const gateSha = join(base, 'gate-sha');
     makePlaneRepo(planeRoot);
     makeNotesTargetRepo(targetRoot);
-    installCountingGate(targetRoot, gateCounter);
+    installShaRecordingGate(targetRoot, gateCounter, gateSha);
 
     const manifest = readTargetManifest(targetRoot);
     await appendEvents(ledgerDir, [
@@ -708,8 +719,158 @@ test('target lane: publication-boundary CAS loss recomputes and re-gates the exa
     assert.equal(git(targetRoot, ['cat-file', '-e', 'main:src/extra.js']).status, 0);
     const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-188');
     assert.ok(merged);
-    assert.equal((merged!.data as { baseSha?: string }).baseSha, concurrentSha,
+    const evidence = merged!.data as { baseSha?: string; headSha?: string; changedFiles?: string[] };
+    assert.equal(evidence.baseSha, concurrentSha,
       'evidence names the destination SHA used to construct and gate the winning candidate');
+    assert.equal(evidence.headSha, git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(),
+      'merge evidence head is the exact published candidate');
+    assert.deepEqual(evidence.changedFiles, ['src/extra.js'],
+      'merge evidence attributes only this candidate diff');
+    assert.equal(readFileSync(gateSha, 'utf8').trim(), evidence.headSha,
+      'the final gate observed the exact SHA that publication and evidence name');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('target lane: an exact-candidate gate that moves HEAD is parked and never published', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-gate-mutates-head-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const gateMarker = join(base, 'gate-first-run');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const originalMain = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+    const manifestPath = join(targetRoot, 'loopkit.target.json');
+    const rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    rawManifest['gateCommand'] =
+      `if test -f ${gateMarker}; then git checkout loop-wi-190-a1; else touch ${gateMarker}; fi`;
+    writeFileSync(manifestPath, JSON.stringify(rawManifest, null, 2) + '\n', 'utf8');
+    git(targetRoot, ['add', 'loopkit.target.json']);
+    git(targetRoot, ['commit', '-m', 'test: install head-moving gate']);
+    const manifest = readTargetManifest(targetRoot);
+    const expectedBase = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+    assert.notEqual(expectedBase, originalMain);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }),
+      makeEvent('cli', 'WI-190', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }),
+      makeEvent('cli', 'WI-190', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 20;\n' }],
+      manifest: {
+        wi: 'WI-190',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-190): add marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-190');
+    assert.equal(rec?.state, 'parked');
+    assert.match(rec?.parkReason ?? '', /gate moved HEAD/);
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), expectedBase,
+      'the destination must not publish a candidate the gate stopped observing');
+    assert.equal(events.some(e => e.item === 'WI-190' && e.type === 'item.merged'), false);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('target lane: editor write after publication blocks deploy from stale primary and records failed handoff', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-publish-editor-deploy-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const deployMarker = join(base, 'deploy-ran');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifestPath = join(targetRoot, 'loopkit.target.json');
+    const rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    rawManifest['deployCommand'] = `printf launched > ${deployMarker}`;
+    writeFileSync(manifestPath, JSON.stringify(rawManifest, null, 2) + '\n', 'utf8');
+    git(targetRoot, ['add', 'loopkit.target.json']);
+    git(targetRoot, ['commit', '-m', 'test: configure deploy']);
+    const manifest = readTargetManifest(targetRoot);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }),
+      makeEvent('cli', 'WI-189', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }),
+      makeEvent('cli', 'WI-189', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 19;\n' }],
+      manifest: {
+        wi: 'WI-189',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-189): add marker',
+      },
+    });
+
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+      targetBeforePublish: () => {
+        // closeMergedCluster has detached the clean primary checkout at this boundary.
+        // This editor write must survive, and ordinary checkout must refuse to overwrite it.
+        writeFileSync(join(targetRoot, 'src', 'extra.js'), '// editor draft\n', 'utf8');
+      },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-189');
+    assert.equal(rec?.state, 'merged', 'publication truth remains merged');
+    assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(), rec?.mergeCommit,
+      'the destination ref names the exact published commit');
+    assert.equal(readFileSync(join(targetRoot, 'src', 'extra.js'), 'utf8'), '// editor draft\n',
+      'the editor write is preserved in the unsynchronized primary checkout');
+    assert.equal(existsSync(deployMarker), false, 'deploy must not launch from the stale primary checkout');
+    assert.deepEqual(
+      events.filter(e => e.item === 'WI-189' && e.type.startsWith('deploy.')).map(e => e.type),
+      ['deploy.requested', 'deploy.failed'],
+      'the blocked handoff is durable and terminal, never left pending',
+    );
+    assert.equal(rec?.deployStatus, 'failed');
+    assert.match(rec?.deployFailureReason ?? '', /primary checkout could not synchronize/);
+    assert.ok(events.some(e =>
+      e.item === 'WI-189' &&
+      e.type === 'msg.out' &&
+      /ordinary checkout preserved an intervening edit/.test((e.data as { text?: string }).text ?? '')
+    ), 'the unsynchronized primary checkout warning is durable and operator-visible');
+    assert.equal(rec?.deployed, false);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
