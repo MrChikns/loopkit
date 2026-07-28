@@ -117,6 +117,8 @@ export interface ItemClaim {
   ttlMinutes: number;
 }
 
+export type DeployLifecycleStatus = 'not-configured' | 'pending' | 'succeeded' | 'failed' | 'timed-out';
+
 export interface ItemRecord {
   id: string;          // WI-NNN
   state: ItemState;
@@ -332,6 +334,14 @@ export interface ItemRecord {
    */
   transientRequeueCount?: number;
   mergeCommit?: string;
+  /**
+   * Additive deploy lifecycle truth. `deployed` remains the compatibility boolean:
+   * only `succeeded` maps to true; every other observed lifecycle state maps to false.
+   */
+  deployStatus?: DeployLifecycleStatus;
+  deployRequestedAt?: string;
+  deployCompletedAt?: string;
+  deployFailureReason?: string;
   deployed?: boolean;
   /**
    * TRUST-HARDENING: actual-diff evidence folded from item.merged (additive; absent on legacy
@@ -775,6 +785,45 @@ export function isItemTerminal(rec: Pick<ItemRecord, 'state'>): boolean {
 }
 
 /**
+ * Deploy receipts are data-only: they never transition the delivery state and never roll back
+ * a merge. Latest receipt wins, including a late success after a timed-out request.
+ */
+function foldDeployLifecycle(
+  rec: ItemRecord,
+  type: LedgerEvent['type'],
+  d: Record<string, unknown>,
+  ts: string,
+): void {
+  switch (type) {
+    case 'deploy.requested':
+      rec.deployStatus = 'pending';
+      rec.deployRequestedAt = ts;
+      rec.deployCompletedAt = undefined;
+      rec.deployFailureReason = undefined;
+      rec.deployed = false;
+      break;
+    case 'deploy.succeeded':
+      rec.deployStatus = 'succeeded';
+      rec.deployCompletedAt = ts;
+      rec.deployFailureReason = undefined;
+      rec.deployed = true;
+      break;
+    case 'deploy.failed':
+      rec.deployStatus = 'failed';
+      rec.deployCompletedAt = ts;
+      rec.deployFailureReason = typeof d['reason'] === 'string' ? d['reason'] : 'deploy failed';
+      rec.deployed = false;
+      break;
+    case 'deploy.timed-out':
+      rec.deployStatus = 'timed-out';
+      rec.deployCompletedAt = ts;
+      rec.deployFailureReason = typeof d['reason'] === 'string' ? d['reason'] : 'deploy timed out';
+      rec.deployed = false;
+      break;
+  }
+}
+
+/**
  * Optional fold inputs. The fold stays pure — config never reaches it directly; callers
  * that hold a plane config pass the relevant keys in here.
  */
@@ -995,11 +1044,11 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           rec.reopenReason = typeof d['reason'] === 'string' ? d['reason'] : undefined;
           clearParkFields(rec);
           break;
+        case 'deploy.requested':
         case 'deploy.succeeded':
-          rec.deployed = true;
-          break;
         case 'deploy.failed':
-          rec.deployed = false;
+        case 'deploy.timed-out':
+          foldDeployLifecycle(rec, ev.type, d, ev.ts);
           break;
         case 'item.briefed':
           // Store the scout brief even on already-merged items (latest wins; harmless).
@@ -1182,6 +1231,10 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         rec.mergedAt = ev.ts;
         rec.mergeCommit = typeof d['commit'] === 'string' ? d['commit'] : undefined;
         rec.deployed = typeof d['deployed'] === 'boolean' ? d['deployed'] : undefined;
+        rec.deployStatus = rec.deployed === true ? 'succeeded' : 'not-configured';
+        rec.deployRequestedAt = undefined;
+        rec.deployCompletedAt = rec.deployed === true ? ev.ts : undefined;
+        rec.deployFailureReason = undefined;
         foldMergeEvidence(rec, d);
         clearParkFields(rec);
         rec.transientFailCount = 0;
@@ -1394,12 +1447,11 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         rec.lastTransientError = typeof d['reason'] === 'string' ? d['reason'] : 'unknown';
         break;
 
+      case 'deploy.requested':
       case 'deploy.succeeded':
-        rec.deployed = true;
-        break;
-
       case 'deploy.failed':
-        rec.deployed = false;
+      case 'deploy.timed-out':
+        foldDeployLifecycle(rec, ev.type, d, ev.ts);
         break;
 
       // item.respec — an operator reply steered the work; amend the spec in place.

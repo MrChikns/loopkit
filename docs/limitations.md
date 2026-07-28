@@ -60,7 +60,7 @@ says exist are checked the same way, against the symbol that backs them.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:1023`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1027`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -91,7 +91,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:882`<!--cite:openBuildWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:884`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -100,7 +100,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3217`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3326`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -110,44 +110,26 @@ says exist are checked the same way, against the symbol that backs them.
   miss its heartbeats — detection is a `build.dispatched` sitting next to a recent operator
   `item.claimed` in the same item's trail.
 
-- **`lane-matrix.md` does not track either of the invariants that actually differ between lanes.** The
-  generated guard matrix pins `Touches`-overstep, spine, judge, scout, push, commit side and the gate
-  wrapper — but it has **no claim-arbitration column and no post-integration-re-gate column**. Those
-  are exactly the two things the three preceding entries are about, so the drift test that protects the
-  matrix cannot catch a regression in either. *Bounded:* both are described here and in
-  [plane-flows](plane-flows.md) Plate 07, and neither is currently claimed to be present. *Matters
-  when:* one lane gains or loses the invariant silently — the matrix will keep rendering green while
-  the property it does not model changes underneath it. Adding the two columns is the fix, and it is
-  the same shape as every existing column.
-
-- **Recovery does `reset --hard origin/master` with no clean-tree guard**
-  (`packages/core/src/beats/dispatch.ts:4629`<!--cite:pushRaceReset-->). The push-race recovery path
-  force-resets the primary tree without first checking for uncommitted work. *Bounded:* it runs on a
-  tree the plane owns and expects to be disposable. *Matters when:* a recovery fires against a tree
-  that unexpectedly holds unsaved state — that state is lost. A `git status --porcelain` guard (bail if
-  dirty in an unexpected way) closes it.
-
 ## Deploy signalling
 
-- **Nothing verifies that a deploy script ever reports** (WI-176 closed the older, worse half of
-  this). `item.merged.deployed` is now uniformly `false` on every lane — a merge observes that code
-  landed, never that it deployed — and `deploy.succeeded` / `deploy.failed`, appended by the
-  detached deploy script itself (it receives `DEPLOY_WI_IDS`), are the sole authority
-  (`packages/core/src/fold.ts:1397`<!--cite:foldDeploySucceeded-->). The plane spawns that script
-  detached, stdio ignored, unreferenced, with no timeout and nothing awaiting it
-  (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). What is *still*
-  missing is a liveness contract on it: a deploy hook that dies before appending either event leaves
-  the item reading "not deployed" forever, which is honest but indistinguishable from "deploy not
-  configured". *Bounded:* deploy is off by default (empty `deployCommand`), merge correctness does not
-  depend on deploy, and the deploy-freshness SLO probe
-  (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) catches a plane-repo deploy that has
-  genuinely stopped shipping. *Matters when:* a per-TARGET deploy hook fails silently — the probe only
-  watches `LOOPKIT_DEPLOY_ROOT`, not each target's own deploy. There is also no rollback path for a
-  `deploy.failed`.
+- **The lifecycle is observed, but the detached process is not controlled.** A configured merge
+  durably appends `deploy.requested` before spawn
+  (`packages/core/src/deploy.ts:38`<!--cite:requestDeployOnMerge-->), and the fold distinguishes
+  `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; compatibility `deployed`
+  is true only for success (`packages/core/src/fold.ts:805`<!--cite:foldDeploySucceeded-->).
+  A synchronous spawn error becomes `failed`, while a silent hook becomes `timed-out` after the
+  configured deploy-freshness hour
+  (`packages/core/src/deploy.ts:81`<!--cite:stalePendingDeployEvents-->). The process is still
+  detached and unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->):
+  timeout records truth but does not kill a surviving process, and a late terminal receipt may
+  supersede it. *Bounded:* deploy is off by default, merge correctness does not depend on deploy,
+  and the deploy-freshness SLO (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains a
+  checkout-level backstop. *Matters when:* a per-target hook is wedged — the item receipt exposes
+  the timeout, but the filesystem probe still watches only `LOOPKIT_DEPLOY_ROOT`.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all
-  (`packages/core/src/fold.ts:721`<!--cite:certificationRollback-->). Nothing in the plane executes it —
+  (`packages/core/src/fold.ts:731`<!--cite:certificationRollback-->). Nothing in the plane executes it —
   it is written for a human to read and run. *Bounded:* that is the intended contract; an automated
   rollback with no verification step would be a worse failure mode than a recorded instruction.
   *Matters when:* you assumed "certified" implied a mechanism rather than a note.
@@ -228,7 +210,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1310`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1330`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the
@@ -242,7 +224,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
   page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
   `item.respec`, which amends the item's `spec` *and* its acceptance criteria
-  (`packages/core/src/fold.ts:1411`<!--cite:foldRespec-->) — the fields builders and the judge are
+  (`packages/core/src/fold.ts:1463`<!--cite:foldRespec-->) — the fields builders and the judge are
   given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
   rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
   does not linger. *What remains:* the original capture text is still on the trail and still the right

@@ -365,10 +365,10 @@ export interface ItemMergedData {
   /**
    * WI-176 — ONE semantic across every lane: **always `false` at merge time.** A merge observes
    * that code landed on a branch; it never observes a deploy. Deploy truth arrives out of band —
-   * `fireDeployOnMerge` spawns the deploy DETACHED with `DEPLOY_WI_IDS`, and the deploy script
-   * appends `deploy.succeeded` / `deploy.failed`, which the fold applies to `ItemRecord.deployed`.
-   * Those events are the SOLE authority; the `deployBehindHours` SLO probe (git-based, default 1h)
-   * is the backstop for a deploy script that never reports at all.
+   * `requestDeployOnMerge` first appends `deploy.requested`, then spawns the deploy DETACHED with
+   * `DEPLOY_WI_IDS`. The deploy script appends `deploy.succeeded` / `deploy.failed`; a reactor beat
+   * converts a request that never reports before `deployBehindHours` into `deploy.timed-out`.
+   * Those lifecycle events are the SOLE authority for deploy truth.
    *
    * Two lanes used to contradict the rest of the same board: the targeted merge paths (dispatch's
    * target lane, the reactor's target approve-merge) wrote `!!manifest.deployCommand` — true
@@ -713,8 +713,10 @@ export interface GateParkedData { reason: string }
 export interface MergeTransientFailData { reason: string; transientCount: number }
 
 // deploy domain
+export interface DeployRequestedData {}
 export interface DeploySucceededData { commit?: string }
 export interface DeployFailedData { reason: string; stderr?: string }
+export interface DeployTimedOutData { reason: string; requestedAt: string }
 
 // review domain
 export interface ReviewFindingData { [key: string]: unknown }
@@ -871,8 +873,10 @@ export type EventDataMap = {
   'conv.closed': ConvClosedData;
   'target.registered': TargetRegisteredData;
   'target.manifest-updated': TargetManifestUpdatedData;
+  'deploy.requested': DeployRequestedData;
   'deploy.succeeded': DeploySucceededData;
   'deploy.failed': DeployFailedData;
+  'deploy.timed-out': DeployTimedOutData;
   'msg.in': MsgInData;
   'msg.out': MsgOutData;
   'build.dispatched': BuildDispatchedData;
@@ -932,7 +936,7 @@ const KNOWN_TYPES = new Set<string>([
   'build.cancel-requested', 'build.cancelled', 'build.superseded',
   'gate.passed', 'gate.failed', 'gate.parked',
   'merge.transient-fail',
-  'deploy.succeeded', 'deploy.failed',
+  'deploy.requested', 'deploy.succeeded', 'deploy.failed', 'deploy.timed-out',
   'review.finding', 'review.verdict',
   'slo.breach', 'slo.recovered', 'cost.usage', 'loop.beat', 'quota.snapshot',
   'heal.proposed', 'heal.executed', 'heal.verified', 'heal.escalated', 'heal.graduated', 'heal.shadowed',

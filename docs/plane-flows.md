@@ -100,14 +100,17 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2211`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2231`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2670`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2779`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
-  target's default branch. It runs serially and never touches the plane's batch machinery.
+  target's default branch. It runs serially and never touches the plane's batch machinery. At the
+  merge terminal it re-reads that default branch; if it moved, the target lane rebases, recomputes
+  the build's actual changed files and re-runs the target gate over the combined state
+  (`packages/core/src/beats/dispatch.ts:2623`<!--cite:targetPostIntegrationRegate-->).
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
-  spine guard, a push step, and the post-integration re-gate.
+  spine guard and a push step; it shares the post-integration re-gate invariant with target.
 - An **attended drain** is not a fourth lane. When you drive the plane by hand, a coordinator agent
   claims items through the same lease kernel ([ADR-007](decisions/ADR-007-claim-arbitration.md)),
   builds them in worktrees and lands `item.merged` on the same board. There is no separate code path
@@ -116,9 +119,6 @@ span and pinned by its own drift test. If this prose and that table disagree, th
   the `Touches` clustering it offered lives on in the engineering lane as batch co-location, though
   today that is reachable only for untargeted items — the target lane above builds serially and never
   calls it (see ADR-013's amendment).
-- 🟠 The target lane still lacks the post-integration re-gate. Recorded in
-  [limitations](limitations.md).
-
 ---
 
 ## Plate 03 — Reactor: routing, and the one place work gets sliced
@@ -159,7 +159,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1411`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1463`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -196,14 +196,14 @@ flowchart TD
 **Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
 claimed in that window, and claims every survivor in the same locked append before spawning anything
-(`packages/core/src/beats/dispatch.ts:459`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
+(`packages/core/src/beats/dispatch.ts:461`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
 Both picking lanes — engineering and target — go through that one terminal, under one per-beat
 pseudo-session, so the reservation cannot drift between them (WI-186).
 That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3197`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3306`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
@@ -226,7 +226,7 @@ per-item backoff; they do not trip this shared provider breaker.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3317`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3426`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
   selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
@@ -264,16 +264,16 @@ flowchart TD
 ```
 
 - **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
-  it automatically the moment the blocker **merges or is accepted**
-  (`packages/core/src/beats/reactor.ts:2162`<!--cite:blockedVictimRelease-->). The plane creates these
+  it automatically the moment the blocker **merges**
+  (`packages/core/src/beats/reactor.ts:2164`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
-- **A terminal blocker that never merges does not strand the victim silently.** After
-  **24**<!--pin:blockedWaitTimeoutHours--> hours parked, a victim whose blocker is rejected, answered,
-  done, or missing is re-parked as a `decision` with the blocker's state attached. Live, planning,
-  and recovering blockers keep waiting; a held/decision blocker is already the one actionable row,
-  so the victim points at it without duplicating the decision
-  (`packages/core/src/beats/reactor.ts:2186`<!--cite:blockedVictimTimeout-->).
+- **A blocker that cannot merge does not strand the victim silently.** If the blocker is missing
+  from the ledger or has reached a terminal state without merging, the victim is re-parked as a
+  `decision` after **24**<!--pin:blockedWaitTimeoutHours--> hours with the blocker's state attached.
+  A live, recovering, planning, held or decision-blocked repair keeps waiting and points you to the
+  blocker; age alone does not create a second decision
+  (`packages/core/src/beats/reactor.ts:2188`<!--cite:blockedVictimTimeout-->).
 - **A hold is not a failure.** `parked/hold` never enters pathology, never ages into Stuck, and
   never moves automatically. Stuck means a breaker-tripped ops park or build execution with no
   transition for more than six hours; decision, decomposition, queue wait, and ordinary ops
@@ -322,13 +322,13 @@ behind it.
 
 **Two different scopes, easily confused.** What dispatch is willing to **commit** is the union of the
 item's declared `Touches` prefixes and the exact paths the worker reported in its manifest
-(`packages/core/src/beats/dispatch.ts:1468`<!--cite:planScopedCommit-->) — anything else stays
+(`packages/core/src/beats/dispatch.ts:1488`<!--cite:planScopedCommit-->) — anything else stays
 uncommitted and is reported as residue. What counts as an **overstep** is narrower: a changed file
 outside the declared prefixes, minus a test-file exemption and minus paths you previously approved
-(`packages/core/src/beats/dispatch.ts:1425`<!--cite:checkTouchesOverstep-->). The worker may also propose
+(`packages/core/src/beats/dispatch.ts:1445`<!--cite:checkTouchesOverstep-->). The worker may also propose
 the commit subject; dispatch uses it verbatim when present.
 
-**The spine guard** (`packages/core/src/beats/dispatch.ts:1347`<!--cite:checkSpine-->) parks any diff
+**The spine guard** (`packages/core/src/beats/dispatch.ts:1367`<!--cite:checkSpine-->) parks any diff
 touching the plane's own configured spine pattern for your decision. It is an engineering-lane guard
 — a target repo has no plane-spine concept.
 
@@ -367,7 +367,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4009`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4118`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -403,18 +403,22 @@ flowchart TD
   class P1,RG stop
 ```
 
-- The invariant: **no build reaches master without a gate covering every commit that landed since its
-  branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4443`<!--cite:postIntegrationRegate-->).
+- The invariant: **no build reaches its destination without a gate covering every commit that landed
+  since its branch point**, including parallel merges from the same beat
+  (`packages/core/src/beats/dispatch.ts:4552`<!--cite:postIntegrationRegate-->).
+- The target lane applies the same invariant with its own manifest gate: re-read destination,
+  rebase, recompute evidence, then re-gate. It never re-runs the advisory judge.
 - The push race is a *second*, later collision — master moved between the local merge and the push.
-  Recovery re-fetches, hard-resets the primary tree onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4629`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  Recovery re-fetches, verifies that the primary checkout has no staged, unstaged, or untracked
+  operator state, then hard-resets it onto the new tip
+  (`packages/core/src/beats/dispatch.ts:4742`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4655`<!--cite:pushRaceRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4768`<!--cite:pushRaceRegate-->). A dirty checkout stops the
+  recovery and records exact porcelain path evidence instead of discarding it.
 - Every failure here is a park, never a force. A conflict or a red re-gate stops the item; nothing is
   merged past a disagreement.
-- 🟠 This whole plate is engineering-lane only. See [limitations](limitations.md) for the target
-  lane.
+- Push and push-race recovery remain engineering-lane-only; target repos currently integrate
+  locally into their declared default branch.
 
 ---
 
@@ -469,11 +473,8 @@ and are promoted only by a manual config change after burn-in.
 
 - **The plane files its own bugs.** When the pathologist classifies a park as a plane infrastructure
   bug it allocates a new work item, queues it, and blocks the victim on it
-  (`packages/core/src/beats/reactor.ts:2408`<!--cite:repairItemCapture-->). That never reaches your desk
+  (`packages/core/src/beats/reactor.ts:2410`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
-- **Deliberate parks never reach the pathologist.** `hold`, `decision`, and `decomposition` are
-  excluded before any diagnosis-provider call. Legacy unstamped parks remain eligible so old
-  failure history fails safe.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every autonomy-enabled reactor beat: orphaned-build detection,
@@ -485,11 +486,11 @@ and are promoted only by a manual config change after burn-in.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3156`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3265`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:2951`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:3060`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
@@ -568,19 +569,21 @@ identity, no approval event, no RBAC. See [limitations](limitations.md).
 
 ## Plate 10 — After the merge: deploy
 
-Merging is where the plane's guarantees stop. Everything past this point is observational, and the
-honest version of this plate is mostly a list of things that are not checked.
+Merging is where the plane hands off to deployment. The deploy stays detached and project-specific,
+but its request and terminal outcome are durable plane facts.
 
 ```mermaid
 flowchart TD
   M(["item.merged"]) --> F{"deploy command<br/>configured?"}
-  F -->|no| FIN(["done"])
-  F -->|yes| SP["spawn detached<br/><small>no wait, no timeout</small>"]
+  F -->|no| FIN(["not-configured"])
+  F -->|yes| REQ["append deploy.requested<br/><small>pending</small>"]
+  REQ --> SP["spawn detached<br/><small>no wait</small>"]
+  SP -->|sync spawn error| BAD["failed"]
   SP --> SCRIPT["your deploy script"]
-  SCRIPT -->|appends deploy.succeeded| OK["rec.deployed = true"]
-  SCRIPT -->|appends deploy.failed| BAD["rec.deployed = false"]
-  SCRIPT -.->|says nothing| SILENT["indistinguishable<br/>from success"]
-  SILENT -.-> SLO["deploy-freshness SLO<br/><small>the only backstop</small>"]
+  SCRIPT -->|appends deploy.succeeded| OK["succeeded<br/><small>deployed = true</small>"]
+  SCRIPT -->|appends deploy.failed| BAD["failed<br/><small>deployed = false</small>"]
+  SCRIPT -.->|no receipt for 1h| TIME["timed-out<br/><small>deployed = false</small>"]
+  TIME -.-> SLO["deploy-freshness SLO"]
   SLO -->|breach| NOTE["notifies you"]
 
   classDef term fill:#111820,stroke:#111820,color:#ffffff
@@ -589,32 +592,38 @@ flowchart TD
   classDef hold fill:#FBF0DF,stroke:#9C5A06,color:#111820
   classDef stop fill:#FAEAE8,stroke:#9E2B20,color:#111820
   class M,FIN term
-  class SP,SLO step
+  class REQ,SP,SLO step
   class OK pass
   class NOTE hold
-  class BAD,SILENT stop
+  class BAD,TIME stop
 ```
 
-- **The deploy is fire-and-forget by construction.** It is spawned detached, with stdio ignored,
-  unreferenced, with no timeout and nothing awaiting it
-  (`packages/core/src/beats/worktree-deps.ts:400`<!--cite:fireDeployOnMerge-->). The plane passes the
-  merged item ids in the environment; **your** script is what appends `deploy.succeeded` or
+- **The request is durable before process hand-off.** The plane appends `deploy.requested` for every
+  merged item, awaits that write, and only then spawns
+  (`packages/core/src/deploy.ts:38`<!--cite:requestDeployOnMerge-->). A synchronous spawn error
+  immediately appends `deploy.failed`.
+- **The process remains fire-and-forget by construction.** It is detached, stdio ignored and
+  unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->). The
+  merged item ids arrive through `DEPLOY_WI_IDS`; **your** script appends `deploy.succeeded` or
   `deploy.failed`.
-- Those events do exactly one thing when they arrive: set the item's `deployed` flag
-  (`packages/core/src/fold.ts:1397`<!--cite:foldDeploySucceeded-->). Nothing branches on it.
+- The fold exposes five honest states: `not-configured`, `pending`, `succeeded`, `failed` and
+  `timed-out`. The compatibility `deployed` boolean is true only for `succeeded`
+  (`packages/core/src/fold.ts:805`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
+  none changes the item's merged/accepted state.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
   authority. It carried opposite meanings in two lanes until WI-176 — the target lane wrote
   `true` whenever a deploy command was merely *configured* — so a board read before that fix could
   not be trusted on this field.
-- 🟠 **A deploy script that never reports is indistinguishable from one that succeeded**, at the item
-  level. The only thing that notices is a deploy-freshness SLO row
-  (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->): the deployed checkout may lag master by
-  **1**<!--pin:deployBehindHours--> hour, amber at **0.8**<!--pin:atRiskFraction--> of that. A breach
-  is edge-triggered and **notifies** — it does not park the item, and it does not withhold its
-  acceptance. It also needs a deploy root configured; without one the row reads `unknown`.
+- **A silent script becomes an explicit timeout.** Each reactor beat closes a `pending` request
+  after **1**<!--pin:deployBehindHours--> hour
+  (`packages/core/src/deploy.ts:81`<!--cite:stalePendingDeployEvents-->), deterministically and once.
+  A late success can still supersede that timeout. The separate deploy-freshness SLO
+  (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains the checkout-level backstop,
+  amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
+  `unknown`.
 - ⚪ **There is no automatic rollback anywhere.** A merge's `certification.rollback` is a string the
-  worker wrote and you read (`packages/core/src/fold.ts:721`<!--cite:certificationRollback-->). Nothing
+  worker wrote and you read (`packages/core/src/fold.ts:731`<!--cite:certificationRollback-->). Nothing
   executes it.
 
 ---

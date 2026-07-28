@@ -16,6 +16,7 @@
 export * from './schema.js';
 export * from './ledger.js';
 export * from './fold.js';
+export * from './deploy.js';
 
 // Projections
 export * from './board.js';

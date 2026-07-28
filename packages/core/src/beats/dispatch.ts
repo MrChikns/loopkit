@@ -44,7 +44,8 @@ import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } fr
 import { LlmProvider } from '../providers/types.js';
 import { parseOutput, extractUsage } from '../providers/claudeCli.js';
 import { readExitFile, ExitRecord } from '../exitfile.js';
-import { setupWorktreeDeps, fireDeployOnMerge } from './worktree-deps.js';
+import { setupWorktreeDeps } from './worktree-deps.js';
+import { requestDeployOnMerge } from '../deploy.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
 import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
@@ -2588,9 +2589,6 @@ async function finalizeTargetBuild(
   removeWorktree(gitRoot, wtPath);
   spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
 
-  // Optional per-target deploy — self-locking, detached, against the target repo.
-  if (manifest.deployCommand) fireDeployOnMerge(gitRoot, manifest.deployCommand, [rec.id]);
-
   // TRUST-HARDENING: actual-diff evidence for the target-lane merge.
   const targetChangedFiles = baseSha ? getChangedFiles(gitRoot, baseSha) : [];
   const targetEvidence = mergeEvidence(baseSha, mergeCommit, targetChangedFiles, manifest.gateCommand);
@@ -2600,9 +2598,9 @@ async function finalizeTargetBuild(
     // WI-176: `deployed: false` at merge, on EVERY lane. This used to be
     // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED —
     // asserted before anything was observed, and contradicting the engineering/batch lanes'
-    // `false` on the same board. The deploy fired just above is detached and self-reporting:
-    // `deploy.succeeded` / `deploy.failed` (folded in fold.ts) are the sole authority for this
-    // flag, with the `deployBehindHours` SLO probe as the backstop for a script that never reports.
+    // `false` on the same board. Deploy truth starts only after this merge receipt is durable:
+    // requestDeployOnMerge appends deploy.requested before detached spawn, then the script reports
+    // deploy.succeeded / deploy.failed (or the reactor closes a stale request as timed-out).
     makeEvent('dispatch', rec.id, 'item.merged', { commit: mergeCommit, deployed: false, ...targetEvidence }),
   ]);
   // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
@@ -2614,9 +2612,17 @@ async function finalizeTargetBuild(
       ...(rec.targetId ? { targetId: rec.targetId } : {}),
     }]);
   }
+  const deploy = await requestDeployOnMerge({
+    actor: 'dispatch',
+    ledgerDir: opts.ledgerDir,
+    repoRoot: gitRoot,
+    deployCommand: manifest.deployCommand,
+    wiIds: [rec.id],
+  });
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
-    eventsWritten: 3, detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
+    eventsWritten: 3 + deploy.eventsWritten,
+    detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
   };
 }
 
@@ -4827,10 +4833,19 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       });
     }
 
-    // master advanced → deploy detached (self-locking script; bursts coalesce).
-    if (anyMerged && !opts.dryRun) fireDeployOnMerge(opts.repoRoot, cfg.deployCommand, mergedWiIds);
+    // master advanced → persist pending receipts before detached spawn (bursts coalesce in
+    // the deployment's self-locking command).
+    const deploy = anyMerged && !opts.dryRun
+      ? await requestDeployOnMerge({
+        actor: 'dispatch',
+        ledgerDir: opts.ledgerDir,
+        repoRoot: opts.repoRoot,
+        deployCommand: cfg.deployCommand,
+        wiIds: mergedWiIds,
+      })
+      : { eventsWritten: 0 };
 
-    const totalEventsWritten = results.reduce((s, r) => s + r.eventsWritten, 0);
+    const totalEventsWritten = results.reduce((s, r) => s + r.eventsWritten, 0) + deploy.eventsWritten;
     return { dryRun: false, dispatched: results, totalEventsWritten, ...(lockNote ? { detail: lockNote } : {}) };
   } finally {
     // Commit ledger residue every beat (not just on a clean exit —

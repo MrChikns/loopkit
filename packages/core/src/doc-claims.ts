@@ -188,6 +188,7 @@ const SRC = 'packages/core/src';
 export const SOURCE_PATHS = {
   dispatch: `${SRC}/beats/dispatch.ts`,
   reactor: `${SRC}/beats/reactor.ts`,
+  deploy: `${SRC}/deploy.ts`,
   worktreeDeps: `${SRC}/beats/worktree-deps.ts`,
   config: `${SRC}/config.ts`,
   schema: `${SRC}/schema.ts`,
@@ -548,6 +549,8 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   { id: 'staleClaimReap', file: 'reactor', mustContain: 'reapStaleClaims(' },
 
   // elsewhere
+  { id: 'requestDeployOnMerge', file: 'deploy', mustContain: 'export async function requestDeployOnMerge(' },
+  { id: 'stalePendingDeployEvents', file: 'deploy', mustContain: 'export function stalePendingDeployEvents(' },
   { id: 'fireDeployOnMerge', file: 'worktreeDeps', mustContain: 'export function fireDeployOnMerge(' },
   { id: 'deployProbe', file: 'slo', mustContain: 'export function makeDeployProbe(' },
   { id: 'foldDeploySucceeded', file: 'fold', mustContain: "case 'deploy.succeeded':" },

@@ -390,22 +390,38 @@ export function setupWorktreeDeps(
 
 /**
  * Fire the configured deploy command DETACHED after a successful merge.
- * The command must be self-locking; failures surface via the deploy-age SLO probe,
- * never by blocking the beat.
+ * The command must be self-locking. The lifecycle owner in ../deploy.ts appends
+ * deploy.requested before calling this function and persists a synchronous spawn failure.
  *
  * wiIds: item ids (WI-NNN format) of the items whose merges triggered this deploy — passed
  * as DEPLOY_WI_IDS (space-separated) so the script can append deploy.succeeded /
  * deploy.failed events on the correct items.
  */
-export function fireDeployOnMerge(repoRoot: string, deployCommand: string, wiIds: string[]): void {
-  if (!deployCommand) return;
+export type DeploySpawnResult =
+  | { started: true }
+  | { started: false; reason: string };
+export type DeploySpawn = typeof spawn;
+
+export function fireDeployOnMerge(
+  repoRoot: string,
+  deployCommand: string,
+  wiIds: string[],
+  spawnDeploy: DeploySpawn = spawn,
+): DeploySpawnResult {
+  if (!deployCommand) return { started: false, reason: 'deploy command is not configured' };
   try {
-    const child = spawn('sh', ['-c', deployCommand], {
+    const child = spawnDeploy('sh', ['-c', deployCommand], {
       cwd: repoRoot,
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, DEPLOY_WI_IDS: wiIds.join(' ') },
     });
     child.unref();
-  } catch { /* SLO probe catches a stale deploy */ }
+    return { started: true };
+  } catch (error) {
+    return {
+      started: false,
+      reason: `deploy spawn failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }

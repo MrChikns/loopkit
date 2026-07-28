@@ -218,6 +218,61 @@ test('reactor: dry-run writes nothing to ledger', async () => {
   }
 });
 
+test('reactor: stale pending deploy transitions once to timed-out without rolling back the item', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    const requestedAt = '2026-01-01T00:02:00.000Z';
+    await seedLedger(ledgerDir, [
+      makeEvent('cli', 'WI-099', 'item.captured', { source: 'test', text: 'ship' }, '2026-01-01T00:00:00.000Z'),
+      makeEvent('dispatch', 'WI-099', 'item.merged', { commit: 'abc099', deployed: false }, '2026-01-01T00:01:00.000Z'),
+      makeEvent('operator', 'WI-099', 'item.accepted', { by: 'operator' }, '2026-01-01T00:01:30.000Z'),
+      makeEvent('dispatch', 'WI-099', 'deploy.requested', {}, requestedAt),
+    ]);
+    const config = makeTestConfig({
+      slo: { ...CONFIG_DEFAULTS.slo, deployBehindHours: 1 },
+      acceptance: {
+        ...CONFIG_DEFAULTS.acceptance,
+        tiers: { ...CONFIG_DEFAULTS.acceptance?.tiers, enabled: false },
+      },
+    });
+
+    const first = await runReactor({
+      repoRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: makeFakeProvider(),
+      config,
+    });
+    const timeoutStep = first.steps.find(step => step.step === 'deploy-timeouts');
+    assert.equal(timeoutStep?.eventsWritten, 1);
+
+    let events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'deploy.timed-out' && e.item === 'WI-099').length, 1);
+    let rec = fold(events).items.get('WI-099')!;
+    assert.equal(rec.state, 'accepted', 'deploy timeout is data-only');
+    assert.equal(rec.deployStatus, 'timed-out');
+    assert.equal(rec.deployed, false);
+
+    const second = await runReactor({
+      repoRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: makeFakeProvider(),
+      config,
+    });
+    assert.equal(second.steps.find(step => step.step === 'deploy-timeouts')?.eventsWritten, 0);
+    events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'deploy.timed-out' && e.item === 'WI-099').length, 1,
+      'a later beat must not duplicate the terminal timeout receipt');
+    rec = fold(events).items.get('WI-099')!;
+    assert.equal(rec.state, 'accepted');
+  } finally {
+    cleanDir(ledgerDir);
+    cleanDir(repoRoot);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Routing decision parser — the deterministic wall the router prompt feeds
 // ---------------------------------------------------------------------------
@@ -2966,7 +3021,7 @@ test('reactor: merges approved item in worktree even when primary tree is on a f
       ledgerDir,
       autonomy: 'on',
       provider: null,
-      config: makeTestConfig(), // gateCommand: 'exit 0'
+      config: makeTestConfig({ deployCommand: 'true' }), // gateCommand: 'exit 0'
     });
 
     const allEvents = await loadAllEvents(ledgerDir);
@@ -2979,6 +3034,9 @@ test('reactor: merges approved item in worktree even when primary tree is on a f
     // Explicit event checks
     const merged = allEvents.filter(e => e.type === 'item.merged' && e.actor === 'reactor');
     assert.equal(merged.length, 1, 'reactor must write exactly one item.merged event');
+    assert.equal(allEvents.filter(e => e.type === 'deploy.requested' && e.item === 'WI-999').length, 1,
+      'reactor must persist the pending deploy receipt after item.merged and before detached spawn');
+    assert.equal(foldResult.items.get('WI-999')?.deployStatus, 'pending');
 
     const passed = allEvents.filter(e => e.type === 'gate.passed' && e.actor === 'reactor');
     assert.equal(passed.length, 1, 'reactor must write gate.passed before item.merged');

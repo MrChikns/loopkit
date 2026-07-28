@@ -407,7 +407,11 @@ test('WI-176: a target merge records deployed:false even when the manifest CONFI
     // authority for this flag.
     assert.equal((merged!.data as { deployed?: boolean }).deployed, false,
       'a configured deployCommand is not an observed deploy — item.merged.deployed must be false on every lane');
-    assert.equal(fold(events).items.get('WI-032')?.deployed, false, 'the fold agrees — nothing has reported a deploy yet');
+    assert.equal(events.filter(e => e.type === 'deploy.requested' && e.item === 'WI-032').length, 1,
+      'configured deploy appends a durable pending receipt before detached spawn');
+    const deployedRecord = fold(events).items.get('WI-032');
+    assert.equal(deployedRecord?.deployStatus, 'pending');
+    assert.equal(deployedRecord?.deployed, false, 'pending is not compatibility success');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

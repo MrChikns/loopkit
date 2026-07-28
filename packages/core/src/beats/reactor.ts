@@ -42,7 +42,8 @@ import {
   makePlaneCheckProbe, dispatchWedgeSecFor, SloRow, SloProbes, SloConfig,
 } from '../slo.js';
 import { getRunbook, RunbookContext, resolveHealMode } from '../runbooks.js';
-import { setupWorktreeDeps , fireDeployOnMerge } from './worktree-deps.js';
+import { setupWorktreeDeps } from './worktree-deps.js';
+import { requestDeployOnMerge, stalePendingDeployEvents } from '../deploy.js';
 import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity } from './dispatch.js';
 import { classifyParkForAutoApprove, parseOverstepReason, parseDependencyReason } from '../approval.js';
 import { classifyAcceptanceTier, splitTouches, acceptanceClassifyFiles, hasEvidenceGap } from '../acceptance.js';
@@ -2616,7 +2617,11 @@ function applyApprovedTargetMerge(
   rec: ItemRecord,
   branch: string,
   runDir: string,
-): { events: ReturnType<typeof makeEvent>[]; merged: boolean } {
+): {
+  events: ReturnType<typeof makeEvent>[];
+  merged: boolean;
+  deploy?: { repoRoot: string; deployCommand: string; wiIds: string[] };
+} {
   const events: ReturnType<typeof makeEvent>[] = [];
 
   const resolution = resolveRegisteredTarget(foldResult.targets, rec);
@@ -2818,20 +2823,21 @@ function applyApprovedTargetMerge(
   // Success — clean up the merged branch in the target repo (best-effort).
   spawnSync('git', ['branch', '-D', branch], { cwd: targetRoot, stdio: 'pipe' });
 
-  // Per-target deploy hook only — never the plane's own deployCommand.
-  if (manifest.deployCommand) fireDeployOnMerge(targetRoot, manifest.deployCommand, [rec.id]);
-
   events.push(makeEvent('reactor', rec.id, 'gate.passed', { tests: 'green' }));
   // WI-176: `deployed: false` at merge, on EVERY lane — this used to be
   // `!!manifest.deployCommand`, i.e. true whenever a deploy command was merely CONFIGURED, before
-  // anything was observed. The deploy fired just above is detached and self-reporting:
-  // `deploy.succeeded` / `deploy.failed` are the sole authority for this flag.
+  // anything was observed. The caller durably appends this merge first, then hands off through
+  // deploy.requested before detached spawn; terminal deploy receipts are the sole authority.
   events.push(makeEvent('reactor', rec.id, 'item.merged', {
     commit: mergeSha,
     deployed: false,
     ...(targetMergeEvidence ?? {}),
   }));
-  return { events, merged: true };
+  return {
+    events,
+    merged: true,
+    deploy: { repoRoot: targetRoot, deployCommand: manifest.deployCommand, wiIds: [rec.id] },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2871,6 +2877,7 @@ async function stepApplyVerbs(
     const events: ReturnType<typeof makeEvent>[] = [];
     let mergedThisBeat = false;
     const mergedWiIds: string[] = [];
+    const targetDeploys: Array<{ repoRoot: string; deployCommand: string; wiIds: string[] }> = [];
     let processed = 0;
     const runDir = resolveRunDir(opts);
 
@@ -2887,7 +2894,10 @@ async function stepApplyVerbs(
       if (rec.target) {
         const targetOutcome = applyApprovedTargetMerge(opts, cfg, foldResult, rec, branch, runDir);
         events.push(...targetOutcome.events);
-        if (targetOutcome.merged) processed++;
+        if (targetOutcome.merged) {
+          processed++;
+          if (targetOutcome.deploy) targetDeploys.push(targetOutcome.deploy);
+        }
         continue;
       }
 
@@ -3212,13 +3222,34 @@ async function stepApplyVerbs(
       await appendEvents(opts.ledgerDir, events);
     }
 
-    // An approved merge advanced master → deploy detached (self-locking).
-    if (mergedThisBeat && !opts.dryRun) fireDeployOnMerge(opts.repoRoot, cfg.deployCommand, mergedWiIds);
+    // Deployment hand-off starts only after item.merged is durable. Each helper appends
+    // deploy.requested before detached spawn and records a synchronous spawn failure.
+    let deployEventsWritten = 0;
+    if (!opts.dryRun) {
+      for (const deploy of targetDeploys) {
+        const result = await requestDeployOnMerge({
+          actor: 'reactor',
+          ledgerDir: opts.ledgerDir,
+          ...deploy,
+        });
+        deployEventsWritten += result.eventsWritten;
+      }
+      if (mergedThisBeat) {
+        const result = await requestDeployOnMerge({
+          actor: 'reactor',
+          ledgerDir: opts.ledgerDir,
+          repoRoot: opts.repoRoot,
+          deployCommand: cfg.deployCommand,
+          wiIds: mergedWiIds,
+        });
+        deployEventsWritten += result.eventsWritten;
+      }
+    }
 
     return {
       step,
       ok: true,
-      eventsWritten: events.length,
+      eventsWritten: events.length + deployEventsWritten,
       mdWritten: false,
       detail: `processed ${processed} approved merges`,
     };
@@ -3689,6 +3720,43 @@ async function stepDoctor(
       eventsWritten: events.length + reapEvents.length,
       mdWritten: false,
       detail: `${doctorResult.orphans.length} orphans; ${doctorResult.stalled.length} stalled; ${doctorResult.actions.filter(a => a.type === 'park-breaker').length} breaker trips; ${reapEvents.length} stale claims reaped; ${reapedWt} leaked worktrees reaped`,
+    };
+  } catch (e) {
+    return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
+  }
+}
+
+/**
+ * Close detached deploy requests that never produced a terminal receipt. This is a data-only
+ * lifecycle transition: the merged item remains merged/accepted and no rollback is attempted.
+ * Reusing deployBehindHours gives the receipt timeout and deploy-freshness SLO one clock.
+ */
+async function stepDeployTimeouts(
+  opts: ReactorOptions,
+  cfg: LoopkitConfig,
+): Promise<StepResult> {
+  const step = 'deploy-timeouts';
+  try {
+    const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
+    const foldResult = fold(allEvents);
+    const timeoutHours = cfg.slo?.deployBehindHours ?? 1;
+    const events = stalePendingDeployEvents(
+      foldResult.items.values(),
+      'reactor',
+      Date.now(),
+      timeoutHours * 3_600_000,
+    );
+    if (!opts.dryRun && events.length > 0) {
+      await appendEvents(opts.ledgerDir, events);
+    }
+    return {
+      step,
+      ok: true,
+      eventsWritten: opts.dryRun ? 0 : events.length,
+      mdWritten: false,
+      detail: events.length === 0
+        ? 'no stale pending deploys'
+        : `${opts.dryRun ? 'would time out' : 'timed out'} ${events.length} stale deploy request(s)`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
@@ -4894,6 +4962,10 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
 
     // Step (d): doctor sweep
     pushStep(await stepDoctor(opts, cfg));
+
+    // Step (d0.5): close deploy requests that never reported. Data-only — item state stays
+    // merged/accepted and no rollback is attempted.
+    pushStep(await stepDeployTimeouts(opts, cfg));
 
     // Step (d1): tier calibration (before accept — recalibrated windows
     // must be current for this beat's accept decisions)

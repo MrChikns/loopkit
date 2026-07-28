@@ -643,10 +643,45 @@ test('deploy: merge with empty deployCommand appends no deploy events', async ()
     });
     const events = await loadAllEvents(ledgerDir);
     assert.equal(events.filter(e => e.type === 'item.merged' && e.item === 'WI-001').length, 1, 'item merges');
+    assert.equal(events.filter(e => e.type === 'deploy.requested').length, 0, 'no deploy.requested');
     assert.equal(events.filter(e => e.type === 'deploy.succeeded').length, 0, 'no deploy.succeeded');
     assert.equal(events.filter(e => e.type === 'deploy.failed').length, 0, 'no deploy.failed');
+    assert.equal(events.filter(e => e.type === 'deploy.timed-out').length, 0, 'no deploy.timed-out');
     const mergedData = events.find(e => e.type === 'item.merged' && e.item === 'WI-001')!.data as unknown as ItemMergedData;
     assert.equal(mergedData.deployed, false, 'item.merged.deployed must be false with deploy off');
+  } finally {
+    cleanup();
+  }
+});
+
+test('deploy: configured engineering merge appends requested and projects pending', async () => {
+  const { repoRoot, ledgerDir, cleanup } = await makeDispatchEnv([
+    makeEvent('cli', 'WI-002', 'item.captured', { source: 'cli', text: 'build' }),
+    makeEvent('reactor', 'WI-002', 'item.queued', { spec: 'add file', touches: 'src/' }),
+  ]);
+  try {
+    await runDispatch({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: makeCommitProvider('src/feature.ts'),
+      config: makeTestConfig({ deployCommand: 'true' }),
+      branchProbe: () => 'master',
+      authProbeResult: { ok: true },
+      touchesDiffFiles: ['src/feature.ts'],
+      pushProbe: () => ({ status: 0 }),
+      scoutEnabled: false,
+      judgeEnabled: false,
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const itemEvents = events.filter(e => e.item === 'WI-002');
+    const mergedIndex = itemEvents.findIndex(e => e.type === 'item.merged');
+    const requestedIndex = itemEvents.findIndex(e => e.type === 'deploy.requested');
+    assert.ok(mergedIndex >= 0);
+    assert.ok(requestedIndex > mergedIndex, 'item.merged must be durable before deploy.requested');
+    assert.equal(itemEvents.filter(e => e.type === 'deploy.requested').length, 1);
+    const rec = fold(events).items.get('WI-002')!;
+    assert.equal(rec.deployStatus, 'pending');
+    assert.equal(rec.deployed, false);
   } finally {
     cleanup();
   }
