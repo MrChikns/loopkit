@@ -59,7 +59,7 @@ it. The contract:
 - Worktrees with the manifest's `worktreePrefix` next to the repo belong to in-flight builds —
   leave them alone.
 
-**Handwritten Claude Code commands (not a portable skills pack).** This repo includes three
+**Handwritten attended-agent helpers (not a portable plugin system).** This repo includes three
 interactive commands in [`.claude/commands/`](../.claude/commands/): **`/drive`** — attended
 coordinator mode (session + claims per
 [ADR-007](decisions/ADR-007-claim-arbitration.md), build via parallel subagent builders,
@@ -73,8 +73,13 @@ diff/gate/session evidence; the beats write the full `build.dispatched → gate.
 trail). The commands load
 automatically in any Claude Code session opened in this repo; to get the same verbs in a target
 repo, copy them into its `.claude/commands/` and adapt both the `$LOOPCTL` path **and** the
-`docs/` links (they are written repo-relative to this repo). `loopctl` does not install them,
-and there is no provider-neutral skills registry today.
+`docs/` links (they are written repo-relative to this repo).
+
+Codex-compatible repo-local skills live under [`.agents/skills/`](../.agents/skills/):
+`source-command-drive` mirrors the attended coordinator contract and `source-command-board`
+provides the status window. Health triage remains the deterministic `doctor` / `summary` / `slo`
+sequence documented by `/plane-check`; there is no separate Codex wrapper yet. `loopctl` does
+not install any of these helpers, and there is no provider-neutral plugin registry today.
 
 ### Copy-paste snippet for a target repo's `AGENTS.md` / `CLAUDE.md`
 

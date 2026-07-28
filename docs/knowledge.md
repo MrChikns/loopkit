@@ -1,6 +1,6 @@
 # Knowledge index
 
-The console's **Company** page (`/company` — the old `/knowledge` URL 301s here) is an
+The console's **Knowledge** destination (`/company` — the old `/knowledge` URL 301s here) is an
 operator-declared index of the reference docs your work depends on — decision logs, gate/stage
 registries, active plan docs, architecture notes — rendered as cards alongside the knowledge picture
 so a document cited by a work item is one click away.

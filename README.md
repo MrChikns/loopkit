@@ -17,6 +17,22 @@ your project's equivalent) to catch a real regression, loopkit is the harness th
 prove it against that gate before it merges, and routes only the changes that actually need your
 judgment back to you. See ["Honest scope"](#honest-scope) below for exactly what's proven today.
 
+## How this was built
+
+loopkit is also a deliberate authorship experiment: **one human operator directed the work; AI
+agents wrote the implementation.**
+
+The human owned the problem, product direction, operating constraints, risk boundaries,
+acceptance criteria, verification bar, and the decision to release and operate the result. The
+agents proposed much of the lower-level technical design and authored the code. This project does
+not claim hand-authorship of that implementation.
+
+That boundary is part of the point. When producing code becomes cheap, the scarce engineering
+work moves toward making intent precise, keeping context trustworthy, deciding what evidence is
+enough, integrating safely, and remaining accountable for the outcome. loopkit is both the
+artifact and the experiment: **AI can hold authorship of the implementation without holding
+authority or accountability.**
+
 ![loopkit turning one English sentence into a merged, tested commit](docs/demo.gif)
 
 ```bash
@@ -182,7 +198,7 @@ $LOOPCTL target add ~/loopkit-demo/notes
 claude auth status
 $LOOPCTL state
 $LOOPCTL slo
-# If you run the optional console, inspect its read-only /analytics page too.
+# If you run the optional console, inspect its read-only /observability page too.
 echo 'export LOOPKIT_AUTONOMY=on' > .ai/loops/config.env
 export LOOPKIT_AUTONOMY=on
 
@@ -231,13 +247,16 @@ More: [the method](docs/method.md) · [the vision](docs/vision.md) ·
 [trust boundaries](docs/trust-boundaries.md) · [hardening audit](docs/hardening-audit.md) ·
 [agent integration](docs/agent-integration.md) · [knowledge index](docs/knowledge.md).
 
-For Claude Code users the repo includes three handwritten, repo-local helper commands
+For attended agent sessions the repo includes optional repo-local helpers. Claude Code gets three
+handwritten commands
 (`.claude/commands/`): `/drive` (attended coordinator mode over claims),
 `/plane-check` (health triage), `/board` (the status window). Open a session in this repo and
-they load automatically. They are optional attended helpers, not external prerequisites or a
-provider-neutral skills pack, and `loopctl` does not install them into target repos. Workers run
-from the target worktree; discovery of its `AGENTS.md` / `CLAUDE.md` is provider-native rather
-than Loopkit-enforced. See [agent integration](docs/agent-integration.md).
+they load automatically. Codex gets matching repo-local `drive` and `board` skills under
+`.agents/skills/`; deterministic health triage remains available through `loopctl doctor`,
+`summary` and `slo`. These helpers are not external prerequisites or a provider-neutral plugin
+system, and `loopctl` does not install them into target repos. Workers run from the target
+worktree; discovery of its `AGENTS.md` / `CLAUDE.md` is provider-native rather than
+Loopkit-enforced. See [agent integration](docs/agent-integration.md).
 
 ## Honest scope
 

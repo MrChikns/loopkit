@@ -35,7 +35,11 @@ If a change you're making would write runtime state under this repo, the change 
   (`beats/reactor.ts`, `beats/dispatch.ts`), CLI (`cli.ts`, bin name `loopctl`), acceptance
   tiering, provider registry, target manifest (`target.ts`), doctor/self-heal. Zero runtime
   dependencies — Node built-ins only.
-- `packages/console` — thin HTTP console over the fold. Zero client JS, zero external deps.
+- `packages/console` — thin HTTP console over the fold. Server-rendered links/forms work without
+  JavaScript; fixed external scripts progressively enhance the shell, disclosures, dialogs and
+  live refresh. No third-party runtime dependencies beyond Node built-ins and Loopkit workspaces.
+- `.claude/commands` / `.agents/skills` — optional repo-local attended helpers for Claude Code
+  and Codex. They drive the same ledger/claim contracts; `loopctl` does not install them.
 - `examples/` — the demo target + setup script; the README quickstart runs against it.
 - `docs/` — event-model · trust-boundaries · operating-model · vision.
 
@@ -62,7 +66,9 @@ A change is not done until both suites are green. Never skip or hide a failed ru
    recorded `unavailable`, floored at `review`. No allowed healthy provider → wait or park,
    never route around the allowlist. Preserve these properties in any change near routing,
    acceptance, or merging.
-5. **The console stays zero-client-JS** and read-pure on GET; mutations are explicit POST verbs.
+5. **The console keeps a no-JS functional baseline** and remains read-pure on GET; mutations are
+   explicit POST verbs. Client scripts may progressively enhance existing links/forms but may not
+   become the only path to an operator action or authoritative work state.
 6. **This repo is destined to be public.** No personal names, emails, absolute `/Users/...`
    paths, private hostnames, or references to the author's private projects in code, comments,
    tests, fixtures, or commit messages. Neutral vocabulary: "operator", not a person's name.
