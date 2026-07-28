@@ -61,7 +61,7 @@
   color: var(--text);
 }
 .opsui-work__filter-count {
-  color: var(--text-3);
+  color: var(--text-2);
   font-variant-numeric: tabular-nums;
 }
 

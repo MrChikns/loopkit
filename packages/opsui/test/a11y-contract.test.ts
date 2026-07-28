@@ -67,3 +67,9 @@ test('opsui stylesheet gives text actions visible focus and 24px targets', async
   assert.match(css, /\.opsui-eventrow__metaitem--link,[\s\S]*min-height: 24px;/);
   assert.match(css, /\.opsui-provenance__chip \{[\s\S]*min-height: 24px;/);
 });
+
+test('Work filter counts use the AA-safe secondary text token', async () => {
+  const css = await readFile(resolve(here, '../src/styles/projections/work.css'), 'utf8');
+  assert.match(css, /\.opsui-work__filter-count \{\s*color: var\(--text-2\);/);
+  assert.doesNotMatch(css, /\.opsui-work__filter-count \{\s*color: var\(--text-3\);/);
+});
