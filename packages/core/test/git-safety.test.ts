@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { requireCleanCheckout } from '../src/git-safety.js';
-import { closeMergedCluster } from '../src/beats/dispatch.js';
+import {
+  closeMergedCluster,
+  constructTargetMergeCandidate,
+} from '../src/beats/dispatch.js';
 
 function git(cwd: string, args: string[]) {
   return spawnSync('git', args, { cwd, stdio: 'pipe' });
@@ -57,11 +60,15 @@ test('closeMergedCluster refuses a dirty destination before checkout or merge an
     writeFileSync(join(root, 'built.txt'), 'built\n', 'utf8');
     git(root, ['add', 'built.txt']);
     git(root, ['commit', '-m', 'built']);
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    const candidate = constructTargetMergeCandidate(root, 'build', expectedMain, 'merge build');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
     git(root, ['checkout', '-b', 'operator-work', 'main']);
     writeFileSync(join(root, 'tracked.txt'), 'operator draft\n', 'utf8');
 
     const mainBefore = git(root, ['rev-parse', 'main']).stdout.toString().trim();
-    const result = closeMergedCluster(root, root, 'build', 'main', 'merge build');
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain);
 
     assert.equal(result.ok, false);
     if (result.ok) return;
@@ -77,7 +84,7 @@ test('closeMergedCluster refuses a dirty destination before checkout or merge an
   }
 });
 
-test('closeMergedCluster refuses a destination that moved after the caller gated its expected tip', () => {
+test('closeMergedCluster CAS rejects a destination advance at the publication boundary', () => {
   const root = makeRepo();
   try {
     const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
@@ -86,12 +93,20 @@ test('closeMergedCluster refuses a destination that moved after the caller gated
     git(root, ['add', 'built.txt']);
     git(root, ['commit', '-m', 'built']);
     git(root, ['checkout', 'main']);
-    writeFileSync(join(root, 'concurrent.txt'), 'advanced\n', 'utf8');
-    git(root, ['add', 'concurrent.txt']);
-    git(root, ['commit', '-m', 'concurrent advance']);
-    const advancedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    const candidate = constructTargetMergeCandidate(root, 'build', expectedMain, 'merge build');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
+    let advancedMain = '';
 
-    const result = closeMergedCluster(root, root, 'build', 'main', 'merge build', expectedMain);
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain, {
+      beforePublish: () => {
+        git(root, ['checkout', 'main']);
+        writeFileSync(join(root, 'concurrent.txt'), 'advanced\n', 'utf8');
+        git(root, ['add', 'concurrent.txt']);
+        git(root, ['commit', '-m', 'concurrent advance']);
+        advancedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+      },
+    });
 
     assert.equal(result.ok, false);
     if (result.ok) return;
@@ -100,6 +115,74 @@ test('closeMergedCluster refuses a destination that moved after the caller gated
     assert.match(result.reason, new RegExp(advancedMain));
     assert.equal(git(root, ['rev-parse', 'main']).stdout.toString().trim(), advancedMain);
     assert.equal(git(root, ['merge-base', '--is-ancestor', 'build', 'main']).status, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ordinary post-CAS checkout preserves an editor write at the synchronization boundary', () => {
+  const root = makeRepo();
+  try {
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    git(root, ['checkout', '-b', 'build']);
+    writeFileSync(join(root, 'tracked.txt'), 'candidate version\n', 'utf8');
+    git(root, ['add', 'tracked.txt']);
+    git(root, ['commit', '-m', 'built']);
+    git(root, ['checkout', 'main']);
+    const candidate = constructTargetMergeCandidate(root, 'build', expectedMain, 'merge build');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
+
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain, {
+      afterPublishBeforeSync: () => {
+        writeFileSync(join(root, 'tracked.txt'), 'operator edit during publish\n', 'utf8');
+      },
+    });
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.checkoutSynced, false);
+    assert.match(result.warning ?? '', /preserved an intervening edit/);
+    assert.equal(git(root, ['rev-parse', 'main']).stdout.toString().trim(), candidate.commit,
+      'the atomic publication remains successful');
+    assert.equal(git(root, ['rev-parse', 'HEAD']).stdout.toString().trim(), expectedMain,
+      'the primary tree stays safely detached at its pre-publication commit');
+    assert.equal(readFileSync(join(root, 'tracked.txt'), 'utf8'), 'operator edit during publish\n');
+    assert.match(git(root, ['status', '--short']).stdout.toString(), / M tracked\.txt/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('exact merge candidate is no-ff, atomically published, and syncs a clean checked-out destination', () => {
+  const root = makeRepo();
+  try {
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    git(root, ['checkout', '-b', 'build']);
+    writeFileSync(join(root, 'built.txt'), 'built\n', 'utf8');
+    git(root, ['add', 'built.txt']);
+    git(root, ['commit', '-m', 'built']);
+    const buildSha = git(root, ['rev-parse', 'build']).stdout.toString().trim();
+    git(root, ['checkout', 'main']);
+
+    const candidate = constructTargetMergeCandidate(root, 'build', expectedMain, 'merge build');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
+    assert.equal(
+      git(root, ['show', '-s', '--format=%P', candidate.commit]).stdout.toString().trim(),
+      `${expectedMain} ${buildSha}`,
+      'the gated candidate has the exact destination and build parents',
+    );
+
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.commit, candidate.commit);
+    assert.equal(result.checkoutSynced, true);
+    assert.equal(git(root, ['rev-parse', 'main']).stdout.toString().trim(), candidate.commit);
+    assert.equal(git(root, ['rev-parse', 'HEAD']).stdout.toString().trim(), candidate.commit);
+    assert.equal(readFileSync(join(root, 'built.txt'), 'utf8'), 'built\n');
+    assert.equal(requireCleanCheckout(root).ok, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

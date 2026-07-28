@@ -255,6 +255,16 @@ export interface DispatchOptions {
    */
   nonFfGateResult?: { passed: boolean; reason: string; output?: string };
   /**
+   * Deterministic target publication-boundary hook for tests. Runs after the clean-checkout
+   * precondition and immediately before the atomic destination compare-and-swap.
+   */
+  targetBeforePublish?: (context: {
+    destination: string;
+    expectedDestinationSha: string;
+    candidateMergeSha: string;
+    attempt: number;
+  }) => void;
+  /**
    * Injected judge results map for tests.
    * Keys are WI-NNN ids. When present, the real judge provider.run is skipped for that item.
    * Set to { ok: false, error: '...', code: 'unknown' } to simulate judge failure (fail-open).
@@ -894,53 +904,147 @@ export function openBuildWorktree(
   return { ok: true };
 }
 
+/** Construct the exact no-ff merge commit without moving a ref or checkout. */
+export function constructTargetMergeCandidate(
+  gitRoot: string,
+  branch: string,
+  expectedDestinationSha: string,
+  commitMessage: string,
+): { ok: true; commit: string } | { ok: false; reason: string } {
+  const lineage = spawnSync(
+    'git',
+    ['merge-base', '--is-ancestor', expectedDestinationSha, branch],
+    { cwd: gitRoot, stdio: 'pipe' },
+  );
+  if (lineage.status !== 0) {
+    return {
+      ok: false,
+      reason: `branch '${branch}' is not replayed onto expected destination ${expectedDestinationSha}`,
+    };
+  }
+  const tree = spawnSync('git', ['rev-parse', `${branch}^{tree}`], {
+    cwd: gitRoot,
+    encoding: 'utf8',
+  });
+  if (tree.status !== 0 || !tree.stdout.trim()) {
+    return { ok: false, reason: tree.stderr?.trim() || `cannot resolve tree for '${branch}'` };
+  }
+  const candidate = spawnSync(
+    'git',
+    ['commit-tree', tree.stdout.trim(), '-p', expectedDestinationSha, '-p', branch],
+    {
+      cwd: gitRoot,
+      encoding: 'utf8',
+      input: `${commitMessage}\n`,
+    },
+  );
+  if (candidate.status !== 0 || !candidate.stdout.trim()) {
+    return { ok: false, reason: candidate.stderr?.trim() || 'git commit-tree returned no candidate' };
+  }
+  return { ok: true, commit: candidate.stdout.trim() };
+}
+
 /**
- * WI-172: git mechanics for the target lane's merge-and-close tail only (never the batch lane —
- * ADR-012). Checkout `mergeDestination` (passed IN by the caller, NEVER
- * derived here — deriving it is the false-green class ADR-012 calls out), `merge --no-ff`,
- * abort+report on conflict, else resolve the merge commit. Mutex/loop-name/deploy stay at call
- * sites (real per-caller differences, not lane accidents). The `stage` discriminant preserves
- * an unverified asymmetry as-is: the target lane emits 1 event on checkout failure vs 2 on merge
- * conflict. Not resolved here — reproduced verbatim.
+ * Atomically publish an already-constructed and gated merge candidate. `git update-ref` compares
+ * the destination against the exact SHA the gate covered; a losing writer can never land stale
+ * state. Only after CAS succeeds do we synchronize a clean primary checkout of that destination.
  */
 export function closeMergedCluster(
   gitRoot: string,
-  wtPath: string,
-  branch: string,
+  candidateMergeSha: string,
   mergeDestination: string,
-  commitMessage: string,
-  expectedDestinationSha?: string,
-): { ok: true; commit: string }
+  expectedDestinationSha: string,
+  hooks?: { beforePublish?: () => void; afterPublishBeforeSync?: () => void },
+): { ok: true; commit: string; checkoutSynced: boolean; warning?: string }
   | { ok: false; stage: 'precondition'; reason: string }
-  | { ok: false; stage: 'checkout'; reason: string }
   | { ok: false; stage: 'destination-moved'; reason: string }
-  | { ok: false; stage: 'merge'; reason: string } {
+  | { ok: false; stage: 'publish'; reason: string } {
+  const ref = `refs/heads/${mergeDestination}`;
+  const observed = spawnSync('git', ['rev-parse', ref], { cwd: gitRoot, stdio: 'pipe' });
+  const observedSha = observed.status === 0 ? observed.stdout.toString().trim() : '';
+  if (observedSha !== expectedDestinationSha) {
+    return {
+      ok: false,
+      stage: 'destination-moved',
+      reason: `destination '${mergeDestination}' moved from ${expectedDestinationSha} to ${observedSha || '(unresolvable)'}`,
+    };
+  }
   const precondition = requireCleanCheckout(gitRoot);
   if (!precondition.ok) {
     return { ok: false, stage: 'precondition', reason: precondition.reason };
   }
-  const co = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
-  if (co.status !== 0) {
-    return { ok: false, stage: 'checkout', reason: co.stderr?.toString().trim() ?? '' };
+  const checkedOut = spawnSync('git', ['branch', '--show-current'], { cwd: gitRoot, stdio: 'pipe' });
+  const checkedOutBranch = checkedOut.status === 0 ? checkedOut.stdout.toString().trim() : '';
+  const mustRestoreDestination = checkedOutBranch === mergeDestination;
+  if (mustRestoreDestination) {
+    // Detach the clean primary tree from the ref before CAS. After publication, an ordinary
+    // checkout reattaches it and lets Git—not a forced reset—refuse any overwrite if an editor
+    // writes during the boundary.
+    const detach = spawnSync('git', ['checkout', '--detach', expectedDestinationSha], {
+      cwd: gitRoot,
+      stdio: 'pipe',
+    });
+    if (detach.status !== 0) {
+      return {
+        ok: false,
+        stage: 'precondition',
+        reason: `cannot detach clean destination checkout before publish: ${
+          detach.stderr?.toString().trim() ?? 'unknown'
+        }`,
+      };
+    }
   }
-  if (expectedDestinationSha) {
-    const actual = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' });
+
+  hooks?.beforePublish?.();
+  const publish = spawnSync(
+    'git',
+    ['update-ref', ref, candidateMergeSha, expectedDestinationSha],
+    { cwd: gitRoot, stdio: 'pipe' },
+  );
+  if (publish.status !== 0) {
+    const actual = spawnSync('git', ['rev-parse', ref], { cwd: gitRoot, stdio: 'pipe' });
     const actualSha = actual.status === 0 ? actual.stdout.toString().trim() : '';
+    const restore = mustRestoreDestination
+      ? spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' })
+      : undefined;
+    const restoreWarning = restore && restore.status !== 0
+      ? `; primary checkout preserved detached because ordinary restore refused: ${
+        restore.stderr?.toString().trim() ?? 'unknown'
+      }`
+      : '';
     if (actualSha !== expectedDestinationSha) {
       return {
         ok: false,
         stage: 'destination-moved',
-        reason: `destination '${mergeDestination}' moved from ${expectedDestinationSha || '(unknown)'} to ${actualSha || '(unresolvable)'}`,
+        reason: `destination '${mergeDestination}' moved from ${expectedDestinationSha} to ${
+          actualSha || '(unresolvable)'
+        }${restoreWarning}`,
       };
     }
+    return {
+      ok: false,
+      stage: 'publish',
+      reason: `${publish.stderr?.toString().trim() || `cannot update ${ref}`}${restoreWarning}`,
+    };
   }
-  const merge = spawnSync('git', ['merge', '--no-ff', '-m', commitMessage, branch], { cwd: gitRoot, stdio: 'pipe' });
-  if (merge.status !== 0) {
-    spawnSync('git', ['merge', '--abort'], { cwd: gitRoot, stdio: 'pipe' });
-    return { ok: false, stage: 'merge', reason: '' };
+
+  if (!mustRestoreDestination) {
+    return { ok: true, commit: candidateMergeSha, checkoutSynced: false };
   }
-  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' }).stdout?.toString().trim() ?? '';
-  return { ok: true, commit };
+
+  hooks?.afterPublishBeforeSync?.();
+  const sync = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
+  if (sync.status !== 0) {
+    return {
+      ok: true,
+      commit: candidateMergeSha,
+      checkoutSynced: false,
+      warning: `published '${mergeDestination}' but ordinary checkout preserved an intervening edit: ${
+        sync.stderr?.toString().trim() ?? 'unknown'
+      }`,
+    };
+  }
+  return { ok: true, commit: candidateMergeSha, checkoutSynced: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -2593,7 +2697,22 @@ async function finalizeTargetBuild(
   let targetChangedFiles = guardOutcome.changedFiles;
   let finalGateReason = guardOutcome.gateReason;
   let closeResult: ReturnType<typeof closeMergedCluster> | undefined;
+  let publishWarning: string | undefined;
   for (let terminalAttempt = 0; terminalAttempt < 3; terminalAttempt++) {
+    // A failed CAS leaves the gate worktree detached at the losing candidate. Restore the
+    // build branch before replaying it onto the newly observed destination.
+    const branchCheckout = spawnSync('git', ['checkout', branch], { cwd: wtPath, stdio: 'pipe' });
+    if (branchCheckout.status !== 0) {
+      const reason = `infra: cannot restore target build branch '${branch}' before publication: ${
+        branchCheckout.stderr?.toString().trim() ?? 'unknown'
+      }`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
     const destination = spawnSync('git', ['rev-parse', manifest.defaultBranch], { cwd: gitRoot, stdio: 'pipe' });
     if (destination.status !== 0) {
       const reason = `infra: target default branch '${manifest.defaultBranch}' became unresolvable before merge: ${destination.stderr?.toString().trim() ?? 'unknown'}`;
@@ -2605,8 +2724,9 @@ async function finalizeTargetBuild(
       return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
     }
     const destinationSha = destination.stdout.toString().trim();
+    const destinationAdvanced = destinationSha !== integrationBase;
 
-    if (destinationSha !== integrationBase) {
+    if (destinationAdvanced) {
       const rebase = spawnSync('git', ['rebase', destinationSha], { cwd: wtPath, stdio: 'pipe' });
       if (rebase.status !== 0) {
         const conflict = [
@@ -2622,42 +2742,82 @@ async function finalizeTargetBuild(
         ]);
         return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
       }
-
-      targetChangedFiles = getChangedFiles(wtPath, destinationSha);
-      const reGate = runGate(
-        manifest.gateCommand,
-        manifest.gateWorkdir,
-        wtPath,
-        false,
-        destinationSha,
-      );
-      if (!reGate.passed) {
-        persistGateLog(targetRunDir, rec.id, attempt, reGate.output ?? '');
-        persistDiff(targetRunDir, rec.id, attempt, wtPath, destinationSha);
-        const reason = `target post-integration tests-red after '${manifest.defaultBranch}' advanced: ${reGate.reason}`;
-        removeWorktree(gitRoot, wtPath);
-        await appendEvents(opts.ledgerDir, [
-          makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
-          makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
-        ]);
-        return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
-      }
-      integrationBase = destinationSha;
-      finalGateReason = `post-integration green: ${reGate.reason}`;
     }
+
+    targetChangedFiles = getChangedFiles(wtPath, destinationSha);
+    const candidate = constructTargetMergeCandidate(
+      gitRoot,
+      branch,
+      destinationSha,
+      `feat(dispatch): ${rec.id} (target ${manifest.name})`,
+    );
+    if (!candidate.ok) {
+      const reason = `infra: cannot construct exact target merge candidate: ${candidate.reason}`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
+    const candidateCheckout = spawnSync('git', ['checkout', '--detach', candidate.commit], {
+      cwd: wtPath,
+      stdio: 'pipe',
+    });
+    if (candidateCheckout.status !== 0) {
+      const reason = `infra: cannot check out exact target merge candidate ${candidate.commit}: ${
+        candidateCheckout.stderr?.toString().trim() ?? 'unknown'
+      }`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
+    const exactGate = runGate(
+      manifest.gateCommand,
+      manifest.gateWorkdir,
+      wtPath,
+      false,
+      destinationSha,
+    );
+    if (!exactGate.passed) {
+      persistGateLog(targetRunDir, rec.id, attempt, exactGate.output ?? '');
+      persistDiff(targetRunDir, rec.id, attempt, wtPath, destinationSha);
+      const reason = destinationAdvanced
+        ? `target post-integration tests-red after '${manifest.defaultBranch}' advanced: ${exactGate.reason}`
+        : `target exact merge-candidate tests-red: ${exactGate.reason}`;
+      removeWorktree(gitRoot, wtPath);
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
+      ]);
+      return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason };
+    }
+    integrationBase = destinationSha;
+    finalGateReason = `${destinationAdvanced ? 'post-integration' : 'exact merge-candidate'} green: ${exactGate.reason}`;
 
     closeResult = closeMergedCluster(
       gitRoot,
-      wtPath,
-      branch,
+      candidate.commit,
       manifest.defaultBranch,
-      `feat(dispatch): ${rec.id} (target ${manifest.name})`,
       integrationBase,
+      {
+        beforePublish: opts.targetBeforePublish
+          ? () => opts.targetBeforePublish!({
+            destination: manifest.defaultBranch,
+            expectedDestinationSha: integrationBase,
+            candidateMergeSha: candidate.commit,
+            attempt: terminalAttempt + 1,
+          })
+          : undefined,
+      },
     );
+    if (closeResult.ok) publishWarning = closeResult.warning;
     if (closeResult.ok || closeResult.stage !== 'destination-moved') break;
-    // A second writer advanced the destination between our re-read and checkout. Loop back,
-    // replay onto the newly observed tip and re-gate; never merge a combination the gate did
-    // not cover. Three bounded attempts prevent an actively moving target from pinning a beat.
+    // A second writer won the atomic compare-and-swap. Loop back, replay onto that newly
+    // observed tip, construct a new candidate and gate that exact commit.
   }
 
   if (!closeResult) {
@@ -2677,14 +2837,12 @@ async function finalizeTargetBuild(
   }
   if (!closeResult.ok) {
     removeWorktree(gitRoot, wtPath);
-    if (closeResult.stage === 'precondition' || closeResult.stage === 'checkout') {
-      const reason = closeResult.stage === 'precondition'
-        ? `infra: target merge precondition failed: ${closeResult.reason}`
-        : `infra: cannot checkout target default branch '${manifest.defaultBranch}': ${closeResult.reason}`;
+    if (closeResult.stage === 'precondition') {
+      const reason = `infra: target merge precondition failed: ${closeResult.reason}`;
       await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]);
       return { item: rec.id, dispatched: true, gateOutcome: 'passed', eventsWritten: 1, detail: reason };
     }
-    const reason = `target merge conflict on '${manifest.defaultBranch}'`;
+    const reason = `infra: target atomic publication failed on '${manifest.defaultBranch}': ${closeResult.reason}`;
     await appendEvents(opts.ledgerDir, [
       makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
       makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const }),
@@ -2734,7 +2892,9 @@ async function finalizeTargetBuild(
   return {
     item: rec.id, dispatched: true, gateOutcome: 'passed', branch, worktree: wtPath,
     eventsWritten: 3 + deploy.eventsWritten,
-    detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})`,
+    detail: `merged ${rec.id} into target '${manifest.name}' ${manifest.defaultBranch} (${mergeCommit.slice(0, 8)})${
+      publishWarning ? `; ${publishWarning}` : ''
+    }`,
   };
 }
 

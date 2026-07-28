@@ -644,6 +644,77 @@ test('target lane: destination advance rebases and re-gates combined state befor
   }
 });
 
+test('target lane: publication-boundary CAS loss recomputes and re-gates the exact winning candidate', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-publish-cas-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    const gateCounter = join(base, 'gate-count');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+    installCountingGate(targetRoot, gateCounter);
+
+    const manifest = readTargetManifest(targetRoot);
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }),
+      makeEvent('cli', 'WI-188', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }),
+      makeEvent('cli', 'WI-188', 'item.queued', { spec: 'add a marker', touches: 'src/extra.js' }),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 18;\n' }],
+      manifest: {
+        wi: 'WI-188',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-188): add marker',
+      },
+    });
+    let boundaryCalls = 0;
+    let concurrentSha = '';
+    await runDispatch({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider,
+      config: testConfig(),
+      authProbeResult: { ok: true },
+      targetBeforePublish: context => {
+        boundaryCalls++;
+        if (boundaryCalls !== 1) return;
+        assert.equal(context.attempt, 1);
+        git(targetRoot, ['checkout', 'main']);
+        assert.equal(git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim(),
+          context.expectedDestinationSha);
+        writeFileSync(join(targetRoot, 'publish-race.txt'), 'won at CAS boundary\n', 'utf8');
+        git(targetRoot, ['add', 'publish-race.txt']);
+        git(targetRoot, ['commit', '-m', 'feat: publication-boundary winner']);
+        concurrentSha = git(targetRoot, ['rev-parse', 'main']).stdout.toString().trim();
+      },
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(fold(events).items.get('WI-188')?.state, 'merged');
+    assert.equal(boundaryCalls, 2, 'the losing CAS must recompute and retry publication once');
+    assert.equal(gateRunCount(gateCounter), 3,
+      'branch gate plus both exact merge candidates are independently gated');
+    assert.equal(git(targetRoot, ['cat-file', '-e', 'main:publish-race.txt']).status, 0);
+    assert.equal(git(targetRoot, ['cat-file', '-e', 'main:src/extra.js']).status, 0);
+    const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-188');
+    assert.ok(merged);
+    assert.equal((merged!.data as { baseSha?: string }).baseSha, concurrentSha,
+      'evidence names the destination SHA used to construct and gate the winning candidate');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('target lane: red combined-state re-gate parks and never merges past disagreement', async () => {
   const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-regate-red-'));
   try {
