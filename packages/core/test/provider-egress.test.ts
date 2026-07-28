@@ -5,9 +5,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import {
   invokeProvider,
@@ -37,7 +38,7 @@ const RULE_CASES: Array<[SecretRuleId, string]> = [
     'aws-access-key-pair',
     `AWS_ACCESS_KEY_ID=AKIA${'J'.repeat(16)}\nAWS_SECRET_ACCESS_KEY=${'k'.repeat(40)}`,
   ],
-  ['secret-assignment', `api_key=${'a'.repeat(20)}7`],
+  ['secret-assignment', 'api_key=Alpha7Bravo9Charlie2Delta'],
 ];
 
 for (const [ruleId, content] of RULE_CASES) {
@@ -47,22 +48,21 @@ for (const [ruleId, content] of RULE_CASES) {
 }
 
 test('credential scanner: secret assignment covers bare and prefixed env/YAML/JSON key families', () => {
-  const keys = [
-    'api_key',
-    'token',
-    'secret',
-    'password',
-    'client_secret',
-    'private_key',
-    'session_token',
-    'SERVICE_AUTH_TOKEN',
+  const assignmentParts: Array<[string, string, string]> = [
+    ['api_key', '=', 'Alpha7Bravo9Charlie2Delta'],
+    ['token', ': ', 'Echo4Foxtrot6Golf8Hotel'],
+    ['"secret"', ': ', '"India3Juliet5Kilo7Lima"'],
+    ['password', '=', 'Mike2November4Oscar6Papa'],
+    ['client_secret', ': ', '"Quebec1Romeo3Sierra5Tango"'],
+    ['"private_key"', ': ', '"Uniform2Victor4Whiskey6Xray"'],
+    ['session_token', '=', 'Yankee1Zulu3Alpha5Bravo'],
+    ['SERVICE_AUTH_TOKEN', ': ', 'Charlie2Delta4Echo6Foxtrot'],
   ];
-  for (const [index, key] of keys.entries()) {
-    const separator = index % 2 === 0 ? '=' : ': ';
-    const value = `RealValue${index}${'z'.repeat(18)}`;
+  for (const parts of assignmentParts) {
+    const assignment = parts.join('');
     assert.ok(
-      scanSecretRuleIds(`${JSON.stringify(key)}${separator}${JSON.stringify(value)}`).includes('secret-assignment'),
-      `expected ${key} to be covered`,
+      scanSecretRuleIds(assignment).includes('secret-assignment'),
+      `expected literal assignment to be covered: ${assignment.split(/[:=]/, 1)[0]}`,
     );
   }
 });
@@ -80,6 +80,22 @@ test('credential scanner: ignores placeholders, redactions, variables, examples,
   ];
   for (const content of safeExamples) {
     assert.deepEqual(scanSecretRuleIds(content), [], `placeholder should not block: ${content.split('=')[0]}`);
+  }
+});
+
+test('credential scanner: ordinary env/property/function references are not credential literals', () => {
+  const references = [
+    'CLIENT_SECRET=process.env.CLIENT_SECRET',
+    'api_key=config.credentials.apiKey',
+    'private_key=settings["privateKey"]',
+    'session_token=Deno.env.get("SESSION_TOKEN")',
+    'token=crypto.randomUUID()',
+    'password=validator.getPassword()',
+    'secret=getSecretFromVault()',
+    'auth_token=vault://services/example/token',
+  ];
+  for (const content of references) {
+    assert.deepEqual(scanSecretRuleIds(content), [], `reference should not block: ${content}`);
   }
 });
 
@@ -130,7 +146,7 @@ test('invokeProvider: external system hit blocks even when prompt is clean', asy
   });
   const result = await invokeProvider(provider, {
     prompt: 'Summarize safely',
-    system: `SERVICE_PASSWORD=${'p'.repeat(20)}7`,
+    system: 'SERVICE_PASSWORD=Alpha7Bravo9Charlie2Delta',
   });
   assert.equal(calls, 0);
   assert.equal(result.ok ? undefined : result.code, 'egress-blocked');
@@ -196,14 +212,79 @@ test('invokeProvider: clean external invocation preserves synchronous onSpawn ti
   assert.equal((await invocation).ok, true);
 });
 
-test('provider source guard: production callers cannot bypass invokeProvider with direct .run(...)', () => {
-  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
-  const allowed = new Set([
-    join(srcRoot, 'providers', 'claudeCli.ts'),
-    join(srcRoot, 'providers', 'codexCli.ts'),
-    join(srcRoot, 'providers', 'ollama.ts'),
-    join(srcRoot, 'providers', 'egress.ts'),
-  ]);
+interface DirectRunCall {
+  file: string;
+  line: number;
+  receiver?: string;
+  argument?: string;
+}
+
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function directRunCalls(sourceText: string, file: string): DirectRunCall[] {
+  const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const calls: DirectRunCall[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const expression = unwrapExpression(node.expression);
+      let receiver: ts.Expression | undefined;
+      let isRun = false;
+      if (ts.isPropertyAccessExpression(expression) && expression.name.text === 'run') {
+        receiver = expression.expression;
+        isRun = true;
+      } else if (
+        ts.isElementAccessExpression(expression) &&
+        expression.argumentExpression &&
+        (ts.isStringLiteral(expression.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression)) &&
+        expression.argumentExpression.text === 'run'
+      ) {
+        receiver = expression.expression;
+        isRun = true;
+      }
+      if (isRun) {
+        calls.push({
+          file,
+          line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+          ...(receiver && ts.isIdentifier(receiver) ? { receiver: receiver.text } : {}),
+          ...(node.arguments.length === 1 && ts.isIdentifier(node.arguments[0]!)
+            ? { argument: node.arguments[0]!.text }
+            : {}),
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return calls;
+}
+
+function findPackageRoot(start: string): string {
+  let dir = start;
+  for (;;) {
+    if (
+      existsSync(join(dir, 'package.json')) &&
+      existsSync(join(dir, 'src', 'providers', 'egress.ts'))
+    ) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error(`could not locate package root from ${start}`);
+    dir = parent;
+  }
+}
+
+test('provider source guard: production source has exactly one internal direct run call', () => {
+  const packageRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
+  const srcRoot = join(packageRoot, 'src');
   const files: string[] = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -214,14 +295,36 @@ test('provider source guard: production callers cannot bypass invokeProvider wit
   };
   visit(srcRoot);
 
-  const bypasses: string[] = [];
-  for (const file of files) {
-    if (allowed.has(file)) continue;
-    for (const [index, line] of readFileSync(file, 'utf8').split('\n').entries()) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
-      if (/\.run\s*\(/.test(line)) bypasses.push(`${file}:${index + 1}`);
-    }
+  assert.ok(files.length >= 20, `source guard scanned too few files: ${files.length}`);
+  for (const expected of [
+    'beats/dispatch.ts',
+    'beats/reactor.ts',
+    'judge.ts',
+    'pathology.ts',
+    'providers/egress.ts',
+  ]) {
+    assert.ok(files.includes(join(srcRoot, ...expected.split('/'))), `source guard missed ${expected}`);
   }
-  assert.deepEqual(bypasses, [], `direct provider run call(s) bypass the egress guard: ${bypasses.join(', ')}`);
+
+  const calls = files.flatMap(file =>
+    directRunCalls(readFileSync(file, 'utf8'), relative(srcRoot, file)),
+  );
+  assert.deepEqual(calls, [{
+    file: join('providers', 'egress.ts'),
+    line: calls[0]?.line,
+    receiver: 'provider',
+    argument: 'req',
+  }], `direct run call(s) bypass the egress wrapper: ${JSON.stringify(calls)}`);
+});
+
+test('provider source guard: AST catches bracket, multiline, and comment-interposed bypasses', () => {
+  const fixture = `
+    provider['run'](request);
+    provider
+      /* an inline comment cannot hide the call */
+      .run
+      (request);
+    (provider.run)(request);
+  `;
+  assert.equal(directRunCalls(fixture, 'bypass-fixture.ts').length, 3);
 });

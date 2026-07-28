@@ -36,14 +36,25 @@ const ASSIGNMENT_RE =
 const PLACEHOLDER_RE =
   /^(?:<.*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|(?:your[-_ ]?)?(?:key|token|secret|password)|(?:your[-_ ]|placeholder|example|sample|dummy|fake|test|redacted|masked|changeme)[A-Za-z0-9_.-]*|none|null|undefined|x+|\*+)$/i;
 
+/**
+ * Values that name where a secret comes from are references, not secret material. Blocking these
+ * would strand ordinary source-review prompts such as `CLIENT_SECRET=process.env.CLIENT_SECRET`.
+ * This intentionally recognizes common JS/TS property, bracket, environment, and call shapes
+ * before the literal-shape check below.
+ */
+const REFERENCE_VALUE_RE =
+  /^(?:(?:process|Deno)\??\.env(?:\??\.[A-Za-z_$][\w$]*|\[['"][^'"]+['"]\]|\??\.get\([^)]*\))|[A-Za-z_$][\w$]*(?:(?:\??\.)[A-Za-z_$][\w$]*|\[['"][^'"]+['"]\])+(?:\([^)]*\))?|[A-Za-z_$][\w$]*\([^)]*\)|(?:vault|secret|env|file|sm):\/\/\S+)$/i;
+
 function containsSecretAssignment(content: string): boolean {
   ASSIGNMENT_RE.lastIndex = 0;
   for (const match of content.matchAll(ASSIGNMENT_RE)) {
     const value = (match[2] ?? match[3] ?? match[4] ?? '').trim();
-    if (value.length < 16 || PLACEHOLDER_RE.test(value)) continue;
-    // Require a compact, non-prose value with at least two character classes. This keeps the
-    // generic assignment rule high-confidence while prefixed token rules catch known formats.
-    if (/\s/.test(value) || !/[A-Za-z]/.test(value) || !/[0-9_\-+/=.!@#$%^&*]/.test(value)) continue;
+    if (value.length < 16 || PLACEHOLDER_RE.test(value) || REFERENCE_VALUE_RE.test(value)) continue;
+    // Require compact, credential-shaped literal material: letters + digits, reasonable
+    // diversity, and no call/reference punctuation. Known provider prefixes are handled by
+    // their dedicated rules above this generic assignment fallback.
+    if (/\s|[()[\]{}]/.test(value) || !/[A-Za-z]/.test(value) || !/\d/.test(value)) continue;
+    if (new Set(value).size < 8) continue;
     return true;
   }
   return false;
