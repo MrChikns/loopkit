@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "test:browser": "npm run build --workspace=packages/core && npm run build --workspace=packages/ui && npm run build --workspace=packages/opsui && npm run build:test --workspace=packages/console && playwright test",
+    "test:browser:ci": "playwright test",
     "test:browser:install": "playwright install chromium"
   },
   "devDependencies": {

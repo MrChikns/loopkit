@@ -275,6 +275,15 @@ test('keyboard focus remains visible and unobscured through the shared shell', a
       const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
       const top = document.elementFromPoint(x, y);
       const style = getComputedStyle(active);
+      const outlineIsVisible =
+        active.matches(':focus-visible') &&
+        style.outlineStyle !== 'none' &&
+        Number.parseFloat(style.outlineWidth) > 0 &&
+        style.outlineColor !== 'transparent' &&
+        style.outlineColor !== 'rgba(0, 0, 0, 0)';
+      const focusShadowIsVisible =
+        active.matches(':focus-visible') &&
+        style.boxShadow !== 'none';
       return {
         target: `${active.tagName.toLowerCase()}.${[...active.classList].join('.')}`,
         inViewport:
@@ -285,10 +294,7 @@ test('keyboard focus remains visible and unobscured through the shared shell', a
           rect.right <= window.innerWidth + 1 &&
           rect.bottom <= window.innerHeight + 1,
         unobscured: Boolean(top && (top === active || active.contains(top) || top.contains(active))),
-        hasVisibleFocus:
-          style.outlineStyle !== 'none' ||
-          style.boxShadow !== 'none' ||
-          style.borderColor !== 'rgba(0, 0, 0, 0)',
+        hasVisibleFocus: outlineIsVisible || focusShadowIsVisible,
       };
     });
     expect(focusState, `Tab stop ${index + 1}`).not.toBeNull();

@@ -59,6 +59,8 @@ test('console README names the current canonical route and action surface', asyn
     );
   }
   assert.doesNotMatch(readme, /four (?:read )?views|four (?:operator |write )?verbs/i);
+  assert.match(readme, /no third-party runtime dependencies/i);
+  assert.doesNotMatch(readme, /zero runtime dependencies/i);
 });
 
 test('package description does not repeat the retired four-view/four-verb claim', async () => {

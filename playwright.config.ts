@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: './packages/console/test/browser',
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   outputDir: 'test-results',
@@ -40,7 +40,7 @@ export default defineConfig({
   webServer: {
     command: 'node packages/console/dist-test/test/browser-server.js',
     url: `http://127.0.0.1:${port}/command`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 30_000,
     env: {
       LOOPKIT_BROWSER_PORT: String(port),

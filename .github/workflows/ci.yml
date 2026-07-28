@@ -45,8 +45,14 @@ jobs:
       - name: opsui — build + test
         run: npm test --workspace=packages/opsui
 
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
       - name: Install browser used by the accessibility gate
         run: npx playwright install --with-deps chromium
 
       - name: console — real-browser accessibility + interaction gate
-        run: npm run test:browser
+        run: npm run test:browser:ci

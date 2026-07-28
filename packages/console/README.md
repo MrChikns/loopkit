@@ -7,8 +7,7 @@ loopkit is an event-sourced autonomous delivery plane: an append-only work ledge
 projections, and beats build work items in git worktrees, gate them, merge them, and tier
 acceptance. An operator needs one small window onto that ledger, and a way to drive it without a
 terminal. This package is that window — deliberately thin, with zero product assumptions and
-no third-party runtime packages: it composes the workspace `@loopkit/core`, `@loopkit/ui` and
-`@loopkit/opsui` packages over Node's built-ins.
+no third-party runtime dependencies beyond Node's built-ins and the loopkit workspace packages.
 
 ## What it does
 
