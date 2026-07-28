@@ -3332,6 +3332,61 @@ export function collectDetachedBuilds(
   return collected;
 }
 
+/** Count active detached worker groups, not their co-located item members. */
+export function countInFlightWorkerSlots(foldResult: FoldResult, artifactDir: string): number {
+  const byPgid = new Map<number, ItemRecord[]>();
+  for (const rec of foldResult.items.values()) {
+    if (rec.state !== 'building' || rec.currentBuild?.pgid == null) continue;
+    const members = byPgid.get(rec.currentBuild.pgid);
+    if (members) members.push(rec);
+    else byPgid.set(rec.currentBuild.pgid, [rec]);
+  }
+  let active = 0;
+  for (const members of byPgid.values()) {
+    const finished = members.some(rec =>
+      Boolean(readExitFile(artifactDir, rec.id, rec.currentBuild!.attempt))
+    );
+    if (!finished) active++;
+  }
+  return active;
+}
+
+export interface WorkerCapacitySelection {
+  targeted: ItemRecord[];
+  engineering: ItemRecord[][];
+  deferredItems: number;
+}
+
+/**
+ * Admit worker units before either lane claims. Mixed queues alternate target/engineering,
+ * target first; a co-located engineering group consumes one slot regardless of item count.
+ */
+export function selectWithinWorkerCapacity(
+  targeted: ItemRecord[],
+  engineering: ItemRecord[][],
+  availableSlots: number,
+): WorkerCapacitySelection {
+  const selectedTargets: ItemRecord[] = [];
+  const selectedEngineering: ItemRecord[][] = [];
+  let ti = 0;
+  let ei = 0;
+  let targetTurn = true;
+  for (let slot = 0; slot < Math.max(0, availableSlots) && (ti < targeted.length || ei < engineering.length); slot++) {
+    if ((targetTurn && ti < targeted.length) || ei >= engineering.length) {
+      selectedTargets.push(targeted[ti++]!);
+      targetTurn = false;
+    } else {
+      selectedEngineering.push(engineering[ei++]!);
+      targetTurn = true;
+    }
+  }
+  return {
+    targeted: selectedTargets,
+    engineering: selectedEngineering,
+    deferredItems: targeted.length - ti + engineering.slice(ei).reduce((n, group) => n + group.length, 0),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -3624,7 +3679,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // items into the same worker run so they share one gate + merge. batchMaxItems=1
     // disables co-location entirely (every group is a single item — legacy behaviour).
     const batchMax = Math.max(1, cfg.batchMaxItems ?? 1);
-    const groups: ItemRecord[][] = [];
+    let groups: ItemRecord[][] = [];
 
     for (const rec of engineeringQueued) {
       // Never dispatch something that conflicts with an in-flight build.
@@ -3656,12 +3711,26 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       groups.push([rec]);
     }
 
+    // One admission boundary shared by target + engineering. Apply it to WORKER UNITS before
+    // either claimBeforePick call: overflow stays queued with zero claim/state churn.
+    const maxConcurrentWorkers = cfg.execution?.maxConcurrentWorkers ?? 2;
+    const inFlightWorkerSlots = countInFlightWorkerSlots(foldResult, artifactDir);
+    const capacity = selectWithinWorkerCapacity(
+      targetedQueued,
+      groups,
+      Math.max(0, maxConcurrentWorkers - inFlightWorkerSlots),
+    );
+    targetedQueued = capacity.targeted;
+    groups = capacity.engineering;
+
     if (groups.length === 0 && planningQueued.length === 0 && targetedQueued.length === 0 && collectedWorkers.length === 0 && !hasDetachedTargetBuild) {
       return {
         dryRun: opts.dryRun ?? false,
         dispatched: [],
         totalEventsWritten: 0,
-        detail: 'all queued items conflict with in-flight or each other',
+        detail: capacity.deferredItems > 0
+          ? `worker capacity full (${inFlightWorkerSlots}/${maxConcurrentWorkers}); overflow remains queued`
+          : 'all queued items conflict with in-flight or each other',
       };
     }
 

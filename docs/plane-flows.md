@@ -206,7 +206,7 @@ That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3524`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3579`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
@@ -220,8 +220,11 @@ per-item backoff; they do not trip this shared provider breaker.
 
 **Numbers that bound this**
 
-- ⚪ **There is no maximum-worker limit.** Disjointness is the only bound, so a well-partitioned queue
-  can fan out very wide in a single beat. You pay in quota.
+- 🔵 **Worker admission is finite and shared.** `execution.maxConcurrentWorkers` defaults to 2;
+  active detached workers consume slots by worker group, and a co-located group consumes one slot,
+  not one per item. Capacity is applied before target or engineering claims, alternating the mixed
+  queue target-first so targets cannot starve; overflow stays queued with no lifecycle
+  churn<!--exists:workerCapacityBound-->.
 - Claims are leases. An attended session's claim runs **60**<!--pin:DEFAULT_CLAIM_TTL_MINUTES--> minutes;
   dispatch claims its own picks for the build timeout of **40**<!--pin:buildTimeoutMinutes--> minutes
   plus five, so a crashed beat's claims expire on their own rather than needing a cleanup.
@@ -229,7 +232,7 @@ per-item backoff; they do not trip this shared provider breaker.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3644`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3699`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
   selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
@@ -370,7 +373,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4336`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4405`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -408,7 +411,7 @@ flowchart TD
 
 - The invariant: **no build reaches its destination without a gate covering every commit that landed
   since its branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4775`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4844`<!--cite:postIntegrationRegate-->).
 - The target lane applies the same invariant with its own manifest gate: re-read destination,
   rebase when needed, construct the exact no-fast-forward commit, gate that commit, then publish
   the default-branch ref with an expected-old-SHA compare-and-swap. A CAS loss repeats the whole
@@ -418,9 +421,9 @@ flowchart TD
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, verifies that the primary checkout has no staged, unstaged, or untracked
   operator state, then hard-resets it onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4965`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:5034`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4991`<!--cite:pushRaceRegate-->). A dirty checkout stops the
+  (`packages/core/src/beats/dispatch.ts:5060`<!--cite:pushRaceRegate-->). A dirty checkout stops the
   recovery and records exact porcelain path evidence instead of discarding it.
 - Every failure here is a park, never a force. A conflict, red candidate gate or exhausted CAS retry
   stops the item; nothing is published past a disagreement.
@@ -493,7 +496,7 @@ and are promoted only by a manual config change after burn-in.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3483`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3538`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo

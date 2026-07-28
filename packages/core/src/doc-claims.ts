@@ -957,6 +957,31 @@ export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
       },
     ],
   },
+  {
+    id: 'workerCapacityBound',
+    doc: 'plane-flows',
+    symbol: 'execution.maxConcurrentWorkers',
+    what: 'dispatch admits a finite number of worker groups before target or engineering claims',
+    file: 'config',
+    declaration: /^ {4}maxConcurrentWorkers\?: number;$/,
+    referencedBy: [
+      {
+        file: 'config',
+        pattern: /^ {4}maxConcurrentWorkers: 2,$/,
+        proves: 'the preview default is finite and conservative',
+      },
+      {
+        file: 'dispatch',
+        pattern: /const capacity = selectWithinWorkerCapacity\(/,
+        proves: 'the shared worker-unit selector is applied in the live dispatch path',
+      },
+      {
+        file: 'dispatch',
+        pattern: /if \(!opts\.dryRun && targetedQueued\.length > 0\)/,
+        proves: 'target claims happen only after the shared selector',
+      },
+    ],
+  },
 
   // ── ADR-009's completion path. The paragraph's point is that the nudge stopped being a nudge
   //    into the void — which is true only while the operator verb and the fold case both exist.

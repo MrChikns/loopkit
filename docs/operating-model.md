@@ -48,6 +48,10 @@ by construction rather than a check-then-act
 missing is *file scope*: a claim names items, never paths, so keyboard work outside the queue is
 invisible to the dispatcher.
 
+The away path is also capacity-bounded: `execution.maxConcurrentWorkers` has a conservative
+default of 2 across target and engineering workers. Co-located items share a worker slot, existing
+detached groups retain theirs until collection, and overflow remains untouched in the queue.
+
 **⚪ What the fast path adds — an explicit, one-command scope claim over paths.** None of the
 following exists: no `scope.*` event is in the ledger schema and there is no `attended` verb on
 the CLI.

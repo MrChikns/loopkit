@@ -709,6 +709,11 @@ export interface LoopkitConfig {
      * pass drains it via its exit file. Default: false.
      */
     detachedDispatch?: boolean;
+    /**
+     * Maximum simultaneously admitted build workers across target and engineering lanes.
+     * Co-located items share one worker slot. Default: 2.
+     */
+    maxConcurrentWorkers?: number;
   };
 
   /**
@@ -934,6 +939,7 @@ const DEFAULTS: LoopkitConfig = {
   },
   execution: {
     detachedDispatch: false,
+    maxConcurrentWorkers: 2,
   },
   portabilityPromotion: {
     enabled: false,
@@ -1739,8 +1745,17 @@ function mergeExecution(
   if ('detachedDispatch' in r && typeof r['detachedDispatch'] !== 'boolean') {
     throw new Error(`loopkit.config.json: execution.detachedDispatch must be a boolean (got ${JSON.stringify(r['detachedDispatch'])})`);
   }
+  if ('maxConcurrentWorkers' in r) {
+    const v = r['maxConcurrentWorkers'];
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+      throw new Error(`loopkit.config.json: execution.maxConcurrentWorkers must be a positive integer (got ${JSON.stringify(v)})`);
+    }
+  }
   return {
     detachedDispatch: typeof r['detachedDispatch'] === 'boolean' ? r['detachedDispatch'] : defaults.detachedDispatch,
+    maxConcurrentWorkers: typeof r['maxConcurrentWorkers'] === 'number'
+      ? r['maxConcurrentWorkers']
+      : defaults.maxConcurrentWorkers,
   };
 }
 
