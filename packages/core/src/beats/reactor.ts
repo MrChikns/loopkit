@@ -2083,16 +2083,54 @@ async function stepUnparkOpsRequeue(
 // ---------------------------------------------------------------------------
 
 /**
- * Park kinds the pathologist NEVER diagnoses — 'decision' is an operator question, not a
- * plane failure (the pathologist only handles FAILURE parks: gate-red/crash/infra), and
- * 'decomposition' is the planner lane (re-diagnosing an already-approved epic split is a
- * bounce, exactly the same reasoning stepAutoApprove already applies for parkKind:'ops').
+ * Park kinds the pathologist NEVER diagnoses — 'decision' is an operator question, 'hold' is
+ * a deliberate pause, and 'decomposition' is the planner lane. None is a plane failure.
+ * The pathologist handles FAILURE parks only: gate-red/crash/infra. Undefined remains eligible
+ * for fail-safe replay of legacy ledgers written before parkKind was stamped.
  */
-const PATHOLOGY_EXCLUDED_PARK_KINDS = new Set<string | undefined>(['decision', 'decomposition']);
+const PATHOLOGY_EXCLUDED_PARK_KINDS = new Set<string | undefined>(['decision', 'hold', 'decomposition']);
+
+export type BlockedVictimAction = 'release' | 'wait' | 'point-to-blocker' | 'escalate';
 
 /**
- * On every FAILURE park (gate-red / crash / infra — NEVER parkKind:'decision'), spawn ONE
- * bounded read-only LLM diagnosis pass, get a structured verdict, then act by classification:
+ * One transition classifier for a pathology victim waiting on a repair item.
+ *
+ * - A deliberately held/planning/decision victim never moves automatically.
+ * - A merged or accepted blocker releases an ops/legacy victim.
+ * - A blocker that already needs an operator decision or is deliberately held is itself the
+ *   actionable item; the victim keeps pointing at it and does not create duplicate attention.
+ * - Live, planning and recovering blockers keep their victim waiting even after the age window.
+ * - Only a missing or terminal-without-merge blocker escalates the victim, and only after the
+ *   configured timeout.
+ */
+export function classifyBlockedVictim(
+  victim: Pick<ItemRecord, 'state' | 'parkKind' | 'blockedOn' | 'parkedAt'>,
+  blocker: Pick<ItemRecord, 'state' | 'parkKind'> | undefined,
+  nowMs: number,
+  timeoutMs: number,
+): BlockedVictimAction {
+  if (victim.state !== 'parked' || !victim.blockedOn) return 'wait';
+  if (victim.parkKind === 'decision' || victim.parkKind === 'hold' || victim.parkKind === 'decomposition') {
+    return 'wait';
+  }
+
+  if (blocker?.state === 'merged' || blocker?.state === 'accepted') return 'release';
+  if (blocker?.state === 'parked' && (blocker.parkKind === 'decision' || blocker.parkKind === 'hold')) {
+    return 'point-to-blocker';
+  }
+
+  const parkedAtMs = victim.parkedAt ? Date.parse(victim.parkedAt) : NaN;
+  if (!Number.isFinite(parkedAtMs) || nowMs - parkedAtMs < timeoutMs) return 'wait';
+
+  if (!blocker || blocker.state === 'rejected' || blocker.state === 'answered' || blocker.state === 'done') {
+    return 'escalate';
+  }
+  return 'wait';
+}
+
+/**
+ * On every FAILURE park (gate-red / crash / infra — NEVER hold/decision/decomposition), spawn
+ * ONE bounded read-only LLM diagnosis pass, get a structured verdict, then act by classification:
  *   - transient-infra   → bounded auto-requeue, gated by its OWN counter/threshold
  *                         (ItemRecord.transientRequeueCount / cfg.pathology.maxTransientRequeues
  *                         — WI-170; deliberately NOT cfg.breakerN, the build-attempt breaker
@@ -2109,13 +2147,10 @@ const PATHOLOGY_EXCLUDED_PARK_KINDS = new Set<string | undefined>(['decision', '
  * Every action (including a skip) appends a msg.out 'pathology: ' note so existing thread/desk
  * surfaces show it with zero UI changes (no packages/opsui or packages/console touch).
  *
- * WI-099 — blocked-victim wait-timeout: a victim's blocker can be rejected or itself parked
- * instead of merging, in which case the release loop below is a permanent no-op and the victim
- * sits blocked with no signal (silently off the needs-you desk, per the parkKind decision/ops
- * taxonomy — see docs/event-model.md). Once a victim has been parked longer than
- * cfg.pathology.blockedWaitTimeoutHours AND its blocker has still not merged, re-park the
- * victim as parkKind:'decision' carrying the original blockedOn diagnosis as an
- * EscalationPayload, so it surfaces on the operator desk instead of staying silently parked.
+ * WI-099 — blocked-victim wait-timeout: only a missing or terminal-without-merge blocker can
+ * strand its victim. Once the configured wait expires, re-park that victim as a decision with
+ * the original diagnosis. Live/recovering blockers keep waiting; a held/decision blocker is
+ * already the actionable item and the victim continues to point at it.
  */
 async function stepPathology(
   opts: ReactorOptions,
@@ -2141,25 +2176,19 @@ async function stepPathology(
     // on a repair WI (item.blocked.onItem) is released the moment that repair item merges —
     // requeue clears blockedOn via the fold's item.queued case.
     //
-    // WI-099: when the blocker is NOT merged (rejected / re-parked / still building), leaving
-    // the victim parked forever used to be a silent no-op. Instead, once the victim has been
-    // parked past blockedWaitTimeoutHours, re-park it as parkKind:'decision' so it reaches the
-    // operator desk with the original blocked-on diagnosis attached.
+    // WI-099/R1: one blocker-state classifier owns release/wait/escalation. A held or decision
+    // blocker is already visible and actionable, so the victim keeps pointing at it rather than
+    // creating a duplicate decision. Live/recovering blockers wait without an age-based false
+    // alarm; only a missing or terminal-without-merge blocker can time out.
     const blockedWaitTimeoutMs =
       (cfg.pathology.blockedWaitTimeoutHours ?? 24) * 60 * 60 * 1000;
     const nowMs = opts.now ?? Date.now();
     for (const rec of foldResult.items.values()) {
       if (rec.state !== 'parked' || !rec.blockedOn) continue;
-      // WI-099: the wait-timeout re-park below sets parkKind:'decision' but (like every
-      // item.parked event, see fold.ts) leaves blockedOn in place as a forensic breadcrumb —
-      // only item.queued clears it. Once this item has already been escalated to the decision
-      // desk, it belongs to the operator, not to this release loop: skip it so a later blocker
-      // merge cannot silently auto-requeue past the operator's park, and so the timeout check
-      // below cannot re-fire the escalation on every subsequent beat.
-      if (rec.parkKind === 'decision') continue;
       const blockerId = rec.blockedOn;
       const blocker = foldResult.items.get(blockerId);
-      if (blocker && blocker.state === 'merged') {
+      const action = classifyBlockedVictim(rec, blocker, nowMs, blockedWaitTimeoutMs);
+      if (action === 'release') {
         const queuedData: ItemQueuedData = {
           spec: rec.spec ?? '',
           repairContext: `blocker ${blockerId} merged — auto-requeued (pathology)`,
@@ -2175,11 +2204,7 @@ async function stepPathology(
         released++;
         continue;
       }
-
-      // Blocker hasn't merged yet — still building is fine, no timeout applies until the
-      // parked-since age crosses the threshold below.
-      const parkedAtMs = rec.parkedAt ? Date.parse(rec.parkedAt) : NaN;
-      if (!Number.isFinite(parkedAtMs) || nowMs - parkedAtMs < blockedWaitTimeoutMs) continue;
+      if (action !== 'escalate') continue;
 
       const blockerState = blocker?.state ?? 'unknown (gone from the ledger)';
       events.push(makeEvent('reactor', rec.id, 'item.parked', {

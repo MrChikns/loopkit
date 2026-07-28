@@ -449,7 +449,7 @@ export function isDecisionPark(i: FoldActiveItem): boolean {
   return i.state === 'parked' && i.parkKind === 'decision';
 }
 function isOpsPark(i: FoldActiveItem): boolean {
-  return i.state === 'parked' && !isDecisionPark(i);
+  return i.state === 'parked' && (i.parkKind === 'ops' || i.parkKind === undefined);
 }
 
 /** Deliberately-deferred parks ("parked without urgency" — parkKind 'hold', or the legacy
@@ -458,7 +458,24 @@ function isOpsPark(i: FoldActiveItem): boolean {
  *  can never disagree about which parks are a deliberate hold vs. a mechanical ops-park
  *  (one-parser rule). */
 function isHoldPark(i: FoldActiveItem): boolean {
-  return isOpsPark(i) && (i.parkKind === 'hold' || (i.parkReason ?? '').startsWith('hold:'));
+  return i.state === 'parked' && (i.parkKind === 'hold' || (i.parkReason ?? '').startsWith('hold:'));
+}
+
+/**
+ * The Command "Stuck" contract. A deliberate park is never stale just because it is old:
+ * only an exhausted ops failure or an overdue build execution needs attention. Undefined
+ * parkKind remains fail-safe for legacy breaker parks, but age alone never turns any park into
+ * an alarm.
+ */
+export function isStuckWorkItem(i: FoldActiveItem, nowMs: number): boolean {
+  if (i.state === 'parked') {
+    return isOpsPark(i)
+      && !isHoldPark(i)
+      && (i.parkReason ?? '').startsWith('breaker:');
+  }
+  if (i.state !== 'building') return false;
+  const last = lastActivityMs(i);
+  return last !== undefined && nowMs - last > SIX_HOURS_MS;
 }
 
 /** Parse the planner successor id out of a decomposition park reason (reactor.ts stamps
@@ -628,20 +645,20 @@ function buildGlance(fold: FoldSummary, opts: { window?: GlanceWindow } = {}): {
   const decisionAge = oldestAge(nowMs, decisionParks.map((i) => i.parkedAt));
   const acceptanceAge = oldestAge(nowMs, awaitingAcceptance.map((m) => m.mergedAt));
 
-  // ── STUCK: breaker-tripped ops parks ∪ anything unchanged 6h+, regardless of parkKind ──
-  const breakerTripped = fold.active.filter((i) => isOpsPark(i) && (i.parkReason ?? '').startsWith('breaker:'));
-  const staleSixHours = fold.active.filter((i) => {
-    const last = lastActivityMs(i);
-    return last !== undefined && nowMs - last > SIX_HOURS_MS;
-  });
-  const stuckIds = new Set([...breakerTripped, ...staleSixHours].map((i) => i.id));
-  const stuckAges = [...breakerTripped, ...staleSixHours]
+  // ── STUCK: breaker-tripped ops parks ∪ overdue in-flight build execution. Deliberate parks
+  // (hold/decision/decomposition), queue wait and ordinary ops recovery never age into alarms.
+  const breakerTripped = fold.active.filter((i) =>
+    i.state === 'parked' && isStuckWorkItem(i, nowMs));
+  const overdueBuilds = fold.active.filter((i) =>
+    i.state === 'building' && isStuckWorkItem(i, nowMs));
+  const stuckIds = new Set([...breakerTripped, ...overdueBuilds].map((i) => i.id));
+  const stuckAges = [...breakerTripped, ...overdueBuilds]
     .map((i) => lastActivityMs(i))
     .filter((t): t is number => t !== undefined);
   const stuckOldest = stuckAges.length > 0 ? formatAge(nowMs - Math.min(...stuckAges)) : undefined;
   const stuckParts: string[] = [];
   if (breakerTripped.length > 0) stuckParts.push(`${breakerTripped.length} breaker-tripped`);
-  if (staleSixHours.length > 0) stuckParts.push(`${staleSixHours.length} unchanged 6h+`);
+  if (overdueBuilds.length > 0) stuckParts.push(`${overdueBuilds.length} build overdue 6h+`);
 
   // ── FLOW: intake vs drain over the selected window + median capture→merge cycle time (7d).
   //    `opts.window`, when given, drives BOTH the Flow and Reliability windows below (WI-359);

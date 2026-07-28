@@ -14,7 +14,7 @@
  *   7. fingerprint dedup: same fingerprint after a diagnosis → NO second provider call.
  *   8. provider-failure skip: provider ok:false → 'unavailable' skip, park unchanged.
  *   9. provider null → same skip path, zero provider calls.
- *   10. parkKind:'decision' → never diagnosed.
+ *   10. parkKind:'decision'/'hold' → never diagnosed.
  */
 
 import { test } from 'node:test';
@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { makeEvent, LedgerEvent, ParkKind } from '../src/schema.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { fold } from '../src/fold.js';
-import { runReactor } from '../src/beats/reactor.js';
+import { classifyBlockedVictim, runReactor } from '../src/beats/reactor.js';
 import { LlmProvider, ProviderRequest, ProviderResult } from '../src/providers/types.js';
 import { LoopkitConfig, CONFIG_DEFAULTS } from '../src/config.js';
 
@@ -99,6 +99,58 @@ const OWN_CODE_TEXT = `CLASSIFICATION: items-own-code
 EVIDENCE:
 - test failure in the changed file
 PROPOSED_ACTION: fix the failing assertion`;
+
+// R1 park-semantics transition matrix. The beat consumes this one classifier, so this pins
+// every park-kind × age × blocker-state branch without depending on provider or filesystem
+// behavior.
+test('pathology: blocked-victim transition matrix distinguishes waiting, duplicate attention, release, and escalation', () => {
+  const hour = 60 * 60 * 1000;
+  const timeout = 24 * hour;
+  const now = Date.parse('2026-01-02T01:00:00Z');
+  const victim = (parkKind: ParkKind | undefined, ageHours: number) => ({
+    state: 'parked' as const,
+    parkKind,
+    blockedOn: 'WI-REPAIR',
+    parkedAt: new Date(now - ageHours * hour).toISOString(),
+  });
+  const blocker = (
+    state: NonNullable<Parameters<typeof classifyBlockedVictim>[1]>['state'],
+    parkKind?: ParkKind,
+  ) => ({ state, parkKind });
+
+  const cases: Array<{
+    label: string;
+    victimKind: ParkKind | undefined;
+    ageHours: number;
+    blocker: ReturnType<typeof blocker> | undefined;
+    expected: ReturnType<typeof classifyBlockedVictim>;
+  }> = [
+    { label: 'terminal blocker before timeout', victimKind: 'ops', ageHours: 23, blocker: blocker('rejected'), expected: 'wait' },
+    { label: 'terminal blocker at timeout', victimKind: 'ops', ageHours: 24, blocker: blocker('rejected'), expected: 'escalate' },
+    { label: 'missing blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: undefined, expected: 'escalate' },
+    { label: 'answered blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: blocker('answered'), expected: 'escalate' },
+    { label: 'done blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: blocker('done'), expected: 'escalate' },
+    { label: 'live blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: blocker('building'), expected: 'wait' },
+    { label: 'recovering blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: blocker('parked', 'ops'), expected: 'wait' },
+    { label: 'planning blocker after timeout', victimKind: 'ops', ageHours: 25, blocker: blocker('parked', 'decomposition'), expected: 'wait' },
+    { label: 'decision blocker owns attention', victimKind: 'ops', ageHours: 25, blocker: blocker('parked', 'decision'), expected: 'point-to-blocker' },
+    { label: 'held blocker owns pause', victimKind: 'ops', ageHours: 25, blocker: blocker('parked', 'hold'), expected: 'point-to-blocker' },
+    { label: 'merged blocker releases', victimKind: 'ops', ageHours: 1, blocker: blocker('merged'), expected: 'release' },
+    { label: 'accepted blocker releases', victimKind: 'ops', ageHours: 1, blocker: blocker('accepted'), expected: 'release' },
+    { label: 'legacy victim stays fail-safe', victimKind: undefined, ageHours: 25, blocker: blocker('rejected'), expected: 'escalate' },
+    { label: 'held victim never moves automatically', victimKind: 'hold', ageHours: 25, blocker: blocker('merged'), expected: 'wait' },
+    { label: 'decision victim never moves automatically', victimKind: 'decision', ageHours: 25, blocker: blocker('merged'), expected: 'wait' },
+    { label: 'planner victim never moves automatically', victimKind: 'decomposition', ageHours: 25, blocker: blocker('merged'), expected: 'wait' },
+  ];
+
+  for (const c of cases) {
+    assert.equal(
+      classifyBlockedVictim(victim(c.victimKind, c.ageHours), c.blocker, now, timeout),
+      c.expected,
+      c.label,
+    );
+  }
+});
 
 /** Seed a minimal captured+queued+parked(ops) item, one build.dispatched to set attempts. */
 function seedParkedOpsItem(
@@ -340,7 +392,7 @@ test('pathology: blocked victim past the wait-timeout re-parks as decision with 
   }
 });
 
-test('pathology: blocked victim within the wait-timeout window stays parked (no re-park yet)', async () => {
+test('pathology: blocked victim stays parked past the wait-timeout while its blocker is live', async () => {
   const ledgerDir = makeTempDir();
   const repoRoot = makeTempDir();
   try {
@@ -352,8 +404,9 @@ test('pathology: blocked victim within the wait-timeout window stays parked (no 
       // WI-063 (the blocker) is still building — no terminal event at all.
     ]);
 
-    // Only 1 hour after the victim's item.parked — well within the 24h default.
-    const now = new Date('2026-01-01T01:00:03Z').getTime();
+    // 25 hours after the victim's item.parked — past the 24h default. A live blocker is still
+    // progressing, so age alone must not duplicate an operator decision on the victim.
+    const now = new Date('2026-01-02T01:00:03Z').getTime();
 
     await runReactor({
       repoRoot, ledgerDir, autonomy: 'on',
@@ -364,7 +417,7 @@ test('pathology: blocked victim within the wait-timeout window stays parked (no 
 
     const events = await loadAllEvents(ledgerDir);
     const reparked = events.filter(e => e.type === 'item.parked' && e.item === 'WI-062' && e.actor === 'reactor');
-    assert.equal(reparked.length, 0, 'must NOT re-park before the wait-timeout elapses');
+    assert.equal(reparked.length, 0, 'must NOT re-park while the blocker is live, even after the timeout');
     const requeued = events.filter(e => e.type === 'item.queued' && e.item === 'WI-062' && e.actor === 'reactor');
     assert.equal(requeued.length, 0, 'blocker has not merged — no release either');
 
@@ -385,7 +438,7 @@ test('pathology: blockedWaitTimeoutHours is configurable and respected', async (
       makeEvent('reactor', 'WI-064', 'item.blocked', { onItem: 'WI-065', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
       makeEvent('reactor', 'WI-065', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
       makeEvent('reactor', 'WI-065', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
-      makeEvent('reactor', 'WI-065', 'item.parked', { reason: 'gate red', parkKind: 'ops' }, '2026-01-01T00:00:07Z'),
+      makeEvent('operator', 'WI-065', 'item.rejected', { by: 'operator' }, '2026-01-01T00:00:07Z'),
     ]);
 
     // 2 hours after the victim's park — past a configured 1h timeout.
@@ -416,7 +469,7 @@ test('pathology: wait-timeout escalation is one-shot across repeated beats (no r
       makeEvent('reactor', 'WI-066', 'item.blocked', { onItem: 'WI-067', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
       makeEvent('reactor', 'WI-067', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
       makeEvent('reactor', 'WI-067', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
-      // WI-067 (the blocker) never merges or terminates — it just sits building forever.
+      makeEvent('operator', 'WI-067', 'item.rejected', { by: 'operator' }, '2026-01-01T00:00:07Z'),
     ]);
 
     const reactorArgs = {
@@ -461,7 +514,7 @@ test('pathology: blocker merging after wait-timeout escalation does NOT auto-req
       makeEvent('reactor', 'WI-068', 'item.blocked', { onItem: 'WI-069', reason: 'plane-infra-bug (pathology)' }, '2026-01-01T00:00:04Z'),
       makeEvent('reactor', 'WI-069', 'item.captured', { source: 'reactor:pathology', text: 'fix the plane bug', lane: 'engineering' }, '2026-01-01T00:00:05Z'),
       makeEvent('reactor', 'WI-069', 'item.queued', { spec: 'fix the plane bug' }, '2026-01-01T00:00:06Z'),
-      // WI-069 (the blocker) is still building at the time the timeout fires.
+      makeEvent('operator', 'WI-069', 'item.rejected', { by: 'operator' }, '2026-01-01T00:00:07Z'),
     ]);
 
     const reactorArgs = {
@@ -708,6 +761,35 @@ test('pathology: parkKind decision is NEVER diagnosed', async () => {
     assert.equal(diag.length, 0);
     assert.equal(fold(events).items.get('WI-060')?.state, 'parked');
     assert.equal(fold(events).items.get('WI-060')?.parkKind, 'decision');
+  } finally {
+    cleanDir(ledgerDir); cleanDir(repoRoot);
+  }
+});
+
+test('pathology: parkKind hold is NEVER diagnosed or moved', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, seedParkedOpsItem('WI-071', {
+      attempt: 1,
+      parkKind: 'hold',
+      reason: 'hold: operator deliberately paused this work',
+    }));
+
+    const provider = countingProvider(makePathologyProvider(TRANSIENT_TEXT));
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider,
+      config: makeTestConfig({ breakerN: 3 }),
+      now: Date.parse('2026-01-03T00:00:03Z'),
+    });
+
+    assert.equal(provider.callCount(), 0, 'a held park must never reach the diagnosis provider');
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'diagnosis.recorded' && e.item === 'WI-071').length, 0);
+    assert.equal(events.filter(e => e.type === 'item.queued' && e.item === 'WI-071' && e.actor === 'reactor').length, 0);
+    assert.equal(fold(events).items.get('WI-071')?.state, 'parked');
+    assert.equal(fold(events).items.get('WI-071')?.parkKind, 'hold');
   } finally {
     cleanDir(ledgerDir); cleanDir(repoRoot);
   }

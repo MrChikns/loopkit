@@ -103,6 +103,28 @@ contract is pinned now so activation is additive):
 - Acceptance tiering classifies against the **target's** boundaries block, applying the
   precedence: surface wins over plane; risk wins over both.
 
+### Park and dependency semantics
+
+`item.parked.parkKind` is the intent of a pause, not an interchangeable failure label:
+
+| kind/state | meaning | automatic behavior | operator surface |
+|---|---|---|---|
+| `parked/hold` | deliberately paused | none | neutral; Resume only |
+| `parked/decomposition` | waiting for the planner | planner owns the next transition | informational |
+| `parked/ops` | plane-owned failure recovery | bounded retry and pathology | health/recovery; decision only when its breaker is exhausted |
+| `parked/decision` | one concrete operator call | waits indefinitely | decision desk |
+| `blocked` | waits on a named work item | releases when that blocker merges or is accepted | shows the blocker and its current state |
+
+The pathologist diagnoses only failure parks (`ops`, plus legacy unstamped parks). It never sends
+`hold`, `decision`, or `decomposition` through a diagnosis provider. A blocked victim waits while
+its blocker is live, planning, or recovering. If the blocker is held or already needs a decision,
+the victim keeps pointing at that actionable blocker rather than creating a duplicate decision.
+Only a missing or terminal-without-merge blocker escalates the victim after the configured wait
+timeout. A deliberately held victim never moves automatically, even if its blocker later lands.
+
+Legacy unstamped parks remain fail-safe: a breaker-prefixed legacy park is still an ops failure,
+but age alone never turns an unstamped park into an operator alarm.
+
 ### Confirm a portability-nudge reply (ADR-009)
 - A merged/accepted item's certification may carry a `portability` note (`"applies to: <targets>
   | none"`) declaring which OTHER registered targets its pattern generalizes to. When an

@@ -264,14 +264,20 @@ flowchart TD
 ```
 
 - **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
-  it automatically the moment the blocker **merges**
+  it automatically the moment the blocker **merges or is accepted**
   (`packages/core/src/beats/reactor.ts:2162`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
-- **A blocker that never merges does not strand the victim silently.** After
-  **24**<!--pin:blockedWaitTimeoutHours--> hours parked, the victim is re-parked as a `decision` with
-  the blocker's state attached, so it reaches your desk instead of waiting forever
+- **A terminal blocker that never merges does not strand the victim silently.** After
+  **24**<!--pin:blockedWaitTimeoutHours--> hours parked, a victim whose blocker is rejected, answered,
+  done, or missing is re-parked as a `decision` with the blocker's state attached. Live, planning,
+  and recovering blockers keep waiting; a held/decision blocker is already the one actionable row,
+  so the victim points at it without duplicating the decision
   (`packages/core/src/beats/reactor.ts:2186`<!--cite:blockedVictimTimeout-->).
+- **A hold is not a failure.** `parked/hold` never enters pathology, never ages into Stuck, and
+  never moves automatically. Stuck means a breaker-tripped ops park or build execution with no
+  transition for more than six hours; decision, decomposition, queue wait, and ordinary ops
+  recovery do not become alarms by age alone.
 - A `Touches`-less item is a wildcard and serialises the whole lane. Declaring a footprint is what
   buys parallelism.
 - The attempt budget here is dispatch's pick guard of **5**<!--pin:BUILDER_BREAKER_N--> —
@@ -465,6 +471,9 @@ and are promoted only by a manual config change after burn-in.
   bug it allocates a new work item, queues it, and blocks the victim on it
   (`packages/core/src/beats/reactor.ts:2408`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
+- **Deliberate parks never reach the pathologist.** `hold`, `decision`, and `decomposition` are
+  excluded before any diagnosis-provider call. Legacy unstamped parks remain eligible so old
+  failure history fails safe.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every autonomy-enabled reactor beat: orphaned-build detection,
