@@ -10,8 +10,8 @@ vertical slice in an **isolated git worktree** of a target repo, proves it with 
 **deterministic gate** (its test suite), merges on green, and routes human attention through
 **tiered acceptance** (auto / optional / review / must). Two scheduled beats drive everything:
 `reactor` (routes intents, merges approved work, self-heals) and `dispatch` (picks disjoint
-queued items, spawns worker agents, gates, merges). Every view is a projection of the ledger —
-there is no other state.
+queued items, spawns worker agents, gates, merges). The ledger is the authority for work state;
+views may also read explicit operator configuration and bounded run artifacts.
 
 Good for: a solo operator who wants agents to deliver real slices of real repos without
 babysitting them, and who wants an auditable, replayable record of everything the system did.

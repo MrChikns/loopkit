@@ -40,7 +40,7 @@ The generalized plane/target boundary, lifted to N targets:
   "boundaries": {
     "planePrefixes": [],              // merge-trust axis: auto-merge without operator approval
     "surfacePrefixes": [],            // test-visibility axis: surface on the acceptance desk
-    "escalationPatterns": []          // risk axis: always park for the operator
+    "escalationPatterns": []          // risk axis: classify `must`; pre-merge hold is opt-in
   },
   "acceptance": { "tiers": { /* per-tier acceptance windows */ } },
   "promptsDir": "",                   // reserved; parsed but not consumed by the v0.1 runtime

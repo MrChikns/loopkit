@@ -1,8 +1,9 @@
-# Recording the demo gif (`docs/demo.gif`)
+# Recording the demo GIF (`docs/demo.gif`)
 
-The gif is the single most important asset for the README and the LinkedIn post. It has one job:
-land the **"wait — it did that by itself?"** moment in under 40 seconds. One sentence of English
-goes in; a tested, merged commit comes out of *your* repo's `git log`.
+Only embed a demo GIF when it matches the current CLI output, merge topology, and acceptance
+tier. It has one job: land the **"wait — it did that by itself?"** moment in under 40 seconds.
+One sentence of English goes in; a tested, exact merge candidate comes out of *your* repo's
+`git log`.
 
 ## The one rule
 
@@ -33,10 +34,10 @@ non-deterministic, so never record your *first* attempt.
 | 4 | 12–16s | `loopctl beat reactor` → item routed/queued | "It plans it as a work item…" |
 | 5 | 16–28s | `loopctl beat dispatch` → build log scrolls: worktree created → worker → **gate ✓** → merged | "…builds it in an isolated worktree, and runs my tests." **← the tension beat** |
 | 6 | 28–33s | `loopctl events --item WI-001` → the captured→built→gated→merged trail | "Every step is an event. Nothing merged until the tests were green." |
-| 7 | 33–40s | `cd ~/loopkit-demo/notes && git log --oneline` → the worker's commit sits at HEAD | "…and it's already merged into my repo. I was never interrupted — because this change didn't need me." |
+| 7 | 33–40s | `cd ~/loopkit-demo/notes && git log --oneline -2` → the gated merge commit sits at HEAD, with the worker commit below it | "…and the exact merge result is gate-proven in my repo. I was never interrupted — because this change didn't need me." |
 
-**Payoff frame:** hold shot 7 for a full 2–3s. The commit in `git log` is the whole ad — don't
-cut away fast.
+**Payoff frame:** hold shot 7 for a full 2–3s. The merge commit and its worker parent in
+`git log` are the whole ad — don't cut away fast.
 
 This works because the demo target's `loopkit.target.json` declares `src/` as neither a product
 surface nor a risk path — the `deleteNote` change lands in the `optional` acceptance tier, which
@@ -89,6 +90,8 @@ LinkedIn.
 - No secrets, tokens, private hostnames, or unrelated project names anywhere in the terminal
   scrollback.
 - The commit SHA/message shown is from the demo notes target, not a real project.
+- The commit at `HEAD` is the exact no-fast-forward merge candidate that passed the target gate.
+- The demo change lands in the `optional` tier with the bundled notes-target manifest.
 
 ## Regenerating the console screenshot (`docs/console.png`)
 

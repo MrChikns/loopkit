@@ -33,8 +33,6 @@ enough, integrating safely, and remaining accountable for the outcome. loopkit i
 artifact and the experiment: **AI can hold authorship of the implementation without holding
 authority or accountability.**
 
-![loopkit turning one English sentence into a merged, tested commit](docs/demo.gif)
-
 ```bash
 $ loopctl new "Add a deleteNote(id) function to src/notes.js with tests"
   → captured WI-001
@@ -43,8 +41,9 @@ $ loopctl beat reactor      # routes + queues it
 $ loopctl beat dispatch     # builds in a worktree, runs your gate, merges on green
   → WI-001  captured → built → gated ✓ → merged into main
 
-$ cd ~/my-notes-app && git log --oneline
-  a1b9f4e  feat: add deleteNote(id) with tests   ← written, tested, and merged by the plane
+$ cd ~/my-notes-app && git log --oneline -2
+  c4d2e81  feat(dispatch): WI-001 (target notes) ← exact merge candidate, gate-proven
+  a1b9f4e  feat: add deleteNote(id) with tests   ← worker's scoped commit
 ```
 
 ### What just happened
@@ -117,8 +116,8 @@ its own and what needs your eyes.**
   *test-visibility* (what you want to eyeball) are declared separately — a path can be trusted to
   merge **and** still surface for your test. Getting this collapsed into one list is how changes
   ship unseen; here the boundary is explicit config, not convention.
-- **Self-heal basics.** A doctor pass detects orphaned builds, dead-process locks, and oversized
-  events; the plane degrades and reports instead of wedging.
+- **Self-heal basics.** Doctor handles orphaned and stalled builds; ledger appends reclaim
+  dead-owner locks and bound oversized events. The plane degrades and reports instead of wedging.
 - **Sensitivity-aware model routing.** Every item carries a data-sensitivity tier
   (`public`/`internal`/`private`); the provider registry gates which model may serve which tier
   (`private` → local model), fail-closed. A fresh plane uses the exercised Claude CLI worker for
@@ -209,7 +208,7 @@ $LOOPCTL beat dispatch    # builds in a worktree OF THE TARGET, gates, merges in
 
 # 6. See what happened
 $LOOPCTL state && $LOOPCTL events --item WI-001
-cd ~/loopkit-demo/notes && git log --oneline   # the worker's commit is in YOUR repo's history
+cd ~/loopkit-demo/notes && git log --oneline -2   # gated merge + worker commit are in YOUR history
 ```
 
 Notes from real runs: the plane refuses to run agents until `LOOPKIT_AUTONOMY=on` (a fail-safe,
@@ -223,8 +222,9 @@ A repo becomes buildable by declaring a small, non-secret manifest (`loopkit.tar
 default branch, gate command, worktree prefix, and its three boundary lists (merge-trust
 prefixes, test-visible surfaces, risk patterns). The plane's own state lives in a separate
 *plane-home* directory — itself a git repo, so runtime state gets the same durability treatment
-as code. `targetId` is in every event from birth; v0.1 drives **one** target. Multi-target is an
-activation, not a rewrite. Design notes: [docs/event-model.md](docs/event-model.md).
+as code. `targetId` is stamped at capture and retained on the folded item; v0.1 drives **one**
+target. Multi-target is an activation, not a rewrite. Design notes:
+[docs/event-model.md](docs/event-model.md).
 
 ## The method, not just the machinery
 
@@ -251,12 +251,13 @@ For attended agent sessions the repo includes optional repo-local helpers. Claud
 handwritten commands
 (`.claude/commands/`): `/drive` (attended coordinator mode over claims),
 `/plane-check` (health triage), `/board` (the status window). Open a session in this repo and
-they load automatically. Codex gets matching repo-local `drive` and `board` skills under
-`.agents/skills/`; deterministic health triage remains available through `loopctl doctor`,
-`summary` and `slo`. These helpers are not external prerequisites or a provider-neutral plugin
-system, and `loopctl` does not install them into target repos. Workers run from the target
-worktree; discovery of its `AGENTS.md` / `CLAUDE.md` is provider-native rather than
-Loopkit-enforced. See [agent integration](docs/agent-integration.md).
+they load automatically. Codex gets matching repo-local `source-command-drive` and
+`source-command-board` skills under `.agents/skills/`; deterministic health triage remains
+available through `loopctl doctor`, `summary` and `slo`. These helpers are not external
+prerequisites or a provider-neutral plugin system, and `loopctl` does not install them into
+target repos. Workers run from the target worktree; discovery of its `AGENTS.md` / `CLAUDE.md`
+is provider-native rather than Loopkit-enforced. See
+[agent integration](docs/agent-integration.md).
 
 ## Honest scope
 
@@ -284,4 +285,5 @@ star freely — see [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests are closed
 
 ## License
 
-MIT
+Loopkit is MIT-licensed. The bundled Inter font is licensed separately under the SIL Open Font
+License 1.1; see [`packages/ui/canonical/fonts/OFL.txt`](packages/ui/canonical/fonts/OFL.txt).

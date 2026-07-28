@@ -69,15 +69,21 @@ yourself when the operator is hands-on and wants it now, or when items need judg
    a bounded contract: its **own worktree** off the target's default branch (never the main
    checkout), an explicit allowed-files list, its item specs, the target's `gateCommand` from
    `loopkit.target.json`, iterate to green, **commit on the branch — do not merge**.
-3. Merge each cluster yourself, sequentially, in the target's main checkout: review the diff
-   against acceptance + the file fence, `git merge --no-ff`, **re-run the full gate on the merge
-   result**, green only. Clean up the worktree.
+3. Prove each cluster sequentially without putting an unproven merge on the target's main:
+   record the current main SHA, create a temporary integration worktree from that exact SHA,
+   merge the builder branch there with `--no-ff`, review the diff against acceptance + the file
+   fence, and run the full gate on that exact merge candidate. Red means discard the candidate
+   and leave main untouched. Immediately before publication, verify main is still at the recorded
+   SHA; from the clean primary checkout, advance it with
+   `git merge --ff-only <gate-proven-candidate-sha>`. If main moved or the fast-forward fails,
+   never force: rebuild and re-gate a new candidate from the new tip. Clean temporary worktrees
+   only after publication or a recorded park.
 4. Put it on the board — append the close event **with full merge evidence**, never a bare
    commit. The acceptance tier classifies from the actual diff; a `{"commit":...}`-only append
    is indistinguishable from a no-code stub merge and can let real code auto-accept unseen:
    ```bash
    cd <target-repo>
-   BASE=$(git merge-base HEAD@{1} HEAD); HEAD_SHA=$(git rev-parse HEAD)
+   BASE=$(git rev-parse HEAD^1); HEAD_SHA=$(git rev-parse HEAD)
    FILES=$(git diff --name-only "$BASE".."$HEAD_SHA" | jq -R . | jq -sc .)
    $LOOPCTL append item.merged --item WI-NNN --data "{\"commit\":\"$(git rev-parse --short HEAD)\",
      \"baseSha\":\"$BASE\",\"headSha\":\"$HEAD_SHA\",\"changedFiles\":$FILES,

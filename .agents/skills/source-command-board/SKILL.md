@@ -5,7 +5,7 @@ description: "The status window — render the loopkit board and the determinist
 
 # source-command-board
 
-Use this skill when the user asks to run the migrated source command `board`.
+Use this skill when the user asks for the board, plane status, progress, or health readouts.
 
 ## Command Template
 

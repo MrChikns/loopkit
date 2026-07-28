@@ -102,7 +102,8 @@ export interface TargetManifest {
    * The three boundary axes, per target:
    *   - planePrefixes     — merge-trust axis: paths that auto-merge without operator approval
    *   - surfacePrefixes   — test-visibility axis: paths that surface on the acceptance desk
-   *   - escalationPatterns — risk axis: paths that ALWAYS park for the operator
+   *   - escalationPatterns — risk axis: paths classified `must` after merge; when the optional
+   *     preMergeRiskHold is enabled, matching paths park before merge instead
    * Empty arrays (the defaults) declare no special boundaries — everything auto-merges on green
    * and nothing is force-surfaced, which is the safe minimal shape for a fresh demo target.
    */
