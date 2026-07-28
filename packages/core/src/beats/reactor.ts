@@ -3795,10 +3795,24 @@ async function stepDeployTimeouts(
             reason: `deploy reconciliation failed: ${target.error}`,
           };
         }
+        const published = spawnSync(
+          'git',
+          ['rev-parse', target.manifest.defaultBranch],
+          { cwd: target.reg.repoPath, encoding: 'utf8' },
+        );
+        if (published.status !== 0 || !published.stdout.trim()) {
+          return {
+            ok: false,
+            reason: `deploy reconciliation failed: target default branch '${
+              target.manifest.defaultBranch
+            }' is unresolvable`,
+          };
+        }
         return {
           ok: true,
           repoRoot: target.reg.repoPath,
           deployCommand: target.manifest.deployCommand,
+          expectedCommit: published.stdout.trim(),
         };
       },
     });

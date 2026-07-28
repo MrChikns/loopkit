@@ -264,6 +264,8 @@ export interface DispatchOptions {
     candidateMergeSha: string;
     attempt: number;
   }) => void;
+  /** Test seam at the final target deploy boundary, after checkout synchronization. */
+  targetBeforeDeploy?: (context: { expectedCommit: string; repoRoot: string }) => void;
   /**
    * Injected judge results map for tests.
    * Keys are WI-NNN ids. When present, the real judge provider.run is skipped for that item.
@@ -2803,17 +2805,22 @@ async function finalizeTargetBuild(
     const observedGateHead = postGateHead.status === 0 ? postGateHead.stdout.toString().trim() : '';
     const postGateStatus = spawnSync(
       'git',
-      ['status', '--porcelain', '--untracked-files=no'],
+      ['status', '--porcelain', '--untracked-files=all'],
       { cwd: wtPath, stdio: 'pipe', maxBuffer: SPAWN_MAX_BUFFER },
     );
-    const trackedGateResidue = postGateStatus.stdout.toString().trim();
-    if (observedGateHead !== candidate.commit || postGateStatus.status !== 0 || trackedGateResidue) {
+    const gateResidue = postGateStatus.stdout.toString().trim()
+      .split('\n')
+      .filter(Boolean)
+      .filter(line => !isDependencyPlumbing(line))
+      .filter(line => !isWorkerManifest(line))
+      .join('\n');
+    if (observedGateHead !== candidate.commit || postGateStatus.status !== 0 || gateResidue) {
       const reason = observedGateHead !== candidate.commit
         ? `target exact merge-candidate gate moved HEAD from ${candidate.commit} to ${
           observedGateHead || '(unresolvable)'
         }`
-        : `target exact merge-candidate gate left tracked worktree/index changes: ${
-          trackedGateResidue.split('\n').slice(0, 5).join('; ') || 'git status failed'
+        : `target exact merge-candidate gate left worktree/index changes: ${
+          gateResidue.split('\n').slice(0, 5).join('; ') || 'git status failed'
         }`;
       removeWorktree(gitRoot, wtPath);
       await appendEvents(opts.ledgerDir, [
@@ -2915,12 +2922,14 @@ async function finalizeTargetBuild(
       ...(rec.targetId ? { targetId: rec.targetId } : {}),
     }]);
   }
+  opts.targetBeforeDeploy?.({ expectedCommit: mergeCommit, repoRoot: gitRoot });
   const deploy = await requestDeployOnMerge({
     actor: 'dispatch',
     ledgerDir: opts.ledgerDir,
     repoRoot: gitRoot,
     deployCommand: manifest.deployCommand,
     wiIds: [rec.id],
+    expectedCommit: mergeCommit,
     ...(!closeResult.checkoutSynced && manifest.deployCommand
       ? {
         preflightFailure:

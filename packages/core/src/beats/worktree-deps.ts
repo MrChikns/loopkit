@@ -407,16 +407,40 @@ export function fireDeployOnMerge(
   deployCommand: string,
   wiIds: string[],
   spawnDeploy: DeploySpawn = spawn,
+  expectedCommit?: string,
 ): Promise<DeploySpawnResult> {
   if (!deployCommand) {
     return Promise.resolve({ started: false, reason: 'deploy command is not configured' });
+  }
+  if (expectedCommit) {
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+    const status = spawnSync(
+      'git',
+      ['status', '--porcelain', '--untracked-files=all'],
+      { cwd: repoRoot, encoding: 'utf8' },
+    );
+    const observed = head.status === 0 ? head.stdout.trim() : '';
+    const residue = status.status === 0 ? status.stdout.trim() : 'git status failed';
+    if (observed !== expectedCommit || residue) {
+      return Promise.resolve({
+        started: false,
+        reason:
+          `deploy checkout preflight failed: expected clean HEAD ${expectedCommit}, observed ${
+            observed || '(unresolvable)'
+          }${residue ? `; checkout changes: ${residue.split('\n').slice(0, 5).join('; ')}` : ''}`,
+      });
+    }
   }
   try {
     const child = spawnDeploy('sh', ['-c', deployCommand], {
       cwd: repoRoot,
       detached: true,
       stdio: 'ignore',
-      env: { ...process.env, DEPLOY_WI_IDS: wiIds.join(' ') },
+      env: {
+        ...process.env,
+        DEPLOY_WI_IDS: wiIds.join(' '),
+        ...(expectedCommit ? { DEPLOY_COMMIT: expectedCommit } : {}),
+      },
     });
     return new Promise(resolve => {
       let settled = false;

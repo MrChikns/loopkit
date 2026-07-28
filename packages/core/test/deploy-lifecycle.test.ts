@@ -2,13 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
 import {
@@ -167,6 +169,40 @@ test('deploy: synchronous spawn failure appends failed after requested', async (
     assert.equal(rec.deployed, false);
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test('deploy: expected commit is preflighted at launch and exported to the child', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'deploy-expected-commit-'));
+  const repoRoot = join(base, 'repo');
+  const ledgerDir = join(base, 'ledger');
+  try {
+    mkdirSync(repoRoot);
+    spawnSync('git', ['init', '-b', 'main'], { cwd: repoRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.email', 't@t'], { cwd: repoRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.name', 't'], { cwd: repoRoot, stdio: 'pipe' });
+    writeFileSync(join(repoRoot, 'app.txt'), 'clean\n');
+    spawnSync('git', ['add', 'app.txt'], { cwd: repoRoot, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'published'], { cwd: repoRoot, stdio: 'pipe' });
+    const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-014', 'item.merged', {
+        commit, deployed: false, deployConfigured: true,
+      }),
+    ]);
+    let childCommit = '';
+    const spawnDeploy = ((_command: string, _args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+      childCommit = options.env?.['DEPLOY_COMMIT'] ?? '';
+      return spawn('sh', ['-c', 'true'], { cwd: repoRoot, detached: true, stdio: 'ignore' });
+    }) as unknown as DeploySpawn;
+    const result = await requestDeployOnMerge({
+      actor: 'dispatch', ledgerDir, repoRoot, deployCommand: 'true',
+      wiIds: ['WI-014'], expectedCommit: commit, spawnDeploy,
+    });
+    assert.equal(result.started, true);
+    assert.equal(childCommit, commit);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -433,6 +469,100 @@ test('deploy reconciliation: target crash recovery uses target execution and mis
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
     rmSync(targetRoot, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: pending target intent rechecks expected commit and fails dirty checkout without spawning', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'deploy-reconcile-target-preflight-'));
+  const targetRoot = join(base, 'target');
+  const ledgerDir = join(base, 'ledger');
+  try {
+    mkdirSync(targetRoot);
+    spawnSync('git', ['init', '-b', 'main'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.email', 't@t'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.name', 't'], { cwd: targetRoot, stdio: 'pipe' });
+    writeFileSync(join(targetRoot, 'app.txt'), 'published\n');
+    spawnSync('git', ['add', 'app.txt'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'published'], { cwd: targetRoot, stdio: 'pipe' });
+    const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: targetRoot, encoding: 'utf8' }).stdout.trim();
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'WI-052', 'item.captured', {
+        source: 'test', text: 'target work', target: 'customer-app',
+      }),
+      makeEvent('dispatch', 'WI-052', 'item.merged', {
+        commit, deployed: false, deployConfigured: true,
+      }),
+      makeEvent('dispatch', 'WI-052', 'deploy.requested', {}),
+    ]);
+    writeFileSync(join(targetRoot, 'app.txt'), 'editor draft\n');
+    let spawnCalls = 0;
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: fold(await loadAllEvents(ledgerDir)).items.values(),
+      resolve: () => ({
+        ok: true, repoRoot: targetRoot, deployCommand: 'true', expectedCommit: commit,
+      }),
+      spawnDeploy: (() => {
+        spawnCalls++;
+        return spawn('sh', ['-c', 'true'], { cwd: targetRoot, detached: true, stdio: 'ignore' });
+      }) as unknown as DeploySpawn,
+    });
+    assert.equal(spawnCalls, 0);
+    assert.equal(result.eventsWritten, 1, 'the existing pending request closes with one failed receipt');
+    const rec = fold(await loadAllEvents(ledgerDir)).items.get('WI-052')!;
+    assert.equal(rec.deployStatus, 'failed');
+    assert.match(rec.deployFailureReason ?? '', /deploy checkout preflight failed/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: older pending target item preflights the current newer target tip', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'deploy-reconcile-newer-target-tip-'));
+  const targetRoot = join(base, 'target');
+  const ledgerDir = join(base, 'ledger');
+  try {
+    mkdirSync(targetRoot);
+    spawnSync('git', ['init', '-b', 'main'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.email', 't@t'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['config', 'user.name', 't'], { cwd: targetRoot, stdio: 'pipe' });
+    writeFileSync(join(targetRoot, 'app.txt'), 'older\n');
+    spawnSync('git', ['add', 'app.txt'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'older merge'], { cwd: targetRoot, stdio: 'pipe' });
+    const older = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: targetRoot, encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(targetRoot, 'newer.txt'), 'newer\n');
+    spawnSync('git', ['add', 'newer.txt'], { cwd: targetRoot, stdio: 'pipe' });
+    spawnSync('git', ['commit', '-m', 'newer merge'], { cwd: targetRoot, stdio: 'pipe' });
+    const currentTip = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: targetRoot, encoding: 'utf8' }).stdout.trim();
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'WI-053', 'item.captured', {
+        source: 'test', text: 'older target work', target: 'customer-app',
+      }),
+      makeEvent('dispatch', 'WI-053', 'item.merged', {
+        commit: older, deployed: false, deployConfigured: true,
+      }),
+      makeEvent('dispatch', 'WI-053', 'deploy.requested', {}),
+    ]);
+    let exportedCommit = '';
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: fold(await loadAllEvents(ledgerDir)).items.values(),
+      resolve: () => ({
+        ok: true, repoRoot: targetRoot, deployCommand: 'true', expectedCommit: currentTip,
+      }),
+      spawnDeploy: ((_command: string, _args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+        exportedCommit = options.env?.['DEPLOY_COMMIT'] ?? '';
+        return spawn('sh', ['-c', 'true'], { cwd: targetRoot, detached: true, stdio: 'ignore' });
+      }) as unknown as DeploySpawn,
+    });
+    assert.equal(result.failures.length, 0);
+    assert.equal(exportedCommit, currentTip);
+    assert.notEqual(exportedCommit, older, 'historical item commit must not falsely pin an older target tip');
+    assert.equal(fold(await loadAllEvents(ledgerDir)).items.get('WI-053')?.deployStatus, 'pending');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
 

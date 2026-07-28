@@ -91,7 +91,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:894`<!--cite:openBuildWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:896`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -100,7 +100,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3535`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3544`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -115,13 +115,13 @@ says exist are checked the same way, against the symbol that backs them.
 - **The lifecycle is observed, but the detached process is not controlled.** A configured merge
   durably appends `deploy.requested` before spawn, and reactor reconciliation repairs a crash
   before request or before launch
-  (`packages/core/src/deploy.ts:136`<!--cite:requestDeployOnMerge-->). The fold distinguishes
+  (`packages/core/src/deploy.ts:138`<!--cite:requestDeployOnMerge-->). The fold distinguishes
   `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; a legacy merge with no
   configuration evidence remains unknown. Explicit success sets compatibility `deployed` true
   (`packages/core/src/fold.ts:808`<!--cite:foldDeploySucceeded-->).
   A process-launch error becomes `failed`, while a silent hook becomes `timed-out` after the
   configured deploy-freshness hour
-  (`packages/core/src/deploy.ts:288`<!--cite:stalePendingDeployEvents-->). The process is still
+  (`packages/core/src/deploy.ts:293`<!--cite:stalePendingDeployEvents-->). The process is still
   detached and unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->):
   timeout records truth but does not kill a surviving process, and a late terminal receipt may
   supersede it. *Bounded:* deploy is off by default, merge correctness does not depend on deploy,
@@ -218,7 +218,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1434`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1436`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the

@@ -22,6 +22,8 @@ export interface DeployRequest {
   deployCommand: string;
   wiIds: string[];
   spawnDeploy?: DeploySpawn;
+  /** Exact published commit the deploy checkout must still be cleanly showing at launch. */
+  expectedCommit?: string;
   /**
    * A caller-side handoff precondition failed after merge (for example, the primary
    * checkout could not be synchronized to the published commit without overwriting an
@@ -172,6 +174,7 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
     request.deployCommand,
     launchIds,
     request.spawnDeploy,
+    request.expectedCommit,
   );
   if (spawnResult.started) {
     return { configured: true, started: true, eventsWritten: claim.claimed.length };
@@ -202,6 +205,7 @@ export async function resumePendingDeploy(request: DeployRequest): Promise<Deplo
     request.deployCommand,
     wiIds,
     request.spawnDeploy,
+    request.expectedCommit,
   );
   if (spawnResult.started) {
     return { configured: true, started: true, eventsWritten: 0 };
@@ -216,7 +220,7 @@ export async function resumePendingDeploy(request: DeployRequest): Promise<Deplo
 }
 
 export type DeployExecutionResolution =
-  | { ok: true; repoRoot: string; deployCommand: string }
+  | { ok: true; repoRoot: string; deployCommand: string; expectedCommit?: string }
   | { ok: false; reason: string };
 
 export interface DeployReconcileResult {
@@ -272,6 +276,7 @@ export async function reconcileDeployIntents(args: {
       deployCommand: execution.deployCommand,
       wiIds: [rec.id],
       spawnDeploy: args.spawnDeploy,
+      ...(execution.expectedCommit ? { expectedCommit: execution.expectedCommit } : {}),
     };
     const launch = await requestDeployOnMerge(request);
     result.eventsWritten += launch.eventsWritten;

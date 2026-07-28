@@ -101,17 +101,17 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2335`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2337`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:2988`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:2997`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery. At the
   merge terminal it re-reads that default branch; if it moved, the target lane rebases, recomputes
   the build's actual changed files, constructs the exact no-fast-forward candidate and runs the
   target gate on that exact commit. Publication is an atomic compare-and-swap; a losing writer
   loops through replay, candidate construction and gating again
-  (`packages/core/src/beats/dispatch.ts:2778`<!--cite:targetPostIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:2780`<!--cite:targetPostIntegrationRegate-->).
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
   spine guard and a push step; it shares the post-integration re-gate invariant with target.
 - An **attended drain** is not a fourth lane. When you drive the plane by hand, a coordinator agent
@@ -199,14 +199,14 @@ flowchart TD
 **Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
 claimed in that window, and claims every survivor in the same locked append before spawning anything
-(`packages/core/src/beats/dispatch.ts:471`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
+(`packages/core/src/beats/dispatch.ts:473`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
 Both picking lanes — engineering and target — go through that one terminal, under one per-beat
 pseudo-session, so the reservation cannot drift between them (WI-186).
 That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3515`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3524`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
@@ -229,7 +229,7 @@ per-item backoff; they do not trip this shared provider breaker.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3635`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3644`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
   selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
@@ -325,13 +325,13 @@ behind it.
 
 **Two different scopes, easily confused.** What dispatch is willing to **commit** is the union of the
 item's declared `Touches` prefixes and the exact paths the worker reported in its manifest
-(`packages/core/src/beats/dispatch.ts:1592`<!--cite:planScopedCommit-->) — anything else stays
+(`packages/core/src/beats/dispatch.ts:1594`<!--cite:planScopedCommit-->) — anything else stays
 uncommitted and is reported as residue. What counts as an **overstep** is narrower: a changed file
 outside the declared prefixes, minus a test-file exemption and minus paths you previously approved
-(`packages/core/src/beats/dispatch.ts:1549`<!--cite:checkTouchesOverstep-->). The worker may also propose
+(`packages/core/src/beats/dispatch.ts:1551`<!--cite:checkTouchesOverstep-->). The worker may also propose
 the commit subject; dispatch uses it verbatim when present.
 
-**The spine guard** (`packages/core/src/beats/dispatch.ts:1471`<!--cite:checkSpine-->) parks any diff
+**The spine guard** (`packages/core/src/beats/dispatch.ts:1473`<!--cite:checkSpine-->) parks any diff
 touching the plane's own configured spine pattern for your decision. It is an engineering-lane guard
 — a target repo has no plane-spine concept.
 
@@ -370,7 +370,7 @@ own. Push happens only where a target declares a remote.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4327`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4336`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -408,7 +408,7 @@ flowchart TD
 
 - The invariant: **no build reaches its destination without a gate covering every commit that landed
   since its branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:4766`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:4775`<!--cite:postIntegrationRegate-->).
 - The target lane applies the same invariant with its own manifest gate: re-read destination,
   rebase when needed, construct the exact no-fast-forward commit, gate that commit, then publish
   the default-branch ref with an expected-old-SHA compare-and-swap. A CAS loss repeats the whole
@@ -418,9 +418,9 @@ flowchart TD
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, verifies that the primary checkout has no staged, unstaged, or untracked
   operator state, then hard-resets it onto the new tip
-  (`packages/core/src/beats/dispatch.ts:4956`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:4965`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:4982`<!--cite:pushRaceRegate-->). A dirty checkout stops the
+  (`packages/core/src/beats/dispatch.ts:4991`<!--cite:pushRaceRegate-->). A dirty checkout stops the
   recovery and records exact porcelain path evidence instead of discarding it.
 - Every failure here is a park, never a force. A conflict, red candidate gate or exhausted CAS retry
   stops the item; nothing is published past a disagreement.
@@ -493,11 +493,11 @@ and are promoted only by a manual config change after burn-in.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3474`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3483`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:3269`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:3278`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
@@ -616,7 +616,7 @@ flowchart TD
 
 - **The request is durable before process hand-off.** The plane appends `deploy.requested` for every
   merged item, awaits that write, and only then spawns
-  (`packages/core/src/deploy.ts:136`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
+  (`packages/core/src/deploy.ts:138`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
   asynchronous process-launch errors append `deploy.failed`. A reactor reconciliation also repairs
   both crash windows: a configured merge missing its request is requested and launched, while a
   still-pending request safely re-invokes the configured self-locking command.
@@ -636,7 +636,7 @@ flowchart TD
   not be trusted on this field.
 - **A silent script becomes an explicit timeout.** Each reactor beat closes a `pending` request
   after **1**<!--pin:deployBehindHours--> hour
-  (`packages/core/src/deploy.ts:288`<!--cite:stalePendingDeployEvents-->), deterministically and once.
+  (`packages/core/src/deploy.ts:293`<!--cite:stalePendingDeployEvents-->), deterministically and once.
   A late success can still supersede that timeout. The separate deploy-freshness SLO
   (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains the checkout-level backstop,
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
