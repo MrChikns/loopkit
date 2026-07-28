@@ -54,6 +54,7 @@ import {
   AcceptanceProjection,
   workProjectionFromFold,
   WorkProjection,
+  classifyWorkGroup,
   WORK_GROUP_IDS,
   WORK_GROUP_PAGE_PARAMS,
   parseWorkGroup,
@@ -78,6 +79,7 @@ import {
   artifactsProjectionFromInput,
   projectionRegistry,
   Pagination,
+  trustedSurfaceUrl,
 } from '@loopkit/opsui';
 import type {
   GlanceWindow,
@@ -908,16 +910,6 @@ export function renderWorkPage(
 
 /** Health/System projection — SLO board + heal feed + analytics strip + artifacts region.
  *  Optional panes (product SLIs) are fed their absent state when unused. */
-function configuredSurfaceUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function buildSystemAxes(
   data: OpsData,
   board: ReturnType<typeof buildHealthBoard>,
@@ -927,8 +919,8 @@ export function buildSystemAxes(
     : board.rollup.status === 'at-risk' ? 'warning'
     : board.rollup.status === 'met' ? 'success'
     : 'neutral';
-  // Mirror Missions' canonical work groups at this page boundary. FoldActiveItem.state is
-  // intentionally open-ended, so testing/blocked remain covered for forward-compatible hosts.
+  // Consume Missions' canonical semantic classifier, including scheduling evidence that turns
+  // breaker-exhausted queued work into needs-decision rather than falsely-ready work.
   const groups = {
     inProgress: 0,
     queued: 0,
@@ -938,14 +930,16 @@ export function buildSystemAxes(
     held: 0,
     planning: 0,
   };
+  const queueBlocking = new Map((data.fold.queueBlocking ?? []).map((row) => [row.id, row]));
   for (const item of data.fold.active) {
-    if (item.blockedOn || item.state === 'blocked') groups.waiting++;
-    else if (item.state === 'building' || item.state === 'testing' || item.state === 'gated' || item.state === 'approved') groups.inProgress++;
-    else if (item.state === 'captured' || item.state === 'routed' || item.state === 'queued') groups.queued++;
-    else if (item.state === 'parked' && item.parkKind === 'decision') groups.decision++;
-    else if (item.state === 'parked' && item.parkKind === 'hold') groups.held++;
-    else if (item.state === 'parked' && item.parkKind === 'decomposition') groups.planning++;
-    else if (item.state === 'parked') groups.recovering++;
+    const group = classifyWorkGroup(item, queueBlocking.get(item.id));
+    if (group === 'in-progress') groups.inProgress++;
+    else if (group === 'queued') groups.queued++;
+    else if (group === 'waiting-dependency') groups.waiting++;
+    else if (group === 'recovering') groups.recovering++;
+    else if (group === 'needs-decision') groups.decision++;
+    else if (group === 'held') groups.held++;
+    else groups.planning++;
   }
   const parked = groups.recovering + groups.decision + groups.held + groups.planning;
   const detailParts = [
@@ -960,7 +954,9 @@ export function buildSystemAxes(
   const flowDetail = detailParts.length ? detailParts.join(' · ') : 'No runnable work waiting';
   const flow = !armed
     ? { state: 'neutral' as const, value: 'Paused', detail: `${flowDetail} · kill switch halted` }
-    : groups.waiting > 0
+    : groups.decision > 0
+      ? { state: 'warning' as const, value: 'Needs decision', detail: flowDetail }
+      : groups.waiting > 0
       ? { state: 'warning' as const, value: 'Blocked', detail: flowDetail }
       : groups.inProgress > 0
         ? { state: 'progress' as const, value: 'Moving', detail: flowDetail }
@@ -1036,7 +1032,7 @@ export function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
   };
 
   const rows: DeployTargetLiveness[] = [
-    row('Plane', Boolean(data.cfg.deployCommand), recordsFor((item) => !item.target), configuredSurfaceUrl(data.cfg.surfaceUrl)),
+    row('Plane', Boolean(data.cfg.deployCommand), recordsFor((item) => !item.target), trustedSurfaceUrl(data.cfg.surfaceUrl)),
   ];
   for (const target of data.result.targets.values()) {
     try {
@@ -1047,7 +1043,7 @@ export function buildDeployTargets(data: OpsData): DeployTargetLiveness[] {
         recordsFor((item) => Boolean(item.target) && (
           item.targetId ? item.targetId === target.targetId : item.target === target.name
         )),
-        configuredSurfaceUrl(manifest.surfaceUrl),
+        trustedSurfaceUrl(manifest.surfaceUrl),
       ));
     } catch {
       rows.push({

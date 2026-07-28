@@ -113,4 +113,8 @@ test('acceptance renders compact delivery evidence and only a trusted configured
   fold.recentMerged[0]!.surfaceUrl = 'javascript:alert(1)';
   const unsafeHtml = AcceptanceProjection(acceptanceProjectionFromFold(fold, { ledgerSequence: 1 }));
   assert.ok(!unsafeHtml.includes('javascript:'), 'non-http config is not a changed-surface link');
+
+  fold.recentMerged[0]!.surfaceUrl = 'https://operator:secret@product.example.test/settings';
+  const credentialHtml = AcceptanceProjection(acceptanceProjectionFromFold(fold, { ledgerSequence: 1 }));
+  assert.ok(!credentialHtml.includes('operator:secret'), 'credential-bearing URLs are never rendered');
 });

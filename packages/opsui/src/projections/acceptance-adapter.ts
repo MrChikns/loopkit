@@ -18,6 +18,7 @@ import { deriveOrigin, isFoldSummary, mergedItemBadge, originBadge, type FoldMer
 import type { OperationalState } from '../states/operational-state.ts';
 import type { ProjectionEnvelope } from './projection-types.ts';
 import { deployEvidenceFromMerged } from './deploy-evidence.ts';
+import { trustedSurfaceUrl } from './surface-url.ts';
 
 const SCHEMA_VERSION = '1';
 /** Acceptance-debt age past which the oldest tile turns from progress to warning. */
@@ -31,16 +32,6 @@ function mergedAtMs(item: FoldMergedItem): number {
 function specLabel(item: FoldMergedItem): string {
   const spec = (item.spec ?? '').trim();
   return spec ? `${item.id} · ${spec}` : item.id;
-}
-
-function trustedSurfaceUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function evidenceTouches(item: FoldMergedItem): string[] {

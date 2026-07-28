@@ -153,6 +153,16 @@ test('summary: changed-surface links come only from an explicit HTTP(S) config v
   });
   const invalidRow = (invalid.recentMerged as Array<Record<string, unknown>>)[0]!;
   assert.equal(invalidRow.surfaceUrl, undefined, 'repo paths never become product links');
+
+  const credentialed = buildSummary(result, events, {
+    cfg: { ...CONFIG_DEFAULTS, surfaceUrl: 'https://operator:secret@product.example.test/app' },
+    repoRoot: process.cwd(),
+  });
+  assert.equal(
+    (credentialed.recentMerged as Array<Record<string, unknown>>)[0]!.surfaceUrl,
+    undefined,
+    'credential-bearing plane URLs never cross into the UI summary',
+  );
 });
 
 test('summary: sole-target identity coalescing does not route an untargeted plane item to the target surface', () => {
@@ -186,6 +196,31 @@ test('summary: sole-target identity coalescing does not route an untargeted plan
     });
     const row = (summary.recentMerged as Array<Record<string, unknown>>)[0]!;
     assert.equal(row.surfaceUrl, 'https://plane.example.test/');
+
+    writeFileSync(join(targetRoot, 'loopkit.target.json'), JSON.stringify({
+      name: 'sole-target',
+      surfaceUrl: 'https://operator:secret@target.example.test/',
+    }), 'utf8');
+    const targetedEvents = [
+      events[0]!,
+      makeEvent('cli', 'WI-972', 'item.captured', {
+        source: 'test',
+        text: 'target work',
+        target: 'sole-target',
+        targetId: 'tgt-aaaa2345',
+      }, mergedAt),
+      makeEvent('dispatch', 'WI-972', 'item.merged', { commit: 'abc972', deployConfigured: false }, mergedAt),
+    ];
+    const targetedResult = fold(targetedEvents);
+    const targetedSummary = buildSummary(targetedResult, targetedEvents, {
+      cfg: CONFIG_DEFAULTS,
+      repoRoot: process.cwd(),
+    });
+    assert.equal(
+      (targetedSummary.recentMerged as Array<Record<string, unknown>>)[0]!.surfaceUrl,
+      undefined,
+      'credential-bearing target URLs never cross into the UI summary',
+    );
   } finally {
     rmSync(targetRoot, { recursive: true, force: true });
   }

@@ -4,12 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { buildSummary, CONFIG_DEFAULTS, fold, makeEvent } from '@loopkit/core';
+import { buildSummary, BUILDER_BREAKER_N, CONFIG_DEFAULTS, fold, makeEvent } from '@loopkit/core';
+import type { FoldResult, LoopkitConfig } from '@loopkit/core';
 import type { FoldActiveItem, FoldSummary } from '@loopkit/opsui';
 import { buildDeployTargets, buildSystemAxes, type OpsData } from '../src/opsPages.js';
 
 function dataFor(events: ReturnType<typeof makeEvent>[], cfg = CONFIG_DEFAULTS): OpsData {
   const result = fold(events);
+  return dataFromResult(events, result, cfg);
+}
+
+function dataFromResult(
+  events: ReturnType<typeof makeEvent>[],
+  result: FoldResult,
+  cfg: LoopkitConfig,
+): OpsData {
   const summary = buildSummary(result, events, { cfg, repoRoot: process.cwd() });
   return {
     events,
@@ -43,7 +52,7 @@ test('System Flow builder covers every active Missions work group and never repo
     true,
   );
   const flow = axes.find((axis) => axis.key === 'flow')!;
-  assert.equal(flow.value, 'Blocked');
+  assert.equal(flow.value, 'Needs decision');
   assert.notEqual(flow.value, 'Idle');
   assert.match(flow.detail, /4 in progress/);
   assert.match(flow.detail, /3 queued/);
@@ -52,6 +61,53 @@ test('System Flow builder covers every active Missions work group and never repo
   assert.match(flow.detail, /1 needs decision/);
   assert.match(flow.detail, /1 held/);
   assert.match(flow.detail, /1 planning/);
+});
+
+test('buildSummary carries captured/testing/blocked through to the System Flow builder', () => {
+  const events = [
+    makeEvent('cli', 'WI-993', 'item.captured', { source: 'test', text: 'captured' }),
+    makeEvent('cli', 'WI-994', 'item.captured', { source: 'test', text: 'testing' }),
+    makeEvent('cli', 'WI-995', 'item.captured', { source: 'test', text: 'blocked' }),
+  ];
+  const result = fold(events);
+  (result.items.get('WI-994') as unknown as { state: string }).state = 'testing';
+  (result.items.get('WI-995') as unknown as { state: string }).state = 'blocked';
+  const data = dataFromResult(events, result, CONFIG_DEFAULTS);
+
+  assert.deepEqual(
+    data.fold.active.map((item) => item.state).sort(),
+    ['blocked', 'captured', 'testing'],
+    'the real core summary boundary preserves every non-terminal state',
+  );
+  const flow = buildSystemAxes(
+    data,
+    { rollup: { status: 'met', label: 'All clear', breached: 0, atRisk: 0 }, panes: [] },
+    true,
+  ).find((axis) => axis.key === 'flow')!;
+  assert.equal(flow.value, 'Blocked');
+  assert.match(flow.detail, /1 in progress/);
+  assert.match(flow.detail, /1 queued/);
+  assert.match(flow.detail, /1 blocked\/waiting/);
+});
+
+test('System Flow uses Work queueBlocking truth for breaker-exhausted queued work', () => {
+  const events = [
+    makeEvent('cli', 'WI-996', 'item.captured', { source: 'test', text: 'exhausted' }),
+    makeEvent('reactor', 'WI-996', 'item.queued', { spec: 'retry me' }),
+  ];
+  const result = fold(events);
+  result.items.get('WI-996')!.attempts = BUILDER_BREAKER_N;
+  const data = dataFromResult(events, result, CONFIG_DEFAULTS);
+  assert.match(String(data.fold.queueBlocking?.[0]?.reason), /needs fresh unpark/);
+
+  const flow = buildSystemAxes(
+    data,
+    { rollup: { status: 'met', label: 'All clear', breached: 0, atRisk: 0 }, panes: [] },
+    true,
+  ).find((axis) => axis.key === 'flow')!;
+  assert.equal(flow.value, 'Needs decision');
+  assert.match(flow.detail, /1 needs decision/);
+  assert.notEqual(flow.value, 'Ready');
 });
 
 test('System deploy liveness keeps an untargeted sole-target-coalesced item in the Plane row', () => {
@@ -112,4 +168,31 @@ test('System deploy liveness shows current configuration separately from the lat
   assert.equal(plane.configured, false);
   assert.equal(plane.status, 'succeeded');
   assert.equal(plane.itemId, 'WI-992');
+});
+
+test('System liveness rejects credential-bearing plane and target surface configuration', () => {
+  const targetRoot = mkdtempSync(join(tmpdir(), 'loopkit-console-credentials-'));
+  try {
+    writeFileSync(join(targetRoot, 'loopkit.target.json'), JSON.stringify({
+      name: 'credentialed-target',
+      surfaceUrl: 'https://operator:secret@target.example.test/',
+    }), 'utf8');
+    const events = [
+      makeEvent('cli', 'credentialed-target', 'target.registered', {
+        targetId: 'tgt-bbbb2345',
+        name: 'credentialed-target',
+        repoPath: targetRoot,
+        manifestHash: 'h',
+        defaultBranch: 'main',
+      }),
+    ];
+    const rows = buildDeployTargets(dataFor(events, {
+      ...CONFIG_DEFAULTS,
+      surfaceUrl: 'https://operator:secret@plane.example.test/',
+    }));
+    assert.equal(rows.find((row) => row.target === 'Plane')?.surfaceUrl, undefined);
+    assert.equal(rows.find((row) => row.target === 'credentialed-target')?.surfaceUrl, undefined);
+  } finally {
+    rmSync(targetRoot, { recursive: true, force: true });
+  }
 });

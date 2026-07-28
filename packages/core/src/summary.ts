@@ -12,7 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import type { LedgerEvent } from './schema.js';
 import type { FoldResult, ItemRecord } from './fold.js';
-import { resolveItemBranch } from './fold.js';
+import { isItemTerminal, resolveItemBranch } from './fold.js';
 import type { LoopkitConfig } from './config.js';
 import { touchesConflict, normalizeTouches, BUILDER_BREAKER_N } from './beats/dispatch.js';
 import { classifyAcceptanceTier, acceptanceClassifyFiles, hasEvidenceGap } from './acceptance.js';
@@ -24,7 +24,9 @@ function trustedSurfaceUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
     const parsed = new URL(value);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return undefined;
+    if (parsed.username || parsed.password) return undefined;
+    return parsed.toString();
   } catch {
     return undefined;
   }
@@ -169,8 +171,9 @@ export function buildSummary(
       });
     }
 
-    const activeStates = new Set(['building', 'gated', 'approved', 'parked', 'queued', 'routed']);
-    if (activeStates.has(rec.state)) {
+    // Serialize every non-terminal lifecycle state. Keeping an allowlist here silently dropped
+    // captured work and any forward-compatible execution/waiting states before the UI boundary.
+    if (!isItemTerminal(rec)) {
       // For crashed/parked items, include last build's stderrTail
       const lastBuild = rec.builds[rec.builds.length - 1];
       // Extract legacy source-ids from the source field (older ledgers may carry externally-

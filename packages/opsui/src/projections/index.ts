@@ -38,4 +38,5 @@ export * from './timeline-adapter.ts';
 export * from './item-hub-projection.ts';
 export * from './item-hub-adapter.ts';
 export * from './deploy-evidence.ts';
+export * from './surface-url.ts';
 export * from './projection-registry.ts';

@@ -57,4 +57,7 @@ test('System never renders a non-HTTP target surface as a link', () => {
     }],
   });
   assert.ok(!HealthProjection(envelope).includes('javascript:'));
+
+  envelope.data.deployTargets![0]!.surfaceUrl = 'https://operator:secret@unsafe.example.test/';
+  assert.ok(!HealthProjection(envelope).includes('operator:secret'), 'credential-bearing URLs are never rendered');
 });
