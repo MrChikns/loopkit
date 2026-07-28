@@ -330,8 +330,9 @@ function runControlActions(rec: ItemRecord, returnTo: string, allItems: ItemReco
 type ParkClass = 'out-of-scope' | 'protected-path' | 'push-failed' | 'merge-conflict' | 'no-commit' | 'other';
 
 /** no-commit detection defers to @loopkit/core's classifyReason — the one place that already
- *  handles both the prefixed (`no-commit:`) and legacy-unprefixed literals — so this desk can't
- *  silently drift from core's classification the way the old local `/^no-commit:/i` regex did. */
+ *  handles both the prefixed (`no-commit:`) and legacy-unprefixed (pre-WI-198) literals — so
+ *  this desk can't silently drift from core's classification the way the old local
+ *  `/^no-commit:/i` regex did (it missed the 22 archived legacy-literal events core catches). */
 export function classifyParkReason(reason: string): { kind: ParkClass; files: string[] } {
   let m = /^needs-decision: files outside declared Touches \([^)]*\): (.+)$/.exec(reason);
   if (m) return { kind: 'out-of-scope', files: m[1]!.split(',').map((s) => s.trim()).filter(Boolean) };
