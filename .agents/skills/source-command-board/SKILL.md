@@ -27,6 +27,6 @@ LOOPCTL="node <loopkit-repo>/packages/core/dist/cli.js"
   specific piece of work.
 
 Present it as the operator's window ([docs/method.md](../../../docs/method.md)): what shipped,
-what's in flight, the short list that actually needs them, and the one next step. If something
-in the readouts looks unhealthy, say so and offer `/plane-check` — don't silently start
-diagnosing.
+what’s in flight, the short list that actually needs them, and the one next step. If something
+in the readouts looks unhealthy, say so and offer deterministic health triage with
+`loopctl doctor`, `summary` and `slo` — don't silently start diagnosing.
