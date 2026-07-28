@@ -13,6 +13,7 @@
 import { spawnSync } from 'node:child_process';
 import { ReviewVerdictData } from './schema.js';
 import { LlmProvider } from './providers/types.js';
+import { invokeProvider } from './providers/egress.js';
 
 // ---------------------------------------------------------------------------
 // Diff capture (shared helper, factored out to avoid
@@ -315,7 +316,7 @@ export async function runJudge(
 ): Promise<JudgeRunResult> {
   let result;
   try {
-    result = await provider.run({
+    result = await invokeProvider(provider, {
       prompt,
       model,
       tools: [],          // no tools — independence is the point

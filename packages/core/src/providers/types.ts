@@ -78,7 +78,7 @@ export interface ProviderSuccess {
 export interface ProviderError {
   ok: false;
   error: string;              // human-readable description
-  code?: string;              // 'timeout' | 'spawn' | 'parse' | 'auth' | 'unknown' | 'cancelled'
+  code?: string;              // 'timeout' | 'spawn' | 'parse' | 'auth' | 'unknown' | 'cancelled' | 'egress-blocked'
   raw?: string;               // stdout/stderr excerpt for debugging
 }
 
@@ -86,9 +86,18 @@ export interface ProviderError {
 // Provider interface
 // ---------------------------------------------------------------------------
 
+/** Where a provider sends prompt content. Missing/unknown values fail closed as external. */
+export type ProviderLocality = 'local' | 'external';
+
 export interface LlmProvider {
   /** Stable name used in cost.usage events and config maps */
   name: string;
+
+  /**
+   * Whether prompt content stays on this machine. Only the explicit `local` value bypasses
+   * the credential egress scanner; absent or future values are treated as external.
+   */
+  locality?: ProviderLocality;
 
   /**
    * Whether this provider runs an agentic tool loop that can accept the

@@ -37,6 +37,7 @@ import { loadConfig, LoopkitConfig } from '../config.js';
 import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, isPlaneArmed, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
+import { invokeProvider } from '../providers/egress.js';
 import {
   evaluateSloBoard, deriveSloState, makeRealProbes, makeDeployProbe, makeInstanceProbe,
   makePlaneCheckProbe, dispatchWedgeSecFor, SloRow, SloProbes, SloConfig,
@@ -1529,7 +1530,7 @@ async function stepRoute(
       }
       const routingCwd = routingReg?.repoPath || opts.repoRoot;
 
-      const result = await itemProvider.run({
+      const result = await invokeProvider(itemProvider, {
         prompt: itemPrompt,
         model: cfg.models.router,
         cwd: routingCwd,
@@ -1875,7 +1876,7 @@ async function stepEngageReplies(
         return out;
       }
 
-      const result = await replyProvider.run({
+      const result = await invokeProvider(replyProvider, {
         prompt: itemPrompt,
         model: cfg.models.router,
         cwd: opts.repoRoot,

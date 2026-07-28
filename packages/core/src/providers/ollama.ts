@@ -54,6 +54,7 @@ interface OllamaGenerateResponse {
 
 export class OllamaProvider implements LlmProvider {
   readonly name = 'ollama';
+  readonly locality = 'local' as const;
   /**
    * ollama does NOT support the ProviderRequest.tools list.
    * It is a plain HTTP /api/generate call (no agentic tool loop).

@@ -15,6 +15,7 @@
  */
 
 import { LlmProvider } from './providers/types.js';
+import { invokeProvider } from './providers/egress.js';
 
 // ---------------------------------------------------------------------------
 // Event-trail formatter
@@ -201,7 +202,7 @@ export async function runPathology(
 ): Promise<PathologyRunResult> {
   let result;
   try {
-    result = await provider.run({
+    result = await invokeProvider(provider, {
       prompt,
       model,
       tools: [],          // no tools — read-only diagnosis, independence is the point

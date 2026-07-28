@@ -210,6 +210,7 @@ export const SOURCE_PATHS = {
   // target manifest reader — the two shipped halves of a doc that is otherwise roadmap.
   session: `${SRC}/session.ts`,
   target: `${SRC}/target.ts`,
+  egress: `${SRC}/providers/egress.ts`,
 } as const;
 export type SourceKey = keyof typeof SOURCE_PATHS;
 
@@ -696,6 +697,31 @@ export function probeSymbol(claim: ExistenceClaim, sources: SourceBundle): Symbo
 }
 
 export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
+  {
+    id: 'providerEgressGuard',
+    doc: 'plane-flows',
+    symbol: 'invokeProvider()',
+    what: 'every provider call scans prompt and system content before non-local egress',
+    file: 'egress',
+    declaration: /^export function invokeProvider\($/,
+    referencedBy: [
+      {
+        file: 'dispatch',
+        pattern: /invokeProvider\(/,
+        proves: 'dispatch routes provider calls through the egress wrapper',
+      },
+      {
+        file: 'reactor',
+        pattern: /invokeProvider\(/,
+        proves: 'reactor routes provider calls through the egress wrapper',
+      },
+      {
+        file: 'judge',
+        pattern: /invokeProvider\(/,
+        proves: 'judge routes provider calls through the egress wrapper',
+      },
+    ],
+  },
   // ── The claim that motivated this whole marker kind. Both docs asserted the reactor produced
   //    items "with acceptance criteria" while `criteria` existed nowhere in src; WI-193 made it
   //    true afterwards. Declaration alone is not enough here — the sentence is about the REACTOR

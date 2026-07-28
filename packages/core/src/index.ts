@@ -68,6 +68,7 @@ export * from './beats/dispatch.js';
 
 // Providers (provider-agnostic layer)
 export * from './providers/types.js';
+export * from './providers/egress.js';
 export * from './providers/registry.js';
 export * from './providers/claudeCli.js';
 export * from './providers/codexCli.js';

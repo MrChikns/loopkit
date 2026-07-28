@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { CONFIG_DEFAULTS, loadConfig, LoopkitConfig } from '../src/config.js';
 import {
   countInFlightWorkerSlots,
+  engineeringInflightTouches,
+  nextWorkerCapacityLane,
   runDispatch,
   selectWithinWorkerCapacity,
 } from '../src/beats/dispatch.js';
@@ -56,6 +58,59 @@ test('worker capacity: mixed lanes share slots, target cannot starve, and co-loc
     ['WI-101'],
     'the last mixed-lane slot protects the target lane from starvation',
   );
+});
+
+test('worker capacity: maxWorkers=1 alternates mixed lanes across consecutive beat histories', () => {
+  const target = { ...rec('WI-111'), target: 'docs' };
+  const engineering = rec('WI-211');
+  const items = new Map([[target.id, target], [engineering.id, engineering]]);
+  const baseEvents = [
+    makeEvent('cli', target.id, 'item.captured', { source: 'test', text: 'target', target: 'docs' }),
+    makeEvent('cli', engineering.id, 'item.captured', { source: 'test', text: 'engineering' }),
+  ];
+
+  const beat1Lane = nextWorkerCapacityLane(baseEvents, items);
+  const beat1 = selectWithinWorkerCapacity([target], [[engineering]], 1, beat1Lane);
+  assert.deepEqual(beat1.targeted.map(r => r.id), [target.id]);
+
+  const afterTarget = [
+    ...baseEvents,
+    makeEvent('dispatch', target.id, 'build.dispatched', { attempt: 1 }),
+  ];
+  const beat2Lane = nextWorkerCapacityLane(afterTarget, items);
+  const beat2 = selectWithinWorkerCapacity([target], [[engineering]], 1, beat2Lane);
+  assert.deepEqual(beat2.engineering.map(group => group.map(r => r.id)), [[engineering.id]],
+    'engineering receives the next free slot after a target admission');
+
+  const afterEngineering = [
+    ...afterTarget,
+    makeEvent('dispatch', engineering.id, 'build.dispatched', { attempt: 1 }),
+  ];
+  assert.equal(nextWorkerCapacityLane(afterEngineering, items), 'target',
+    'the durable tie-break flips back after engineering is admitted');
+});
+
+test('worker capacity: active target paths do not consume the free plane-engineering slot', () => {
+  const activeTarget = {
+    ...rec('WI-121'),
+    state: 'building',
+    target: 'docs',
+    touches: undefined,
+    currentBuild: { attempt: 1, pgid: 9101, worktree: '/tmp/target', branch: 'target-a1' },
+  } as unknown as ItemRecord;
+  const engineering = { ...rec('WI-221'), touches: 'src/' };
+
+  assert.equal(engineeringInflightTouches([activeTarget]), undefined,
+    'unknown target Touches belong to another repo and must not wildcard-block plane paths');
+  const selected = selectWithinWorkerCapacity(
+    [],
+    [[engineering]],
+    2 - countInFlightWorkerSlots(
+      { items: new Map([[activeTarget.id, activeTarget]]) } as ReturnType<typeof fold>,
+      '/missing-artifacts',
+    ),
+  );
+  assert.deepEqual(selected.engineering.map(group => group.map(r => r.id)), [[engineering.id]]);
 });
 
 test('worker capacity: detached co-located members sharing one pgid consume one active slot', () => {

@@ -95,6 +95,7 @@ export function assembleReviewInput(input: ReviewInput): string {
 
 export class CodexCliProvider implements LlmProvider {
   readonly name = 'codex-cli';
+  readonly locality = 'external' as const;
   /**
    * codex-cli does NOT support the ProviderRequest.tools list.
    * `codex exec` runs as a text-mode subprocess (no agentic tool loop).

@@ -42,6 +42,7 @@ import { loadConfig, LoopkitConfig } from '../config.js';
 import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, Sensitivity, normalizeSensitivity } from '../providers/registry.js';
 import { LlmProvider } from '../providers/types.js';
+import { invokeProvider } from '../providers/egress.js';
 import { parseOutput, extractUsage } from '../providers/claudeCli.js';
 import { readExitFile, ExitRecord } from '../exitfile.js';
 import { setupWorktreeDeps } from './worktree-deps.js';
@@ -2404,7 +2405,7 @@ export async function runPlanningLane(
 
     const spec = rec.spec ?? rec.sourceText ?? '';
     const prompt = buildPlannerPrompt(plannerPromptContent, rec.id, spec);
-    const result = await activeProvider.run({
+    const result = await invokeProvider(activeProvider, {
       prompt,
       model: cfg.models.builderDefault,
       cwd: opts.repoRoot,
@@ -2430,6 +2431,16 @@ export async function runPlanningLane(
       const reason = 'infra: builder not logged in — run /login (planning lane)';
       await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'build.crashed', { reason })]);
       results.push({ item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason });
+      continue;
+    }
+
+    if (!result.ok && result.code === 'egress-blocked') {
+      const reason = `safety: ${result.error}`;
+      await appendEvents(opts.ledgerDir, [
+        makeEvent('dispatch', rec.id, 'gate.failed', { reason }),
+        makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' }),
+      ]);
+      results.push({ item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 2, detail: reason });
       continue;
     }
 
@@ -2589,10 +2600,18 @@ async function finalizeTargetBuild(
     // the legacy/batch lane's dedicated auth branch; that machinery is out of scope here).
     const reason = outcome.code === 'auth'
       ? `target build failed: infra: builder not logged in — run /login (${outcome.error})`
+      : outcome.code === 'egress-blocked'
+        ? `target build blocked: safety: ${outcome.error}`
       : `target build failed: ${outcome.error}`;
     removeWorktree(gitRoot, wtPath);
-    await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'build.crashed', { reason })]);
-    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: 1, detail: reason };
+    const events = [
+      makeEvent('dispatch', rec.id, 'build.crashed', { reason }),
+      ...(outcome.code === 'egress-blocked'
+        ? [makeEvent('dispatch', rec.id, 'item.parked', { reason, parkKind: 'ops' as const })]
+        : []),
+    ];
+    await appendEvents(opts.ledgerDir, events);
+    return { item: rec.id, dispatched: true, gateOutcome: 'failed', eventsWritten: events.length, detail: reason };
   }
 
   // ── Post-build guard pipeline (ADR-010 point 2) ──────────────────────────
@@ -3174,7 +3193,7 @@ export async function runTargetLane(
     // dir the scan reads from) on a later beat. The beat returns before completion.
     if (detachEligible) {
       let spawnedPgid: number | undefined;
-      const detachedPromise = activeProvider.run({
+      const detachedPromise = invokeProvider(activeProvider, {
         prompt,
         model: rec.model ?? cfg.models.builderDefault,
         cwd: wtPath,
@@ -3187,6 +3206,20 @@ export async function runTargetLane(
         onSpawn: pgid => { spawnedPgid = pgid; },
         exitFile: { runDir: artifactDir, itemId: rec.id, attempt },
       });
+      if (detachedPromise.egressBlockedBy) {
+        await appendEvents(opts.ledgerDir, [makeEvent('dispatch', rec.id, 'build.dispatched', {
+          attempt, worktree: wtPath, branch, pid: process.pid, provider: activeProvider.name,
+          model: rec.model ?? cfg.models.builderDefault,
+        })]);
+        const blocked = await detachedPromise;
+        results.push(await finalizeTargetBuild(opts, rec, {
+          gitRoot, manifest, wtPath, branch, baseSha: baseSha ?? '', targetRunDir, attempt,
+          providerName: activeProvider.name, provider: activeProvider,
+        }, blocked.ok
+          ? { ok: true, text: blocked.text, usage: blocked.usage }
+          : { ok: false, error: blocked.error, code: blocked.code }));
+        continue;
+      }
       // Fire-and-forget: never awaited this beat (providers never reject — a resolved failure is a
       // ProviderError result, drained via the exit file next beat). Swallow defensively regardless.
       void detachedPromise.catch(() => { /* drained cross-beat via the exit file */ });
@@ -3203,7 +3236,7 @@ export async function runTargetLane(
 
     // Sync path (unchanged behaviour): await the attached worker, then gate/merge via the shared
     // terminal (the SAME finalizeTargetBuild the collection scan uses — one pipeline, not a fork).
-    const result = await activeProvider.run({
+    const result = await invokeProvider(activeProvider, {
       prompt,
       model: rec.model ?? cfg.models.builderDefault,
       cwd: wtPath,
@@ -3220,7 +3253,7 @@ export async function runTargetLane(
       providerName: activeProvider.name, provider: activeProvider,
     }, result.ok
       ? { ok: true, text: result.text, usage: result.usage }
-      : { ok: false, error: result.error ?? 'unknown error' }));
+      : { ok: false, error: result.error ?? 'unknown error', code: result.code }));
   }
 
   return results;
@@ -3357,20 +3390,43 @@ export interface WorkerCapacitySelection {
   deferredItems: number;
 }
 
+export type WorkerCapacityLane = 'target' | 'engineering';
+
+/**
+ * Derive the next mixed-queue turn from durable dispatch history. Whichever worker lane was
+ * admitted most recently yields the first slot, so a maxWorkers=1 plane with both queues
+ * continuously non-empty alternates across beats instead of resetting target-first forever.
+ */
+export function nextWorkerCapacityLane(
+  events: readonly LedgerEvent[],
+  items: ReadonlyMap<string, ItemRecord>,
+): WorkerCapacityLane {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!;
+    if (event.type !== 'build.dispatched') continue;
+    const item = items.get(event.item);
+    if (!item || item.lane === 'planning') continue;
+    return item.target ? 'engineering' : 'target';
+  }
+  return 'target';
+}
+
 /**
  * Admit worker units before either lane claims. Mixed queues alternate target/engineering,
- * target first; a co-located engineering group consumes one slot regardless of item count.
+ * beginning with the durable cross-beat turn; a co-located engineering group consumes one slot
+ * regardless of item count.
  */
 export function selectWithinWorkerCapacity(
   targeted: ItemRecord[],
   engineering: ItemRecord[][],
   availableSlots: number,
+  firstLane: WorkerCapacityLane = 'target',
 ): WorkerCapacitySelection {
   const selectedTargets: ItemRecord[] = [];
   const selectedEngineering: ItemRecord[][] = [];
   let ti = 0;
   let ei = 0;
-  let targetTurn = true;
+  let targetTurn = firstLane === 'target';
   for (let slot = 0; slot < Math.max(0, availableSlots) && (ti < targeted.length || ei < engineering.length); slot++) {
     if ((targetTurn && ti < targeted.length) || ei >= engineering.length) {
       selectedTargets.push(targeted[ti++]!);
@@ -3385,6 +3441,22 @@ export function selectWithinWorkerCapacity(
     engineering: selectedEngineering,
     deferredItems: targeted.length - ti + engineering.slice(ei).reduce((n, group) => n + group.length, 0),
   };
+}
+
+/**
+ * Plane-repo path conflicts only. Targeted builds run serially in their own repositories, so
+ * their Touches (including unknown `*`) cannot consume the plane engineering path namespace.
+ */
+export function engineeringInflightTouches(
+  items: Iterable<ItemRecord>,
+): string | undefined {
+  let inflightTouches: string | undefined;
+  for (const rec of items) {
+    if (rec.state !== 'building' || rec.lane === 'planning' || rec.target) continue;
+    if (!rec.touches) return '*';
+    inflightTouches = inflightTouches ? `${inflightTouches},${rec.touches}` : rec.touches;
+  }
+  return inflightTouches;
 }
 
 // ---------------------------------------------------------------------------
@@ -3664,14 +3736,9 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     let targetedQueued = queued.filter(r => r.lane !== 'planning' && r.target);
     const engineeringQueued = queued.filter(r => r.lane !== 'planning' && !r.target);
 
-    // Collect in-flight touches (building items). A planning build never writes a file, so
-    // it must never wildcard-block an engineering pick (or be blocked by one).
-    const inflight = Array.from(foldResult.items.values()).filter(r => r.state === 'building' && r.lane !== 'planning');
-    let inflightTouches: string | undefined;
-    for (const rec of inflight) {
-      if (!rec.touches) { inflightTouches = '*'; break; }
-      inflightTouches = inflightTouches ? `${inflightTouches},${rec.touches}` : rec.touches;
-    }
+    // Collect in-flight touches in the PLANE repo only. Planning writes no files; target builds
+    // write in other repositories and their own serial lane owns those conflicts.
+    const inflightTouches = engineeringInflightTouches(foldResult.items.values());
 
     // Select the dispatch groups. Each group becomes ONE worktree. Groups are
     // Touches-disjoint from each other (parallel worktrees can't share a footprint);
@@ -3719,6 +3786,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       targetedQueued,
       groups,
       Math.max(0, maxConcurrentWorkers - inFlightWorkerSlots),
+      nextWorkerCapacityLane(allEvents, foldResult.items),
     );
     targetedQueued = capacity.targeted;
     groups = capacity.engineering;
@@ -3745,7 +3813,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       const probeOk = opts.authProbeResult
         ? opts.authProbeResult.ok
         : await (async () => {
-            const r = await provider!.run({ prompt: 'ping', timeoutMs: 15_000 });
+            const r = await invokeProvider(provider!, { prompt: 'ping', timeoutMs: 15_000 });
             // Only 'auth' code = logged out. Other failures (parse/spawn/timeout) are transient.
             if (!r.ok && r.code === 'auth') {
               // Mark current provider unhealthy and try to fall over
@@ -4118,7 +4186,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           if (injected !== undefined) {
             scoutResult = injected;
           } else {
-            const scoutRaw = await groupProvider.run({
+            const scoutRaw = await invokeProvider(groupProvider, {
               prompt: buildScoutPrompt(r.id, r.spec ?? r.sourceText ?? '', r.touches),
               model: scoutModel,
               cwd: wtPath,
@@ -4259,7 +4327,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
 
       // Spawn provider (non-blocking — runs in parallel). TRUST-HARDENING (defect c): use the
       // group-scoped provider resolved from the group's most-restrictive member sensitivity.
-      const promise = groupProvider.run({
+      const invocation = invokeProvider(groupProvider, {
         prompt,
         model,
         ...(effort ? { effort } : {}),
@@ -4270,9 +4338,17 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         onSpawn: pgid => { spawnedPgid = pgid; },
         exitFile: { runDir: artifactDir, itemId: rec.id, attempt: attemptNum },
         ...(cancelCheck ? { cancelCheck, cancelCheckIntervalMs: opts.cancelPollIntervalMs ?? 20_000 } : {}),
-      }).then(r => ({ text: r.ok ? r.text : '', ok: r.ok, error: r.ok ? undefined : r.error, code: r.ok ? undefined : r.code, usage: r.ok ? r.usage : undefined }));
+      });
+      const promise = invocation.then(r => ({ text: r.ok ? r.text : '', ok: r.ok, error: r.ok ? undefined : r.error, code: r.ok ? undefined : r.code, usage: r.ok ? r.usage : undefined }));
 
-      if (!detachEligible) {
+      if (!detachEligible || invocation.egressBlockedBy) {
+        // A blocked detached invocation never spawned and therefore has no pgid/exit file.
+        // Record it as an in-process attempt and drain the already-resolved failure below.
+        if (detachEligible) {
+          allNewEvents.push(...dispatchEventsFor({ pid: process.pid, provider: groupProvider.name }));
+          await appendEvents(opts.ledgerDir, allNewEvents);
+          allNewEvents.length = 0;
+        }
         // Sync path (unchanged): build.dispatched was already appended above, before the
         // scout stage — not here — so counts.building reflects the worker for the whole time
         // it's alive.
@@ -4413,6 +4489,22 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         results.push({
           item: rec.id, dispatched: true, branch: w.branch,
           gateOutcome: 'failed', eventsWritten: gateEvents.length, detail: reason,
+        });
+        removeWorktree(opts.repoRoot, w.wtPath);
+        spawnSync('git', ['branch', '-D', w.branch], { cwd: opts.repoRoot, stdio: 'pipe' });
+        continue;
+      }
+
+      if (!providerResult.ok && providerResult.code === 'egress-blocked') {
+        const reason = `safety: ${providerResult.error} (log: ${logPath})`;
+        const blockedEvents = forItems(id => [
+          makeEvent('dispatch', id, 'build.crashed', { reason }),
+          makeEvent('dispatch', id, 'item.parked', { reason, parkKind: 'ops' }),
+        ]);
+        await appendEvents(opts.ledgerDir, blockedEvents);
+        results.push({
+          item: rec.id, dispatched: true, branch: w.branch,
+          gateOutcome: 'failed', eventsWritten: blockedEvents.length, detail: reason,
         });
         removeWorktree(opts.repoRoot, w.wtPath);
         spawnSync('git', ['branch', '-D', w.branch], { cwd: opts.repoRoot, stdio: 'pipe' });

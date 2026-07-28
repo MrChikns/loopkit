@@ -11,8 +11,9 @@ per stage, including an automatic cross-provider second-opinion lane, is not bui
 When a work item is built, its prompt carries the item's text and may carry attachment paths,
 operator notes, a configured playbook, prior diff/gate evidence, or a scout brief. A tool-enabled
 worker can also read files from the target worktree. For an **external provider** (a hosted model),
-material sent to or read by that worker leaves the machine. The routing policy controls which
-configured provider may serve an item's declared sensitivity; it is not yet a content-DLP
+material sent to or read by that worker leaves the machine. The plane's job is to make “what may
+leave, for which project, to which provider” an explicit, enforced policy. Sensitivity routing and
+the outbound credential tripwire cover part of that boundary; they are not a full content-DLP
 guarantee.
 
 ## Sensitivity tiers (fail-closed routing, enforced per item)
@@ -40,10 +41,15 @@ capability-compatible provider, work waits, parks, or fails closed. Plane-level 
 *readouts* use the `internal` chain only to inspect on-disk provider health markers; they send no
 item or repo material.
 
-The **remaining** work needed to make "private never leaves the machine" a provable end-to-end
-*content* guarantee (not just routing) is the pre-egress content scan below — a deterministic
-secret/credential check on any prompt bound for a non-local provider. Routing is fail-closed; the
-payload-content guard is still roadmap.
+There is also a deterministic credential tripwire at the provider boundary. Before a provider that
+is not explicitly local runs, it scans the exact outbound `prompt` and optional `system` strings
+and blocks high-confidence credential patterns. Missing or unknown provider locality is external,
+and a finding exposes only typed rule ids — never the matched value or an excerpt.
+
+That is not an end-to-end content guarantee or full DLP. The scanner does **not** inspect attachment
+or repo files an agent later reads through tools, inherited environment variables, or provider/tool
+transcripts. Sensitivity routing remains the control that keeps a private item on a local provider;
+the credential tripwire is a narrow last line of defence for the text already assembled for egress.
 
 Fallbacks are **ordered chains per tier** (the registry walks the chain, skipping unhealthy
 providers):
@@ -95,19 +101,19 @@ readings. Coverage is incomplete: Codex adapter calls do not currently emit `cos
 effective reasoning effort is not recorded per call. Treat the usage projection as observed
 telemetry, not a complete accounting of every provider invocation.
 
-## Egress guards (roadmap, in order)
+## Egress controls and remaining guards
 
-1. **Scope-not-prompt** (with plan runs): unattended items get their permissions — branch
+1. ⚪ **Scope-not-prompt** (with plan runs): unattended items get their permissions — branch
    prefix, allowed paths, provider tier — at *creation* time, never negotiated mid-run.
-2. **Untrusted-payload wrapping**: text arriving via external triggers (webhooks, chat bridges)
+2. ⚪ **Untrusted-payload wrapping**: text arriving via external triggers (webhooks, chat bridges)
    is labeled as untrusted data in worker prompts, not treated as operator instructions.
-3. **Pre-egress content guard**: a deterministic secret/credential scan (and configurable
-   redaction) on any prompt bound for a non-local provider — catching the `.env` that snuck into
-   a worktree before it leaves the machine.
+3. ✅ **Outbound-text credential tripwire**: block-only scanning of `prompt` and `system` before
+   non-local provider calls. It neither redacts nor scans files, environment, or tool traffic.
+4. ⚪ **Full egress DLP**: policy over attachments, tool reads/results, environment inheritance,
+   transcripts, and configurable PII/secret handling.
 
 ## What this is not
 
 Not a DLP product, not a sandbox escape guarantee, and not a substitute for repo hygiene (don't
-commit secrets). Today it enforces provider eligibility from declared sensitivity at its
-resolution points; proving that sensitive content never escaped requires the roadmap pre-egress
-guard.
+commit secrets). It enforces provider eligibility by sensitivity and adds a narrow outbound-text
+tripwire; it does not prove that every byte a tool-capable provider can observe was scanned.

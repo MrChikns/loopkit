@@ -118,6 +118,7 @@ export function parseOutput(raw: string): { obj: ClaudeJsonOutput | null; parseE
 
 export class ClaudeCliProvider implements LlmProvider {
   readonly name = 'claude-cli';
+  readonly locality = 'external' as const;
   /** claude CLI supports agentic tool loops via --allowedTools */
   readonly supportsTools = true;
 

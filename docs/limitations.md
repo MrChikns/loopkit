@@ -91,7 +91,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:896`<!--cite:openBuildWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:897`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -100,7 +100,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3599`<!--cite:queuedClaimDeference-->), which is a read, and both
+  (`packages/core/src/beats/dispatch.ts:3671`<!--cite:queuedClaimDeference-->), which is a read, and both
   dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -136,18 +136,21 @@ says exist are checked the same way, against the symbol that backs them.
   rollback with no verification step would be a worse failure mode than a recorded instruction.
   *Matters when:* you assumed "certified" implied a mechanism rather than a note.
 
-## Provider content guarantee (routing done, payload not)
+## Provider content guarantee (routing and outbound-text tripwire, not full DLP)
 
-- **Fail-closed provider resolution is routing-level, not content-level.** Item-bearing router,
-  reply, build, and pathology resolution uses the item's own (or a build group's strictest)
-  sensitivity and refuses to route a private-only item to a disallowed provider. Scout and the
-  dispatch judge reuse the selected builder provider; there is no independent provider-per-stage
-  policy today. What is **not** yet in place is a *pre-egress content scan*: a deterministic
-  secret/credential/PII check on the prompt payload actually bound for a non-local provider.
-  *Bounded:* routing can no longer send a private item to a cloud provider, so the tier boundary is
-  enforced. *Matters when:* an *internal*-tier item (legitimately cloud-routed) carries a secret in
-  its spec/diff — routing is correct but nothing scrubs the payload. The content DLP guard is
-  explicitly roadmap, and `trust-boundaries.md` already frames it as such.
+- **Fail-closed provider resolution is joined by a narrow credential egress guard.** As of this
+  pass, provider resolution is per-item/per-group and fail-closed at **every** content-bearing call
+  site — the engineering group, the planning lane, the target build lane, the operator-reply
+  engagement lane, and the failure-pathology lane all resolve against the item's
+  own (or the group's strictest) sensitivity and refuse to route a private-only item to a
+  disallowed provider. One wrapper now scans the exact outbound `prompt` and `system` strings
+  before every provider not explicitly marked local; high-confidence credentials block with typed
+  rule ids only. Unknown locality fails closed as external. *Bounded:* this is not full DLP. It does
+  not inspect attachment/repo files later read by tools, inherited environment variables,
+  tool results, or provider transcripts, and it does not scan general PII. *Matters when:* an
+  internal-tier agent can read a secret from the worktree after its clean prompt has passed the
+  guard — routing is correct and the initial payload is clean, but the later tool egress is outside
+  this scanner's boundary.
 
 ## Gate strength is inherited, by design
 
@@ -218,7 +221,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1436`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1437`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the
@@ -248,6 +251,7 @@ These are out of scope for v0.1 by choice, not oversight:
 - Multi-target scheduling *guarantees* (multiple registered targets work; cross-target fairness/
   starvation guarantees are not modelled).
 - Provider-agnostic claims beyond the built-in factory set.
-- Pre-egress DLP / content scanning (see above).
+- Full egress DLP across attachments, tool reads/results, inherited environment, transcripts and
+  configurable PII handling (see above).
 - UI/opsui package consolidation (they share several byte-identical files).
 - RBAC / cloud / team features.
