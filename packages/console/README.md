@@ -88,6 +88,13 @@ console.log(`console listening on :${handle.port}`);
 await handle.close();
 ```
 
+When a scheduler or service manager launches the console, source the repository's
+`scripts/load-plane-env.sh` helper before starting Node. A shell file containing
+`LOOPKIT_AUTONOMY=on` is not enough by itself: without the helper's export step, the console
+process sees the variable as unset and correctly—but misleadingly for the operator—renders the
+fail-safe halted state. Set `LOOPKIT_ENV_FILE` before sourcing the helper when the deployment
+keeps its environment outside `.ai/loops/config.env`.
+
 ## Screenshot
 
 See [`docs/console.png`](../../docs/console.png) — the console's Command view rendered against a

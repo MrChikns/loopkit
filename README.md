@@ -188,7 +188,8 @@ bash examples/setup-demo.sh ~/loopkit-demo/notes
 mkdir -p ~/loopkit-demo/plane && cd ~/loopkit-demo/plane && git init -b main
 mkdir -p .ai/loops/prompts
 cp "$LOOPKIT_REPO_ROOT"/packages/core/prompts/*.md .ai/loops/prompts/
-echo 'export LOOPKIT_AUTONOMY=off' > .ai/loops/config.env  # fail-safe while you inspect it
+echo 'LOOPKIT_AUTONOMY=off' > .ai/loops/config.env  # fail-safe while you inspect it
+source "$LOOPKIT_REPO_ROOT/scripts/load-plane-env.sh"
 
 # 3. Connect the target (prints its manifest — gate command, branch — for your review)
 $LOOPCTL target add ~/loopkit-demo/notes
@@ -198,8 +199,8 @@ claude auth status
 $LOOPCTL state
 $LOOPCTL slo
 # If you run the optional console, inspect its read-only /observability page too.
-echo 'export LOOPKIT_AUTONOMY=on' > .ai/loops/config.env
-export LOOPKIT_AUTONOMY=on
+echo 'LOOPKIT_AUTONOMY=on' > .ai/loops/config.env
+source "$LOOPKIT_REPO_ROOT/scripts/load-plane-env.sh"
 
 # 5. Drop intent, then run the two beats (normally these run on a scheduler)
 $LOOPCTL new "Add a deleteNote(id) function to src/notes.js with tests"
@@ -215,6 +216,13 @@ Notes from real runs: the plane refuses to run agents until `LOOPKIT_AUTONOMY=on
 not a bug) · a target may carry `.claude/settings.json` to grant its workers project-scoped
 permissions · avoid hosting targets under `/tmp` on macOS (symlink canonicalization confuses
 worker sandboxes) · don't run the beats from inside another sandboxed agent session.
+
+Scheduled beat and console launchers must source `scripts/load-plane-env.sh` before `exec`-ing
+Node. The helper deliberately exports assignment-only env files to the child process; merely
+sourcing `LOOPKIT_AUTONOMY=on` without exporting it makes Node see an unset variable and report
+the fail-safe halted state. Set `LOOPKIT_ENV_FILE` first when the env file is not
+`.ai/loops/config.env`; standalone plane-home installs may use
+`$LOOPKIT_HOME/config/autonomy.env`.
 
 ## The target contract
 
