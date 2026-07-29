@@ -101,8 +101,10 @@ run as an event**: no `plan.*` event exists in the ledger schema and there is no
 the CLI.
 
 - ⚪ `loopctl plan define <file>` will name and validate a container over ordinary items and their
-  existing dependency edges, appending any new items/edges plus one `plan.defined` atomically.
-  The plan is then inspectable state, not an agent's private intention.
+  existing dependency edges, then record the definition and any new items/edges under one ledger
+  lock using a prefix-safe, idempotent representation. This roadmap does not assume today's JSONL
+  multi-event append is transactional. The plan is then inspectable state, not an agent's private
+  intention.
 - ⚪ `loopctl plan run <plan> --from <t> --until <t>` will append `plan.run-requested` for a
   bounded, one-shot window ("tonight, 22:00–06:00"). The **existing always-running beats** are to
   honor it: within the window, dispatch prefers the plan's ready slices (dependencies satisfied,

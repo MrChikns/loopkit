@@ -39,12 +39,16 @@ $ loopctl new "Add a deleteNote(id) function to src/notes.js with tests"
 
 $ loopctl beat reactor      # routes + queues it
 $ loopctl beat dispatch     # builds in a worktree, runs your gate, merges on green
-  → WI-001  captured → routed → queued → building → gated ✓ → merged into main
+  → WI-001  captured → queued → building → gated ✓ → merged into main
 
 $ cd ~/my-notes-app && git log --oneline -2
   c4d2e81  feat(dispatch): WI-001 (target notes) ← exact merge candidate, gate-proven
   a1b9f4e  feat: add deleteNote(id) with tests   ← worker's scoped commit
 ```
+
+The routing decision is still recorded as `item.routed` metadata. For this build path the folded
+work state presented to dispatch remains `queued`, so `routed` is not a separate lifecycle stop
+in the quickstart.
 
 ### What just happened
 

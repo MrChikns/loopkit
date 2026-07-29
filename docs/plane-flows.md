@@ -185,8 +185,10 @@ flowchart TD
   PICK --> DEP{"dependency graph<br/>ready?<br/><small>before lane split</small>"}
   DEP -->|no| LATER["stays queued<br/><small>no park or rewrite</small>"]
   DEP -->|yes| LANE{"planning · target<br/>or engineering?"}
-  LANE -->|planning| PARB["Fresh locked admission<br/><small>one item immediately before run</small>"]
+  LANE -->|planning| PPROV{"provider available?"}
+  PPROV -->|yes| PARB["Fresh locked claim admission<br/><small>one item immediately before run</small>"]
   PARB --> PLAN["Run planner serially"]
+  PPROV -->|no| PPARK["Fresh locked park terminal<br/><small>no claim · preserve yielded state</small>"]
   LANE -->|target| CAP["Shared worker capacity"]
   LANE -->|engineering| GRP["Group into worktrees"]
   GRP --> CAP
@@ -195,9 +197,11 @@ flowchart TD
 
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
+  classDef hold fill:#FBF0DF,stroke:#9C5A06,color:#111820
   classDef inert fill:#F1F3F5,stroke:#8B95A1,color:#111820
-  class B,PICK,GRP,COLL,LANE,CAP step
+  class B,PICK,GRP,COLL,LANE,CAP,PPROV step
   class DEP,PARB,ARB,PLAN,SPAWN pass
+  class PPARK hold
   class DRAIN,LATER inert
 ```
 
@@ -208,12 +212,15 @@ or are accepted, the next beat can pick it directly. Every lane then re-folds at
 admission terminal, so a dependency or lifecycle change landing after the first projection still
 wins the race. Canonical semantics: [Operational item flow](event-model.md#operational-item-flow).
 
-**Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
+**Claim arbitration is not a yes/no read.** Before any execution-capable lane runs a fresh pick,
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
-claimed in that window, and claims every survivor in the same locked append before spawning anything
+claimed in that window, and claims every survivor in the same locked append
 (`packages/core/src/beats/dispatch.ts:493`<!--cite:claimArbitration-->, [ADR-007](decisions/ADR-007-claim-arbitration.md)).
-All three picking lanes — planning, engineering, and target — go through that one terminal, under
-one per-beat pseudo-session, so reservation and dependency admission cannot drift between them.
+Provider-backed planning, engineering, and target execution all use that shared claim admission
+under one per-beat pseudo-session. Planning with no provider executes nothing and takes no claim:
+its separate locked park terminal revalidates state, dependencies, and claims, then appends the ops
+park in the same transaction only for survivors. A newly held item keeps its hold, and a newly
+dependency-blocked item stays queued.
 That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
