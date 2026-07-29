@@ -82,7 +82,7 @@ ${table}
   \`makeClaimBeforePick\` factory under WI-186 without the target lane's own functions
   \`finalizeTargetBuild\`/\`runTargetLane\` ever calling it directly), \`defer-read\` (reads
   \`isClaimActive\` to skip claimed items — a read, not a reservation, so it cannot close the
-  read-to-spawn race), or \`none\` (reserves nowhere — neither its own span nor, for target, the
+  read-to-spawn race), or \`none\` (reserves nowhere — neither its own span nor, for planning/target, the
   shared pick site). A \`none\`/\`claim (shared pick, via batch)\` swap on this cell is exactly the
   class of regression this column exists to catch — see
   [\`limitations.md\`](limitations.md).

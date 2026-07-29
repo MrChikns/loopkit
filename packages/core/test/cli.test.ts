@@ -61,6 +61,103 @@ test('loopctl approve WI-001: appends item.approved and msg.in events, fold show
   }
 });
 
+test('loopctl dependency add/remove mutates append-only edges and flow --json reports readiness', async () => {
+  const dir = makeTemp('dependency-add-remove-flow');
+  try {
+    await appendEvent(dir, makeEvent('test', 'WI-001', 'item.captured', { source: 'cli', text: 'dependent' }));
+    await appendEvent(dir, makeEvent('test', 'WI-001', 'item.queued', { spec: 'dependent' }));
+    await appendEvent(dir, makeEvent('test', 'WI-002', 'item.captured', { source: 'cli', text: 'blocker' }));
+    await appendEvent(dir, makeEvent('test', 'WI-002', 'item.queued', { spec: 'blocker' }));
+
+    assert.match(await runLoopctl(dir, 'dependency', 'add', 'WI-001', 'WI-002'), /Added dependency/);
+    let events = await loadAllEvents(dir);
+    assert.equal(events.filter(e => e.type === 'item.dependency-added').length, 1);
+
+    const view = JSON.parse(await runLoopctl(dir, 'flow', '--item', 'WI-001', '--json')) as {
+      lifecycle: { terminalStates: string[] };
+      dependencies: { items: Array<{ item: string; ready: boolean; unresolved: string[] }> };
+    };
+    assert.ok(view.lifecycle.terminalStates.includes('merged'));
+    assert.equal(view.dependencies.items.length, 1);
+    assert.equal(view.dependencies.items[0]?.item, 'WI-001');
+    assert.equal(view.dependencies.items[0]?.ready, false);
+    assert.deepEqual(view.dependencies.items[0]?.unresolved, ['WI-002']);
+
+    const textView = await runLoopctl(dir, 'flow', '--item', 'WI-001');
+    assert.match(textView, /Initial state: captured/);
+    assert.match(textView, /captured --item\.routed--> routed/);
+    assert.ok(!textView.includes('captured → routed'), 'text view must not invent a single linear lifecycle');
+
+    assert.match(await runLoopctl(dir, 'dependency', 'remove', 'WI-001', 'WI-002'), /Removed dependency/);
+    events = await loadAllEvents(dir);
+    assert.equal(events.filter(e => e.type === 'item.dependency-removed').length, 1);
+    assert.deepEqual(fold(events).items.get('WI-001')?.dependencies, []);
+
+    assert.match(await runLoopctl(dir, 'dependency', 'add', 'WI-001', 'WI-002'), /Added dependency/);
+    events = await loadAllEvents(dir);
+    const revisions = events
+      .filter(e => e.type === 'item.dependency-added' || e.type === 'item.dependency-removed')
+      .map(e => (e.data as { revision?: number }).revision);
+    assert.deepEqual(revisions, [1, 2, 3]);
+    assert.deepEqual(fold(events).items.get('WI-001')?.dependencies, [{
+      item: 'WI-002',
+      condition: 'merged-or-accepted',
+      addedAt: events.at(-1)?.ts,
+    }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loopctl flow renders dependency cycles as components, not invented paths', async () => {
+  const dir = makeTemp('flow-cycle-components');
+  try {
+    for (const id of ['WI-010', 'WI-011', 'WI-012']) {
+      await appendEvent(dir, makeEvent('test', id, 'item.captured', { source: 'cli', text: id }));
+    }
+    await appendEvent(dir, makeEvent('manual', 'WI-010', 'item.dependency-added', { onItem: 'WI-011' }));
+    await appendEvent(dir, makeEvent('manual', 'WI-011', 'item.dependency-added', { onItem: 'WI-012' }));
+    await appendEvent(dir, makeEvent('manual', 'WI-012', 'item.dependency-added', { onItem: 'WI-010' }));
+
+    const output = await runLoopctl(dir, 'flow');
+    assert.match(output, /Cycle components: \{WI-010, WI-011, WI-012\}/);
+    assert.ok(!output.includes('WI-010 → WI-011'), 'an SCC is a component, not an ordered cycle path');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loopctl dependency validates WI ids and refuses self/missing/cyclic edges without append', async () => {
+  const dir = makeTemp('dependency-validation-cycle');
+  try {
+    for (const id of ['WI-010', 'WI-011', 'WI-012']) {
+      await appendEvent(dir, makeEvent('test', id, 'item.captured', { source: 'cli', text: id }));
+    }
+    await runLoopctl(dir, 'dependency', 'add', 'WI-010', 'WI-011');
+    await runLoopctl(dir, 'dependency', 'add', 'WI-011', 'WI-012');
+    const before = (await loadAllEvents(dir)).length;
+
+    for (const args of [
+      ['dependency', 'add', 'bad', 'WI-010'],
+      ['dependency', 'add', 'WI-010', 'WI-010'],
+      ['dependency', 'add', 'WI-010', 'WI-999'],
+      ['dependency', 'add', 'WI-012', 'WI-010'],
+    ]) {
+      await assert.rejects(
+        () => execFileAsync(process.execPath, [CLI, ...args], {
+          env: { ...process.env, LOOPKIT_LEDGER: dir },
+        }),
+        /Command failed/,
+      );
+    }
+    const events = await loadAllEvents(dir);
+    assert.equal(events.length, before, 'every refused command leaves the append-only ledger untouched');
+    assert.equal(events.filter(e => e.type === 'item.dependency-added').length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loopctl reject WI-001: appends item.rejected and msg.in events, fold shows rejected state', async () => {
   const dir = makeTemp('reject-wi');
   try {

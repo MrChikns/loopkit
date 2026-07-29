@@ -64,6 +64,11 @@ import {
   RoutingTable,
   SpecBucket,
 } from './routing.js';
+import {
+  ITEM_FLOW,
+  projectDependencyGraph,
+  wouldCreateDependencyCycle,
+} from './flow.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -118,6 +123,8 @@ Commands:
   target list [--json]                 List registered target repos
   append <type> --item <WI-NNN> --data '<json>'  Append an event
   state [--item <WI-NNN>] [--json|--md]          Show item state(s)
+  dependency add|remove <WI-NNN> <WI-NNN>        Add/remove an item dependency edge
+  flow [--item <WI-NNN>] [--json]                Show lifecycle + dependency readiness
   board                                Render markdown board
   doctor [--json]                      Detect orphaned builds
   import [--dry-run]                   One-time seam-file migration
@@ -487,6 +494,137 @@ async function cmdState(rest: string[]): Promise<void> {
         console.log(`${rec.id.padEnd(8)}  ${rec.state.padEnd(12)}  ${displayText?.slice(0, 60) ?? ''}`);
       }
     }
+  }
+}
+
+function isWiId(value: string | undefined): value is string {
+  return typeof value === 'string' && /^WI-\d+$/.test(value);
+}
+
+/**
+ * dependency add|remove <item> <blocker>
+ *
+ * Both mutations re-read and validate under the ledger lock. The command never edits an
+ * existing event; a removal is a new deactivation fact in the same append-only history.
+ */
+async function cmdDependency(rest: string[]): Promise<void> {
+  const [verb, itemId, blockerId, ...extra] = rest;
+  if ((verb !== 'add' && verb !== 'remove') || !isWiId(itemId) || !isWiId(blockerId) || extra.length > 0) {
+    console.error('Usage: loopctl dependency add|remove <WI-NNN> <WI-NNN>');
+    process.exit(1);
+  }
+  if (verb === 'add' && itemId === blockerId) {
+    console.error(`Cannot add self-dependency ${itemId} → ${blockerId}`);
+    process.exit(1);
+  }
+
+  const outcome = await withLock(LEDGER_DIR, async tx => {
+    const events = await tx.loadAll();
+    const result = fold(events);
+    const item = result.items.get(itemId);
+    if (!item) return { error: `Item ${itemId} not found` };
+    const edgeRevisions = events
+      .filter(ev =>
+        ev.item === itemId &&
+        (ev.type === 'item.dependency-added' || ev.type === 'item.dependency-removed') &&
+        (ev.data as Record<string, unknown>)['onItem'] === blockerId
+      )
+      .map(ev => (ev.data as Record<string, unknown>)['revision'])
+      .filter((revision): revision is number => Number.isSafeInteger(revision) && (revision as number) > 0);
+    const revision = Math.max(0, ...edgeRevisions) + 1;
+    if (!Number.isSafeInteger(revision)) {
+      return { error: `Dependency ${itemId} → ${blockerId} revision exhausted` };
+    }
+
+    const active = item.dependencies?.some(dep => dep.item === blockerId) ?? false;
+    if (verb === 'remove') {
+      if (!active) return { message: `Dependency ${itemId} → ${blockerId} is not active — no change.` };
+      await tx.append([
+        makeEvent('cli', itemId, 'item.dependency-removed', { onItem: blockerId, revision }),
+      ]);
+      return { message: `Removed dependency ${itemId} → ${blockerId}` };
+    }
+
+    if (!result.items.has(blockerId)) return { error: `Dependency item ${blockerId} not found` };
+    if (active) return { message: `Dependency ${itemId} → ${blockerId} already active — no change.` };
+    if (wouldCreateDependencyCycle(result.items.values(), itemId, blockerId)) {
+      return { error: `Cannot add dependency ${itemId} → ${blockerId}: cycle detected` };
+    }
+    await tx.append([
+      makeEvent('cli', itemId, 'item.dependency-added', { onItem: blockerId, revision }),
+    ]);
+    return { message: `Added dependency ${itemId} → ${blockerId}` };
+  });
+
+  if ('error' in outcome) {
+    console.error(outcome.error);
+    process.exit(1);
+  }
+  console.log(outcome.message);
+}
+
+/** Read-only generated view over the operational flow definition and folded dependency graph. */
+async function cmdFlow(rest: string[]): Promise<void> {
+  const itemId = getFlag(rest, '--item');
+  const asJson = hasFlag(rest, '--json');
+  const allowed = new Set(['--item', '--json']);
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    if (!allowed.has(arg)) {
+      console.error('Usage: loopctl flow [--item <WI-NNN>] [--json]');
+      process.exit(1);
+    }
+    if (arg === '--item') {
+      if (!rest[i + 1] || rest[i + 1]!.startsWith('--')) {
+        console.error('Usage: loopctl flow [--item <WI-NNN>] [--json]');
+        process.exit(1);
+      }
+      i++;
+    }
+  }
+  if (itemId !== undefined && !isWiId(itemId)) {
+    console.error(`Invalid item id: ${itemId}`);
+    process.exit(1);
+  }
+
+  const events = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const result = fold(events);
+  const graph = projectDependencyGraph(result.items.values());
+  if (itemId && !result.items.has(itemId)) {
+    console.error(`Item ${itemId} not found`);
+    process.exit(1);
+  }
+  const view = {
+    lifecycle: ITEM_FLOW,
+    dependencies: {
+      cycles: graph.cycles,
+      items: itemId ? graph.items.filter(item => item.item === itemId) : graph.items,
+    },
+  };
+
+  if (asJson) {
+    console.log(JSON.stringify(view, null, 2));
+    return;
+  }
+  console.log(`Initial state: ${ITEM_FLOW.initialState}`);
+  console.log(`States: ${ITEM_FLOW.states.join(', ')}`);
+  console.log(`Terminal states: ${ITEM_FLOW.terminalStates.join(', ')}`);
+  console.log('Transition rules:');
+  for (const rule of ITEM_FLOW.transitions) {
+    const source = typeof rule.from === 'string'
+      ? `any ${rule.from}`
+      : rule.from.join(', ');
+    console.log(`  ${source} --${rule.cause}--> ${rule.to}`);
+  }
+  console.log('Dependency readiness:');
+  for (const item of view.dependencies.items) {
+    const blockers = item.dependencies.length === 0
+      ? 'no dependencies'
+      : item.dependencies.map(dep => `${dep.item}:${dep.status}`).join(', ');
+    console.log(`  ${item.item}  ${item.ready ? 'ready' : 'blocked'}  ${blockers}`);
+  }
+  if (view.dependencies.cycles.length > 0) {
+    console.log(`Cycle components: ${view.dependencies.cycles.map(cycle => `{${cycle.join(', ')}}`).join('; ')}`);
   }
 }
 
@@ -1560,6 +1698,12 @@ async function main(): Promise<void> {
       break;
     case 'state':
       await cmdState(rest);
+      break;
+    case 'dependency':
+      await cmdDependency(rest);
+      break;
+    case 'flow':
+      await cmdFlow(rest);
       break;
     case 'events':
       await cmdEvents(rest);

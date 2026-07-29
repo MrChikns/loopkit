@@ -60,7 +60,7 @@ says exist are checked the same way, against the symbol that backs them.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:1035`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1038`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -82,7 +82,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **Both integration terminals re-gate the exact combined destination state.** The engineering
   lane will not merge a branch whose base moved without rebasing and re-running the gate over the
   combined state, and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:4936`<!--cite:postIntegrationRegate-->). The target lane now
+  (`packages/core/src/beats/dispatch.ts:5036`<!--cite:postIntegrationRegate-->). The target lane now
   re-reads its declared default branch, replays onto a moved tip, constructs and gates the exact
   no-fast-forward candidate, then updates the local destination with an expected-old-SHA
   compare-and-swap (`packages/core/src/beats/dispatch.ts:2735`). A CAS loss repeats that bounded
@@ -94,7 +94,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:897`<!--cite:openBuildWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:953`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -103,9 +103,9 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3671`<!--cite:queuedClaimDeference-->), which is a read, and both
-  dispatch lanes — engineering and, since WI-186, target — then re-fold under the ledger lock and append
-  their own `item.claimed` for every survivor before spawning. An attended coordinator reserves through
+  (`packages/core/src/beats/dispatch.ts:3725`<!--cite:queuedClaimDeference-->), which is a read, and all
+  three dispatch lanes — planning, engineering, and target — then re-fold under the ledger lock and append
+  their own `item.claimed` for every survivor before admission. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
   is fresh, so a genuinely-live operator whose heartbeat lagged past the bound reads inactive and a beat
   may take the item. *Bounded:* the reap age is derived from the build-timeout envelope and the common
@@ -121,7 +121,7 @@ says exist are checked the same way, against the symbol that backs them.
   (`packages/core/src/deploy.ts:138`<!--cite:requestDeployOnMerge-->). The fold distinguishes
   `pending`, `succeeded`, `failed` and `timed-out` from `not-configured`; a legacy merge with no
   configuration evidence remains unknown. Explicit success sets compatibility `deployed` true
-  (`packages/core/src/fold.ts:808`<!--cite:foldDeploySucceeded-->).
+  (`packages/core/src/fold.ts:806`<!--cite:foldDeploySucceeded-->).
   A process-launch error becomes `failed`, while a silent hook becomes `timed-out` after the
   configured deploy-freshness hour
   (`packages/core/src/deploy.ts:293`<!--cite:stalePendingDeployEvents-->). The process is still
@@ -134,7 +134,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **There is no automatic rollback.** A merge can carry a `certification.rollback` string, and the
   worker is required to supply one for the certification to be recorded at all
-  (`packages/core/src/fold.ts:734`<!--cite:certificationRollback-->). Nothing in the plane executes it —
+  (`packages/core/src/fold.ts:736`<!--cite:certificationRollback-->). Nothing in the plane executes it —
   it is written for a human to read and run. *Bounded:* that is the intended contract; an automated
   rollback with no verification step would be a worse failure mode than a recorded instruction.
   *Matters when:* you assumed "certified" implied a mechanism rather than a note.
@@ -218,7 +218,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1437`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1493`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the
@@ -232,7 +232,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **~~A steered item can display one thing and build another.~~ Fixed — recorded here because this
   page claimed otherwise for longer than it was true.** An operator reply that re-scopes work appends
   `item.respec`, which amends the item's `spec` *and* its acceptance criteria
-  (`packages/core/src/fold.ts:1469`<!--cite:foldRespec-->) — the fields builders and the judge are
+  (`packages/core/src/fold.ts:1478`<!--cite:foldRespec-->) — the fields builders and the judge are
   given. Every operator surface (board, `loopctl show`, acceptance desk) renders those amended fields
   rather than the immutable capture text, and criteria are replaced wholesale so a withdrawn promise
   does not linger. *What remains:* the original capture text is still on the trail and still the right

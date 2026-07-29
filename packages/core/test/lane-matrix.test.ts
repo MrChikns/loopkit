@@ -59,7 +59,8 @@ import {
  *   - target `none` / `gate-once` — this was the pre-hardening state: runTargetLane and
  *     finalizeTargetBuild contained no claim code and merged via `closeMergedCluster` straight
  *     after their single gate.
- *   - planning `none` / `n/a (no merge)` — queues child items; no claim, no git merge.
+ *   - planning `none` / `n/a (no merge)` — historical pre-flow-hardening state: queues child
+ *     items with no claim and no git merge.
  * A change in ANY of these four cells is a real lane-invariant change (e.g. WI-186 porting
  * claim-before-pick to the target lane would flip target's claimArbitration) — update the cell
  * deliberately, never by pasting the regen.
@@ -90,7 +91,9 @@ import {
  *     the reader BOTH that the item is reserved AND that the reservation is not in this lane's
  *     own code — collapsing that distinction would hide the very indirection a maintainer needs
  *     to know about when next touching either lane.
- *   - conductor / planning: unaffected — WI-186 touched only the two dispatch.ts picking lanes.
+ *   - conductor / planning: unaffected by WI-186 at that time.
+ * Flow hardening later routed planning through the same shared pick terminal, changing its
+ * claim cell to `claim (shared pick, via batch)` while leaving its no-merge semantics intact.
  * A change to ANY of the four claimArbitration cells (or the detector's candidate-variable
  * allowlist) is a real lane-invariant change — update deliberately, cell by cell, never by
  * pasting the regen.
@@ -116,7 +119,7 @@ const EXPECTED_SNAPSHOT: Record<string, Record<string, boolean | string>> = {
     touchesOverstep: false, spineCheck: false, judge: false, scout: false, push: false,
     alreadyShippedCommit: false, denialNote: false,
     gateWrapper: 'none', commitSide: 'n/a (no code diff)',
-    claimArbitration: 'none', postIntegrationRegate: 'n/a (no merge)',
+    claimArbitration: 'claim (shared pick, via batch)', postIntegrationRegate: 'n/a (no merge)',
   },
   target: {
     touchesOverstep: true, spineCheck: false, judge: true, scout: false, push: false,

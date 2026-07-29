@@ -104,7 +104,40 @@ contract is pinned now so activation is additive):
 - Acceptance tiering classifies against the **target's** boundaries block, applying the
   precedence: surface wins over plane; risk wins over both.
 
-### Park and dependency semantics
+## Operational item flow
+
+Loopkit has two related structures, with different jobs:
+
+1. **Lifecycle state machine.** `packages/core/src/flow.ts` exports the typed state list,
+   terminal states, and allowed event-caused transitions. `fold()` consumes that definition;
+   it is not a documentation-only diagram. Legacy sparse ledgers remain replayable, while a
+   late queue/build/gate event cannot move an item out of `merged`, `rejected`, `accepted`,
+   `answered`, or `done`. The only terminal exits are `merged → accepted` on `item.accepted`
+   and an explicit terminal `→ queued` on `item.reopened`.
+2. **Dependency DAG.** `item.dependency-added { onItem, condition?, revision? }` activates a
+   scheduling edge and `item.dependency-removed { onItem, revision? }` deactivates it. Both are
+   immutable ledger events; removing an edge never rewrites its add event. CLI-authored facts
+   increment the per-edge `revision` under the ledger lock, so the highest revision wins without
+   relying on cross-process event-id order. A divergent same-revision add/remove conflict keeps
+   the edge active (fail closed). Revision-less legacy facts remain replayable using timestamp
+   order; on a same-timestamp legacy add/remove collision, remove wins deterministically.
+   The default/current condition is `merged-or-accepted`. A queued item is runnable only when
+   every active dependency has reached one of those states. Multiple edges are conjunctive.
+   Missing references, unsupported conditions, and cycle components fail closed.
+
+Dispatch applies the one dependency-readiness projection before the queue splits into planning,
+target, and engineering lanes. Waiting items remain `queued`; dispatch emits no park, unpark, or
+queue rewrite. Once their blockers merge/are accepted (or an edge is removed), the next beat can
+pick them directly.
+
+`loopctl dependency add|remove <item> <blocker>` is the mutation surface. It validates WI ids and
+refuses self-dependencies, missing blocker items, and edges that would create a cycle before
+appending under the ledger lock. `loopctl flow [--item WI-NNN] [--json]` is a generated,
+read-only projection of the lifecycle definition plus current dependency readiness/missing
+references/cycle components. Any diagram, console rendering, or `loopctl flow` output is only a view:
+ledger events, `fold()`, and dispatch behavior are operational truth.
+
+### Park and pathology-block semantics
 
 `item.parked.parkKind` is the intent of a pause, not an interchangeable failure label:
 
@@ -114,7 +147,7 @@ contract is pinned now so activation is additive):
 | `parked/decomposition` | waiting for the planner | planner owns the next transition | informational |
 | `parked/ops` | plane-owned failure recovery | bounded retry and pathology | health/recovery; decision only when its breaker is exhausted |
 | `parked/decision` | one concrete operator call | waits indefinitely | decision desk |
-| `blocked` | waits on a named work item | releases when that blocker merges or is accepted | shows the blocker and its current state |
+| `item.blocked` / `blockedOn` | pathology repair relationship on a parked victim | existing pathology/reactor recovery behavior | shows the repair item and its current state |
 
 The pathologist diagnoses only failure parks (`ops`, plus legacy unstamped parks). It never sends
 `hold`, `decision`, or `decomposition` through a diagnosis provider. A blocked victim waits while
@@ -125,6 +158,11 @@ timeout. A deliberately held victim never moves automatically, even if its block
 
 Legacy unstamped parks remain fail-safe: a breaker-prefixed legacy park is still an ops failure,
 but age alone never turns an unstamped park into an operator alarm.
+
+`item.blocked` is deliberately not the dependency DAG. It remains the backward-compatible,
+park-lifecycle annotation used by pathology (`blockedOn` clears on the existing requeue/unpark
+paths). First-class scheduling edges live independently in `item.dependency-added/removed`, can
+name multiple blockers, and never park or rewrite queued work.
 
 ### Confirm a portability-nudge reply (ADR-009)
 - A merged/accepted item's certification may carry a `portability` note (`"applies to: <targets>

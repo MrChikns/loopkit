@@ -18,7 +18,7 @@ blindly accepting whatever the regen produces) before committing both together.
 
 | lane | Touches-overstep | spine check | judge | scout | git push | alreadyShippedCommit | denialNote | gate wrapper | commit side | claim arbitration | post-integration re-gate |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| planning | no | no | no | no | no | no | no | none | n/a (no code diff) | none | n/a (no merge) |
+| planning | no | no | no | no | no | no | no | none | n/a (no code diff) | claim (shared pick, via batch) | n/a (no merge) |
 | target | yes | no | yes | no | no | no | no | runGate (declared) | dispatch (declared) | claim (shared pick, via batch) | re-gate |
 | batch | yes | yes | yes | yes | yes | yes | yes | runLaneGate | dispatch (declared) | arbitrate+claim | re-gate |
 
@@ -55,7 +55,7 @@ blindly accepting whatever the regen produces) before committing both together.
   `makeClaimBeforePick` factory under WI-186 without the target lane's own functions
   `finalizeTargetBuild`/`runTargetLane` ever calling it directly), `defer-read` (reads
   `isClaimActive` to skip claimed items — a read, not a reservation, so it cannot close the
-  read-to-spawn race), or `none` (reserves nowhere — neither its own span nor, for target, the
+  read-to-spawn race), or `none` (reserves nowhere — neither its own span nor, for planning/target, the
   shared pick site). A `none`/`claim (shared pick, via batch)` swap on this cell is exactly the
   class of regression this column exists to catch — see
   [`limitations.md`](limitations.md).

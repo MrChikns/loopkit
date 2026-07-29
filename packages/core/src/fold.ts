@@ -34,6 +34,17 @@ import { createHash } from 'node:crypto';
 import { LedgerEvent, DEFAULT_LANE, DEFAULT_CLAIM_TTL_MINUTES } from './schema.js';
 import { fallbackTargetId } from './target.js';
 import { adoptCriteriaFromEvent, criteriaGate } from './criteria.js';
+import {
+  DEFAULT_DEPENDENCY_CONDITION,
+  ITEM_FLOW,
+  ItemDependency,
+  ItemState,
+  ItemTransitionCause,
+  isAllowedItemTransition,
+  isTerminalItemState,
+} from './flow.js';
+
+export type { ItemState } from './flow.js';
 
 /**
  * Deterministic error fingerprint (a pure hash, never an LLM judgement) used by the
@@ -60,20 +71,6 @@ export function computeParkFingerprint(reason: string | undefined, parkKind?: st
 // ---------------------------------------------------------------------------
 // Per-item state
 // ---------------------------------------------------------------------------
-
-export type ItemState =
-  | 'captured'
-  | 'routed'
-  | 'answered'
-  | 'queued'
-  | 'building'
-  | 'gated'
-  | 'parked'
-  | 'approved'
-  | 'merged'
-  | 'accepted'
-  | 'rejected'
-  | 'done';
 
 export interface ItemBuild {
   attempt: number;
@@ -309,6 +306,11 @@ export interface ItemRecord {
    */
   blockedOn?: string;
   /**
+   * Active first-class scheduling dependencies, folded from item.dependency-added/removed.
+   * Absent means no dependency history, preserving legacy state JSON for old ledgers.
+   */
+  dependencies?: ItemDependency[];
+  /**
    * WI-084 park pathologist: the parkFingerprint (see computeParkFingerprint) the pathologist
    * last diagnosed for this item (diagnosis.recorded.parkFingerprint). Dedup key — stepPathology
    * skips an item whose CURRENT rec.parkFingerprint already equals this, so a repeat identical
@@ -539,7 +541,7 @@ export interface FoldResult {
 function newItem(id: string): ItemRecord {
   return {
     id,
-    state: 'captured',
+    state: ITEM_FLOW.initialState,
     lane: DEFAULT_LANE,   // every item defaults to the engineering lane
     attempts: 0,
     builds: [],
@@ -772,19 +774,15 @@ function clearParkFields(rec: ItemRecord): void {
   rec.blockedOn = undefined;
 }
 
-/** States from which only item.accepted (merged→accepted) or item.reopened may transition;
- *  all other state-changing events are recorded for data but never regress state. */
-const TERMINAL_STATES = new Set<ItemState>(['merged', 'rejected', 'accepted', 'answered', 'done']);
-
 /**
- * THE terminal-state predicate (one home — reads the SAME TERMINAL_STATES set the fold uses to
+ * THE terminal-state predicate (one home — reads the SAME flow definition the fold uses to
  * no-op late state-changing events). An item is terminal once it has merged/rejected/accepted/
  * answered/done: no build should still be trying to land it. dispatch's terminal path re-checks
  * this under the ledger lock before a second merge, so a stale-claim takeover can never
  * double-deliver an already-shipped item.
  */
 export function isItemTerminal(rec: Pick<ItemRecord, 'state'>): boolean {
-  return TERMINAL_STATES.has(rec.state);
+  return isTerminalItemState(rec.state);
 }
 
 /**
@@ -853,6 +851,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
   const targets = new TargetsProjection();
   const failureCatalog = new Map<string, FailureCatalogEntry>();
   const sessions = new Map<string, SessionRecord>();
+  const dependencyVersions = new Map<string, DependencyEdgeFact>();
   let maxWiNum = 0;
   let maxConvNum = 0;
 
@@ -881,9 +880,16 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
     return conversations.get(id)!;
   }
 
-  function transition(rec: ItemRecord, state: ItemState, ts: string): void {
+  function transition(
+    rec: ItemRecord,
+    state: ItemState,
+    cause: ItemTransitionCause,
+    ts: string,
+  ): boolean {
+    if (!isAllowedItemTransition(rec.state, state, cause)) return false;
     rec.state = state;
     rec.transitions[state] = ts;
+    return true;
   }
 
   for (const ev of events) {
@@ -1006,12 +1012,15 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
 
     const rec = getOrCreateItem(ev.item);
 
+    // Additive graph facts fold even on terminal items; they never change lifecycle state.
+    if (foldDependencyEvent(rec, ev, d, dependencyVersions)) continue;
+
     // merged is TERMINAL. Once an item has merged, a late state-changing event (a duplicate
     // approval, a stray park/merge, a gate result) is recorded but never regresses the state —
     // messages still thread through below. Rationale: a duplicate item.approved after
     // item.merged once drove the reactor branch-missing path and parked an already-shipped
     // item; a stray item.merged once flipped a building item to merged.
-    if (TERMINAL_STATES.has(rec.state)) {
+    if (isTerminalItemState(rec.state)) {
       switch (ev.type) {
         case 'msg.in':
         case 'item.feedback':
@@ -1032,7 +1041,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         // fires from 'merged'; a stray item.accepted on rejected/answered/done is a no-op.
         case 'item.accepted':
           if (rec.state !== 'merged') break;
-          transition(rec, 'accepted', ev.ts);
+          transition(rec, 'accepted', 'item.accepted', ev.ts);
           rec.acceptedAt = ev.ts;
           rec.provisionalAccept = (d['provisional'] === true) ? true : undefined;
           clearParkFields(rec);
@@ -1040,7 +1049,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         // item.reopened: the ONE event that transitions any terminal state
         // back to 'queued'. Clears park fields and records who/why for forensics.
         case 'item.reopened':
-          transition(rec, 'queued', ev.ts);
+          transition(rec, 'queued', 'item.reopened', ev.ts);
           rec.queuedAt = ev.ts;
           rec.reopenedAt = ev.ts;
           rec.reopenedBy = typeof d['by'] === 'string' ? d['by'] : undefined;
@@ -1087,7 +1096,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
 
     switch (ev.type) {
       case 'item.captured':
-        transition(rec, 'captured', ev.ts);
+        transition(rec, 'captured', 'item.captured', ev.ts);
         rec.capturedAt = ev.ts;
         rec.createdAt = rec.createdAt ?? ev.ts;
         rec.sourceText = typeof d['text'] === 'string' ? d['text'] : undefined;
@@ -1109,7 +1118,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         if (route && TERMINAL_ROUTES.has(route)) {
           // Terminal classification: item closed without entering the build queue.
           // Transition unconditionally — a terminal route always wins.
-          transition(rec, 'answered', ev.ts);
+          transition(rec, 'answered', 'item.routed', ev.ts);
           rec.answeredAt = ev.ts;
           rec.claim = undefined;   // terminal — any claim lease is consumed
         } else if (rec.state === 'captured') {
@@ -1117,7 +1126,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           // ADR-013 deleted used to emit): only transition from captured to routed.
           // Guard: reactor emits queued then routed for such items, so we must
           // not regress an already-queued item.
-          transition(rec, 'routed', ev.ts);
+          transition(rec, 'routed', 'item.routed', ev.ts);
         }
         rec.routedAt = ev.ts;
         rec.route = route;
@@ -1128,7 +1137,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       }
 
       case 'item.queued': {
-        transition(rec, 'queued', ev.ts);
+        transition(rec, 'queued', 'item.queued', ev.ts);
         rec.queuedAt = ev.ts;
         rec.spec = typeof d['spec'] === 'string' ? d['spec'] : rec.spec;
         const newTouches = typeof d['touches'] === 'string' ? d['touches']
@@ -1164,7 +1173,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       }
 
       case 'item.parked':
-        transition(rec, 'parked', ev.ts);
+        transition(rec, 'parked', 'item.parked', ev.ts);
         rec.parkedAt = ev.ts;
         rec.parkReason = typeof d['reason'] === 'string' ? d['reason']
           : typeof d['parkReason'] === 'string' ? d['parkReason']
@@ -1209,19 +1218,19 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
 
       case 'item.unparked':
         clearParkFields(rec);
-        transition(rec, 'queued', ev.ts);
+        transition(rec, 'queued', 'item.unparked', ev.ts);
         rec.queuedAt = ev.ts;
         rec.lastUnparkedAt = ev.ts;
         break;
 
       case 'item.approved':
-        transition(rec, 'approved', ev.ts);
+        transition(rec, 'approved', 'item.approved', ev.ts);
         rec.approvedAt = ev.ts;
         clearParkFields(rec);
         break;
 
       case 'item.rejected':
-        transition(rec, 'rejected', ev.ts);
+        transition(rec, 'rejected', 'item.rejected', ev.ts);
         rec.rejectedAt = ev.ts;
         rec.rejectedBy = typeof d['by'] === 'string' ? d['by'] : undefined;
         clearParkFields(rec);
@@ -1229,7 +1238,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         break;
 
       case 'item.merged':
-        transition(rec, 'merged', ev.ts);
+        transition(rec, 'merged', 'item.merged', ev.ts);
         rec.claim = undefined;   // terminal — any claim lease is consumed
         rec.mergedAt = ev.ts;
         rec.mergeCommit = typeof d['commit'] === 'string' ? d['commit'] : undefined;
@@ -1267,7 +1276,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       }
 
       case 'item.accepted':
-        transition(rec, 'accepted', ev.ts);
+        transition(rec, 'accepted', 'item.accepted', ev.ts);
         rec.acceptedAt = ev.ts;
         rec.provisionalAccept = (d['provisional'] === true) ? true : undefined;
         clearParkFields(rec);
@@ -1340,7 +1349,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           dispatchedAt: ev.ts,
         };
         rec.currentBuild = build;
-        transition(rec, 'building', ev.ts);
+        transition(rec, 'building', 'build.dispatched', ev.ts);
         rec.buildingAt = ev.ts;
         clearParkFields(rec);
         rec.claim = undefined;   // queued-consuming transition — the lease is consumed
@@ -1351,7 +1360,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         if (rec.currentBuild) {
           rec.currentBuild.finishedAt = ev.ts;
         }
-        transition(rec, 'gated', ev.ts);
+        transition(rec, 'gated', 'build.finished', ev.ts);
         rec.gatedAt = ev.ts;
         break;
 
@@ -1373,7 +1382,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           rec.builds.push({ ...rec.currentBuild });
           rec.currentBuild = undefined;
         }
-        transition(rec, 'queued', ev.ts);
+        transition(rec, 'queued', ev.type, ev.ts);
         rec.queuedAt = ev.ts;
         break;
 
@@ -1405,7 +1414,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         rec.currentBuild.crashReason = 'cancelled by operator';
         rec.builds.push({ ...rec.currentBuild });
         rec.currentBuild = undefined;
-        transition(rec, 'parked', ev.ts);
+        transition(rec, 'parked', 'build.cancelled', ev.ts);
         rec.parkedAt = ev.ts;
         rec.parkReason = 'stopped by operator';
         rec.parkKind = 'hold';
@@ -1413,12 +1422,12 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
       }
 
       case 'gate.passed':
-        transition(rec, 'gated', ev.ts);
+        transition(rec, 'gated', 'gate.passed', ev.ts);
         rec.gatedAt = ev.ts;
         break;
 
       case 'gate.failed':
-        transition(rec, 'parked', ev.ts);
+        transition(rec, 'parked', 'gate.failed', ev.ts);
         rec.parkedAt = ev.ts;
         rec.lifetimeGateRedCount = (rec.lifetimeGateRedCount ?? 0) + 1;  // WI-108 lifetime counter
         rec.parkReason = typeof d['reason'] === 'string' ? d['reason'] : 'gate.failed';
@@ -1429,7 +1438,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         break;
 
       case 'gate.parked':
-        transition(rec, 'parked', ev.ts);
+        transition(rec, 'parked', 'gate.parked', ev.ts);
         rec.parkedAt = ev.ts;
         rec.lifetimeGateRedCount = (rec.lifetimeGateRedCount ?? 0) + 1;  // WI-108 lifetime counter
         // gate.parked.reason carries the park CLASS token ('touches-overstep' | 'spine');
@@ -1570,6 +1579,79 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
   }
 
   return { items, conversations, targets, maxWiNum, maxConvNum, failureCatalog, sessions };
+}
+
+interface DependencyEdgeFact {
+  active: boolean;
+  condition: ItemDependency['condition'];
+  ts: string;
+  revision?: number;
+}
+
+function validDependencyRevision(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : undefined;
+}
+
+/**
+ * Compare two facts for one item→blocker edge without consulting the event id.
+ *
+ * Versioned CLI facts supersede all legacy facts and higher revisions win. Equal-revision
+ * divergent histories are fail-closed and commutative: add beats remove (the edge stays active),
+ * then an invalid add condition beats a valid one. Legacy histories retain timestamp ordering;
+ * same-timestamp legacy conflicts use remove-wins so replay does not depend on which process
+ * happened to mint the lower event id.
+ */
+function dependencyFactWins(candidate: DependencyEdgeFact, current: DependencyEdgeFact): boolean {
+  const candidateVersioned = candidate.revision !== undefined;
+  const currentVersioned = current.revision !== undefined;
+  if (candidateVersioned !== currentVersioned) return candidateVersioned;
+  if (candidateVersioned && currentVersioned && candidate.revision !== current.revision) {
+    return candidate.revision! > current.revision!;
+  }
+  if (!candidateVersioned && !currentVersioned && candidate.ts !== current.ts) {
+    return candidate.ts > current.ts;
+  }
+  if (candidate.active !== current.active) {
+    return candidateVersioned ? candidate.active : !candidate.active;
+  }
+  if (candidate.condition !== current.condition) return candidate.condition === 'invalid';
+  return candidate.ts > current.ts;
+}
+
+function applyDependencyFact(rec: ItemRecord, onItem: string, fact: DependencyEdgeFact): void {
+  const dependencies = [...(rec.dependencies ?? [])].filter(dep => dep.item !== onItem);
+  if (fact.active) {
+    dependencies.push({ item: onItem, condition: fact.condition, addedAt: fact.ts });
+  }
+  rec.dependencies = dependencies.sort((a, b) => a.item.localeCompare(b.item));
+}
+
+function foldDependencyEvent(
+  rec: ItemRecord,
+  ev: LedgerEvent,
+  d: Record<string, unknown>,
+  dependencyVersions: Map<string, DependencyEdgeFact>,
+): boolean {
+  if (ev.type !== 'item.dependency-added' && ev.type !== 'item.dependency-removed') return false;
+  const onItem = typeof d['onItem'] === 'string' ? d['onItem'] : '';
+  if (!onItem) return true;
+
+  const active = ev.type === 'item.dependency-added';
+  const candidate: DependencyEdgeFact = {
+    active,
+    condition: active && d['condition'] !== undefined && d['condition'] !== DEFAULT_DEPENDENCY_CONDITION
+      ? 'invalid'
+      : DEFAULT_DEPENDENCY_CONDITION,
+    ts: ev.ts,
+    revision: validDependencyRevision(d['revision']),
+  };
+  const key = `${rec.id}\0${onItem}`;
+  const current = dependencyVersions.get(key);
+  if (!current || dependencyFactWins(candidate, current)) {
+    dependencyVersions.set(key, candidate);
+    applyDependencyFact(rec, onItem, candidate);
+  }
+  return true;
 }
 
 /**

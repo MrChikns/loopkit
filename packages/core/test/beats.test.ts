@@ -5808,6 +5808,12 @@ test('dispatch: planning lane queues a child via loopctl new, merges with no sou
     const events = await loadAllEvents(ledgerDir);
     const folded = fold(events);
     assert.equal(folded.items.get('WI-400')?.state, 'merged', 'the planning item resolves to merged (A2 non-code DOD)');
+    const claimIdx = events.findIndex(e => e.type === 'item.claimed' && e.item === 'WI-400');
+    const dispatchIdx = events.findIndex(e => e.type === 'build.dispatched' && e.item === 'WI-400');
+    assert.ok(claimIdx >= 0 && claimIdx < dispatchIdx,
+      'planning must reserve through the shared admission terminal before build.dispatched');
+    assert.equal(folded.items.get('WI-400')?.claim, undefined,
+      'build.dispatched/terminal completion consumes the planning claim');
     const merged = events.find(e => e.type === 'item.merged' && e.item === 'WI-400');
     assert.equal((merged?.data as { commit?: string }).commit, 'none (planning lane — no source changes)');
     assert.equal((merged?.data as { deployed?: boolean }).deployed, false, 'a planning merge must never trigger a real deploy');
@@ -5817,6 +5823,116 @@ test('dispatch: planning lane queues a child via loopctl new, merges with no sou
     const trail = events.find(e => e.type === 'msg.out' && e.item === 'WI-400');
     assert.ok(trail, 'a trail note must record the still-remaining children');
     assert.match((trail?.data as { text?: string }).text ?? '', /second child slice/);
+  } finally {
+    cleanDir(ledgerDir);
+    cleanDir(repoRoot);
+  }
+});
+
+test('dispatch: planning claims each serial item only after the previous planner run terminates', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+  mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'planner.md'), 'stub planner prompt');
+  try {
+    await seedLedger(ledgerDir, [
+      makeEvent('reactor', 'WI-450', 'item.captured', { source: 'decompose:WI-449', text: 'plan first' }),
+      makeEvent('reactor', 'WI-450', 'item.queued', { spec: 'plan first', lane: 'planning' }),
+      makeEvent('reactor', 'WI-451', 'item.captured', { source: 'decompose:WI-449', text: 'plan second' }),
+      makeEvent('reactor', 'WI-451', 'item.queued', { spec: 'plan second', lane: 'planning' }),
+    ]);
+
+    let calls = 0;
+    const provider: LlmProvider = {
+      name: 'fake-serial-planner',
+      async run(): Promise<ProviderResult> {
+        calls++;
+        const before = await loadAllEvents(ledgerDir);
+        if (calls === 1) {
+          assert.ok(before.some(e => e.item === 'WI-450' && e.type === 'build.dispatched'));
+          assert.ok(!before.some(e => e.item === 'WI-451' && e.type === 'item.claimed'),
+            'item 2 must remain unclaimed while item 1 is executing');
+          await appendEvents(ledgerDir, [
+            makeEvent('cli', 'WI-460', 'item.captured', {
+              source: 'decompose:WI-450',
+              text: 'first child',
+            }),
+          ]);
+        } else {
+          const firstTerminal = before.findIndex(e => e.item === 'WI-450' && e.type === 'item.merged');
+          const secondClaim = before.findIndex(e => e.item === 'WI-451' && e.type === 'item.claimed');
+          assert.ok(firstTerminal >= 0 && secondClaim > firstTerminal,
+            'item 2 claim must be appended only after item 1 reaches its terminal result');
+          await appendEvents(ledgerDir, [
+            makeEvent('cli', 'WI-461', 'item.captured', {
+              source: 'decompose:WI-451',
+              text: 'second child',
+            }),
+          ]);
+        }
+        return { ok: true, text: 'QUEUED: child\nREMAINING:' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot, ledgerDir, autonomy: 'on', provider, config: makeTestConfig(), authProbeResult: { ok: true },
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(result.dispatched.find(d => d.item === 'WI-450')?.gateOutcome, 'passed');
+    assert.equal(result.dispatched.find(d => d.item === 'WI-451')?.gateOutcome, 'passed');
+  } finally {
+    cleanDir(ledgerDir);
+    cleanDir(repoRoot);
+  }
+});
+
+test('dispatch: planning revalidates item 2 after item 1 provider work and honors a new operator hold', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  mkdirSync(join(repoRoot, '.ai', 'runs', 'loopkit'), { recursive: true });
+  mkdirSync(join(repoRoot, '.ai', 'loops', 'prompts'), { recursive: true });
+  writeFileSync(join(repoRoot, '.ai', 'loops', 'prompts', 'planner.md'), 'stub planner prompt');
+  try {
+    await seedLedger(ledgerDir, [
+      makeEvent('reactor', 'WI-470', 'item.captured', { source: 'decompose:WI-469', text: 'plan first' }),
+      makeEvent('reactor', 'WI-470', 'item.queued', { spec: 'plan first', lane: 'planning' }),
+      makeEvent('reactor', 'WI-471', 'item.captured', { source: 'decompose:WI-469', text: 'plan second' }),
+      makeEvent('reactor', 'WI-471', 'item.queued', { spec: 'plan second', lane: 'planning' }),
+    ]);
+
+    let calls = 0;
+    const provider: LlmProvider = {
+      name: 'fake-hold-planner',
+      async run(): Promise<ProviderResult> {
+        calls++;
+        assert.equal(calls, 1, 'held item 2 must never reach the provider');
+        const events = await loadAllEvents(ledgerDir);
+        assert.ok(!events.some(e => e.item === 'WI-471' && e.type === 'item.claimed'));
+        await appendEvents(ledgerDir, [
+          makeEvent('operator', 'WI-471', 'item.parked', { reason: 'operator hold', parkKind: 'hold' }),
+          makeEvent('cli', 'WI-480', 'item.captured', {
+            source: 'decompose:WI-470',
+            text: 'first child',
+          }),
+        ]);
+        return { ok: true, text: 'QUEUED: child\nREMAINING:' };
+      },
+    };
+
+    const result = await runDispatch({
+      repoRoot, ledgerDir, autonomy: 'on', provider, config: makeTestConfig(), authProbeResult: { ok: true },
+    });
+
+    assert.equal(calls, 1);
+    const held = result.dispatched.find(d => d.item === 'WI-471');
+    assert.equal(held?.dispatched, false);
+    assert.match(held?.detail ?? '', /fresh state is parked/);
+    const events = await loadAllEvents(ledgerDir);
+    assert.ok(!events.some(e => e.item === 'WI-471' && e.type === 'item.claimed'));
+    assert.ok(!events.some(e => e.item === 'WI-471' && e.type === 'build.dispatched'));
+    assert.equal(fold(events).items.get('WI-471')?.state, 'parked');
   } finally {
     cleanDir(ledgerDir);
     cleanDir(repoRoot);

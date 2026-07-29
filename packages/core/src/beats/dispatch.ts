@@ -68,6 +68,7 @@ import { readEpochStampFile } from '../slo.js';
 import { withLock } from '../ledger.js';
 import { mintSessionId } from '../session.js';
 import { requireCleanCheckout } from '../git-safety.js';
+import { isItemDependencyReady, projectDependencyGraph } from '../flow.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -376,6 +377,8 @@ export interface DispatchResult {
   dryRun: boolean;
   dispatched: DispatchStepResult[];
   totalEventsWritten: number;
+  /** Queued items omitted from every lane because their dependency graph was not ready. */
+  dependencyBlocked?: { count: number; items: string[] };
   detail?: string;
 }
 
@@ -386,12 +389,16 @@ export interface DispatchResult {
 /** One item's claim-arbitration outcome against a fresh re-fold under the ledger lock. */
 export interface ClaimArbitrationDecision {
   item: string;
-  /** true = dispatch may build it; false = a foreign session's active claim or in-flight build wins. */
+  /** True only when the fresh under-lock fold still shows a queued, ready, unclaimed item. */
   keep: boolean;
   /** Present only when keep is false for a foreign CLAIM — the foreign session's id, for the detail. */
   foreignSessionId?: string;
-  /** True when keep is false because a foreign in-flight build already holds the item (no claim). */
+  /** True when a foreign in-flight build caused this yield. */
   foreignBuild?: boolean;
+  /** True when a fresh under-lock dependency check caused this yield. */
+  dependencyBlocked?: boolean;
+  /** Fresh lifecycle state that invalidated the stale picker result. */
+  stateChanged?: { state: ItemRecord['state'] | 'missing' };
 }
 
 /**
@@ -399,15 +406,17 @@ export interface ClaimArbitrationDecision {
  * re-folded FoldResult (re-read under the ledger lock, AFTER the picker's own read), decide for
  * each candidate item whether dispatch keeps it or yields.
  *
- * An item YIELDS iff, in this fresh re-fold, EITHER:
- *   (a) it carries an active claim (isClaimActive) whose sessionId is NOT `dispatchSessionId` —
+ * An item YIELDS iff, in this fresh re-fold:
+ *   (a) it no longer exists or is no longer `queued`; OR
+ *   (b) any active scheduling dependency is unresolved, missing, cyclic, or malformed; OR
+ *   (c) it carries an active claim (isClaimActive) whose sessionId is NOT `dispatchSessionId` —
  *       an attended operator session claimed it in the read-to-arbitrate window; OR
- *   (b) it is already 'building' with a RECENT build.dispatched (WI-074): at claim-arbitration
+ *   (d) it is already 'building' with a RECENT build.dispatched (WI-074): at claim-arbitration
  *       time dispatch has not yet appended its own build.dispatched this beat, so a candidate
  *       that is already building was transitioned by a FOREIGN actor (an attended fast-drain
  *       session, or a parallel beat) in that same window. Building it too would double-deliver.
- *       Only a RECENT build blocks (within `buildStaleMs`): a STALE building record is a reapable
- *       orphan the doctor owns and must not permanently block takeover.
+ *       A stale building record still yields here because only the doctor may transition that
+ *       orphan back to queued; dispatch never builds directly from stale non-queued state.
  *
  * An item dispatch already claimed itself (a prior beat's claim renewed, or none at all) is KEPT.
  * This is the one place the yield decision lives — runDispatch and its tests both call this, so
@@ -420,20 +429,29 @@ export function decideClaimArbitration(
   nowMs: number,
   buildStaleMs: number,
 ): ClaimArbitrationDecision[] {
+  const dependencyGraph = projectDependencyGraph(freshResult.items.values());
   return candidateIds.map(id => {
     const rec2 = freshResult.items.get(id);
-    // Item vanished from the fold entirely (shouldn't happen for a just-queued item) — keep,
-    // nothing foreign to yield to.
-    if (!rec2) return { item: id, keep: true };
+    if (!rec2) return { item: id, keep: false, stateChanged: { state: 'missing' } };
+    if (rec2.state !== 'queued') {
+      if (rec2.state === 'building' && rec2.buildingAt) {
+        const buildingMs = Date.parse(rec2.buildingAt);
+        if (Number.isFinite(buildingMs) && nowMs - buildingMs <= buildStaleMs) {
+          return {
+            item: id,
+            keep: false,
+            foreignBuild: true,
+            stateChanged: { state: rec2.state },
+          };
+        }
+      }
+      return { item: id, keep: false, stateChanged: { state: rec2.state } };
+    }
+    if (!isItemDependencyReady(dependencyGraph, id)) {
+      return { item: id, keep: false, dependencyBlocked: true };
+    }
     if (isClaimActive(rec2, freshResult.sessions, nowMs) && rec2.claim!.sessionId !== dispatchSessionId) {
       return { item: id, keep: false, foreignSessionId: rec2.claim!.sessionId };
-    }
-    // (b) foreign in-flight build — a recent build.dispatched by someone else.
-    if (rec2.state === 'building' && rec2.buildingAt) {
-      const buildingMs = Date.parse(rec2.buildingAt);
-      if (Number.isFinite(buildingMs) && nowMs - buildingMs <= buildStaleMs) {
-        return { item: id, keep: false, foreignBuild: true };
-      }
     }
     return { item: id, keep: true };
   });
@@ -447,10 +465,11 @@ export function decideClaimArbitration(
  * plus `session.started`/`session.heartbeat` for dispatch's per-run pseudo-session, without
  * which `isClaimActive` would read dispatch's own claims as inactive (gap 2).
  *
- * WI-186: shared by BOTH picking lanes. The engineering lane had this terminal from ADR-007;
+ * WI-186: shared by all three picking lanes. The engineering lane had this terminal from ADR-007;
  * the target lane read the queue and spawned without reserving anything, so two concurrent
- * pickers could both select the same targeted item in the read-to-spawn window. Both lanes now
- * call this factory's closure, so the reservation path can never drift between them.
+ * pickers could both select the same targeted item in the read-to-spawn window. Planning now
+ * uses the same closure too, so every lane rechecks dependencies and reservations immediately
+ * before admission and the reservation path cannot drift between them.
  *
  * The returned function is stateful in exactly one respect: `session.started` is emitted only on
  * the FIRST claiming append of a beat (subsequent lanes still heartbeat). A beat is one session.
@@ -487,11 +506,48 @@ export function makeClaimBeforePick(
   };
 }
 
+/**
+ * No-provider planning terminal: revalidate stale picker candidates and append the ops park for
+ * survivors in the SAME ledger transaction. There is deliberately no intermediate claim — no
+ * provider work will run — so a claim followed by an unlocked park would only create another
+ * race. Yielded items receive no event and retain their fresh state.
+ *
+ * @internal exported for tests
+ */
+export async function parkPlanningWithoutProvider(
+  ledgerDir: string,
+  candidateIds: string[],
+  dispatchSessionId: string,
+  claimTtlMinutes: number,
+  reason: string,
+): Promise<ClaimArbitrationDecision[]> {
+  if (candidateIds.length === 0) return [];
+  return withLock(ledgerDir, async tx => {
+    const freshResult = fold(await tx.loadAll());
+    const decisions = decideClaimArbitration(
+      candidateIds,
+      freshResult,
+      dispatchSessionId,
+      Date.now(),
+      claimTtlMinutes * 60_000,
+    );
+    const parks = decisions
+      .filter(decision => decision.keep)
+      .map(decision => makeEvent('dispatch', decision.item, 'item.parked', {
+        reason,
+        parkKind: 'ops' as const,
+      }));
+    if (parks.length > 0) await tx.append(parks);
+    return decisions;
+  });
+}
+
 /** The operator-facing detail for an item this beat yielded rather than built (ADR-007). */
 export function claimYieldDetail(d: ClaimArbitrationDecision): string {
-  return d.foreignBuild
-    ? 'yielded to foreign in-flight build (recent build.dispatched)'
-    : `yielded to attended claim (session ${d.foreignSessionId})`;
+  if (d.dependencyBlocked) return 'waiting on dependencies (remains queued)';
+  if (d.foreignBuild) return 'yielded to foreign in-flight build (fresh state: building)';
+  if (d.stateChanged) return `yielded because fresh state is ${d.stateChanged.state} (picker saw queued)`;
+  return `yielded to attended claim (session ${d.foreignSessionId})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3593,6 +3649,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // (the Phase-2 loop below appends the terminal events), so this is a no-op today, but
     // keeps the picker reading a fold taken AFTER collection as the plane evolves.
     foldResult = fold(await loadAllEventsWithQuarantine(opts.ledgerDir));
+    const dependencyGraph = projectDependencyGraph(foldResult.items.values());
 
     // ── In-flight TARGETED detached builds (WI-178) ───────────────────────────
     // A targeted item's detached build is deliberately EXCLUDED from collectDetachedBuilds
@@ -3664,11 +3721,16 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     // Collect queued items, sorted by priority. ADR-008 §3: a budget/quota gate above that
     // found collected detached work to drain sets skipNewPicks — force the pick list empty so
     // this beat drains ONLY the already-admitted collected work, never a fresh spawn.
-    let queued = skipNewPicks ? [] : Array.from(foldResult.items.values())
-      // Session-mode deference: an item with an ACTIVE claim belongs to an attended
-      // session; the beat skips it. Expired/stale claims read as unclaimed (computed,
-      // never mutated) so a dead session releases its work within one beat.
-      .filter(r => r.state === 'queued' && r.spec && !isClaimActive(r, foldResult.sessions, Date.now()))
+    const queuedCandidates = skipNewPicks ? [] : Array.from(foldResult.items.values())
+      .filter(r => r.state === 'queued' && r.spec && !isClaimActive(r, foldResult.sessions, Date.now()));
+    const dependencyBlocked = queuedCandidates.filter(r => !isItemDependencyReady(dependencyGraph, r.id));
+    const dependencyBlockedInfo = dependencyBlocked.length > 0
+      ? { count: dependencyBlocked.length, items: dependencyBlocked.map(r => r.id) }
+      : undefined;
+    // Session-mode deference and dependency readiness apply before the queue splits into
+    // planning, target, and engineering. Waiting work stays queued with no park/rewrite.
+    let queued = queuedCandidates
+      .filter(r => isItemDependencyReady(dependencyGraph, r.id))
       .sort((a, b) => {
         const pa = PRIORITY_ORDER[a.priority ?? 'medium'] ?? 2;
         const pb = PRIORITY_ORDER[b.priority ?? 'medium'] ?? 2;
@@ -3713,7 +3775,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         dryRun: opts.dryRun ?? false,
         dispatched: results,
         totalEventsWritten: results.reduce((n, r) => n + r.eventsWritten, 0),
-        detail: results.length > 0 ? 'all queued items were stopped by operator' : (skipNewPicksDetail ?? 'no queued items'),
+        ...(dependencyBlockedInfo ? { dependencyBlocked: dependencyBlockedInfo } : {}),
+        detail: results.length > 0
+          ? 'all queued items were stopped by operator'
+          : dependencyBlocked.length > 0
+            ? `${dependencyBlocked.length} queued item(s) waiting on dependencies: ${dependencyBlocked.map(r => r.id).join(', ')}`
+            : (skipNewPicksDetail ?? 'no queued items'),
       };
     }
 
@@ -3796,6 +3863,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         dryRun: opts.dryRun ?? false,
         dispatched: [],
         totalEventsWritten: 0,
+        ...(dependencyBlockedInfo ? { dependencyBlocked: dependencyBlockedInfo } : {}),
         detail: capacity.deferredItems > 0
           ? `worker capacity full (${inFlightWorkerSlots}/${maxConcurrentWorkers}); overflow remains queued`
           : 'all queued items conflict with in-flight or each other',
@@ -3839,6 +3907,7 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
           dryRun: false,
           dispatched: [],
           totalEventsWritten: 0,
+          ...(dependencyBlockedInfo ? { dependencyBlocked: dependencyBlockedInfo } : {}),
           detail: 'infra: builder not logged in — run /login (flag: .ai/runs/loopkit/dispatch-auth-failed)',
         };
       }
@@ -3884,15 +3953,18 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
     const allNewEvents: ReturnType<typeof makeEvent>[] = [];
 
     // ── ADR-007 claim-before-pick: ONE per-beat pseudo-session, ONE reservation terminal ──
-    // Minted here (above BOTH picking lanes) rather than inside the engineering block: the
-    // target lane spawns first, so it must reserve under the same identity — a per-run, not
-    // permanent-shared, identity so a crashed beat's claims expire cleanly by the dead-man rule.
+    // Minted here (above all three picking lanes) rather than inside any lane: each must reserve
+    // under the same identity — a per-run, not permanent-shared, identity so a crashed beat's
+    // claims expire cleanly by the dead-man rule.
     const dispatchSessionId = opts.dispatchSessionId ?? mintSessionId();
     const claimTtlMinutes = cfg.buildTimeoutMinutes + 5;
     const claimBeforePick = makeClaimBeforePick(opts.ledgerDir, dispatchSessionId, claimTtlMinutes);
 
-    // Dispatch the planning lane first — it touches no git state, so it runs
-    // ahead of (and independent of) the engineering worktree/merge machinery below.
+    // Dispatch the planning lane first — it touches no git state, so it runs ahead of (and
+    // independent of) the engineering worktree/merge machinery below. Planning is serial, so
+    // admission is serial too: claim ONE item immediately before executing it, then re-fold
+    // under lock again before the next. Bulk-claiming the whole list would leave later items
+    // exposed to operator holds/dependency changes during earlier provider calls.
     if (planningQueued.length > 0) {
       if (opts.dryRun) {
         for (const r of planningQueued) {
@@ -3900,11 +3972,36 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         }
       } else if (!provider) {
         const reason = 'infra: no provider available for dispatch';
-        const events = planningQueued.map(r => makeEvent('dispatch', r.id, 'item.parked', { reason, parkKind: 'ops' as const }));
-        await appendEvents(opts.ledgerDir, events);
-        for (const r of planningQueued) results.push({ item: r.id, dispatched: false, eventsWritten: 1, detail: reason });
+        const decisions = await parkPlanningWithoutProvider(
+          opts.ledgerDir,
+          planningQueued.map(r => r.id),
+          dispatchSessionId,
+          claimTtlMinutes,
+          reason,
+        );
+        for (const decision of decisions) {
+          results.push({
+            item: decision.item,
+            dispatched: false,
+            eventsWritten: decision.keep ? 1 : 0,
+            detail: decision.keep ? reason : claimYieldDetail(decision),
+          });
+        }
       } else {
-        results.push(...await runPlanningLane(opts, cfg, provider, planningQueued, runDir, registry));
+        for (const rec of planningQueued) {
+          const planningCandidateIds = [rec.id];
+          const [decision] = await claimBeforePick(planningCandidateIds);
+          if (!decision?.keep) {
+            results.push({
+              item: rec.id,
+              dispatched: false,
+              eventsWritten: 0,
+              detail: decision ? claimYieldDetail(decision) : 'yielded during fresh admission',
+            });
+            continue;
+          }
+          results.push(...await runPlanningLane(opts, cfg, provider, [rec], runDir, registry));
+        }
       }
     }
 
@@ -4388,7 +4485,10 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
         dryRun: true,
         dispatched: results,
         totalEventsWritten: allNewEvents.length,
-        detail: `dry-run: ${groups.length} worktree(s) would be dispatched`,
+        ...(dependencyBlockedInfo ? { dependencyBlocked: dependencyBlockedInfo } : {}),
+        detail: `dry-run: ${groups.length} worktree(s) would be dispatched${
+          dependencyBlockedInfo ? `; ${dependencyBlockedInfo.count} queued item(s) waiting on dependencies: ${dependencyBlockedInfo.items.join(', ')}` : ''
+        }`,
       };
     }
 
@@ -5339,7 +5439,13 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       : { eventsWritten: 0 };
 
     const totalEventsWritten = results.reduce((s, r) => s + r.eventsWritten, 0) + deploy.eventsWritten;
-    return { dryRun: false, dispatched: results, totalEventsWritten, ...(lockNote ? { detail: lockNote } : {}) };
+    return {
+      dryRun: false,
+      dispatched: results,
+      totalEventsWritten,
+      ...(dependencyBlockedInfo ? { dependencyBlocked: dependencyBlockedInfo } : {}),
+      ...(lockNote ? { detail: lockNote } : {}),
+    };
   } finally {
     // Commit ledger residue every beat (not just on a clean exit —
     // `finally` also covers the regression-guard halt and any thrown error) so the uncommitted

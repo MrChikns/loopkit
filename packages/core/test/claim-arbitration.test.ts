@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 
 import { makeEvent, LedgerEvent } from '../src/schema.js';
 import { fold, isClaimActive, SessionRecord } from '../src/fold.js';
-import { decideClaimArbitration, runDispatch } from '../src/beats/dispatch.js';
+import { claimYieldDetail, decideClaimArbitration, runDispatch } from '../src/beats/dispatch.js';
 import { reapStaleClaims } from '../src/doctor.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { CONFIG_DEFAULTS, LoopkitConfig } from '../src/config.js';
@@ -110,6 +110,22 @@ test('decideClaimArbitration: an unclaimed item is kept', () => {
   assert.equal(decisions[0]!.keep, true);
 });
 
+test('decideClaimArbitration: a vanished picker result fails closed with explicit missing detail', () => {
+  const decisions = decideClaimArbitration(
+    ['WI-999'],
+    fold([]),
+    DISPATCH_SESSION,
+    T0,
+    BUILD_STALE_MS,
+  );
+  assert.deepEqual(decisions, [{
+    item: 'WI-999',
+    keep: false,
+    stateChanged: { state: 'missing' },
+  }]);
+  assert.match(claimYieldDetail(decisions[0]!), /fresh state is missing/);
+});
+
 test('decideClaimArbitration: a RECENT foreign build.dispatched (no claim) yields — WI-074', () => {
   // A foreign actor (attended fast-drain session, or a parallel beat) transitioned the item to
   // 'building' in the read-to-arbitrate window. build.dispatched consumed any claim, so there is
@@ -129,9 +145,9 @@ test('decideClaimArbitration: a RECENT foreign build.dispatched (no claim) yield
   assert.equal(decisions[0]!.foreignSessionId, undefined, 'no session id — it is a build, not a claim');
 });
 
-test('decideClaimArbitration: a STALE foreign build.dispatched does NOT block takeover — WI-074', () => {
-  // An orphaned building record older than the stale window is the doctor's to reap; it must not
-  // permanently wedge the item out of dispatch's reach.
+test('decideClaimArbitration: a STALE foreign build still yields until the doctor requeues it', () => {
+  // An orphaned building record older than the stale window belongs to the doctor. Dispatch may
+  // only admit a fresh queued record; it must not build directly from stale non-queued state.
   const dispatchedAt = T0 + 2000;
   const events = [
     ...queuedItem('WI-007', T0),
@@ -140,7 +156,10 @@ test('decideClaimArbitration: a STALE foreign build.dispatched does NOT block ta
   const result = fold(events);
   const nowMs = dispatchedAt + BUILD_STALE_MS + 60_000;   // past the stale window
   const decisions = decideClaimArbitration(['WI-007'], result, DISPATCH_SESSION, nowMs, BUILD_STALE_MS);
-  assert.equal(decisions[0]!.keep, true, 'a stale/orphan building record is reapable, never a permanent block');
+  assert.equal(decisions[0]!.keep, false);
+  assert.deepEqual(decisions[0]!.stateChanged, { state: 'building' });
+  assert.equal(decisions[0]!.foreignBuild, undefined,
+    'old building state is a lifecycle change, not a claim that the foreign build is still live');
 });
 
 // ---------------------------------------------------------------------------

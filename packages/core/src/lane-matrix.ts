@@ -422,7 +422,7 @@ function detectCommitSide(span: string, fileSource: string): string {
  * the two invariants that genuinely differ between lanes, and the matrix could not see it.
  *
  * WI-186 (post-hoc revision): the reservation terminal was extracted into a factory,
- * `makeClaimBeforePick`, whose closure `claimBeforePick(candidateIds)` both picking lanes now
+ * `makeClaimBeforePick`, whose closure `claimBeforePick(candidateIds)` all three picking lanes now
  * call. `decideClaimArbitration(` and the `'item.claimed'` append moved INSIDE the factory body
  * — a function distinct from `runDispatch` — so a span-only read of `runDispatch` no longer sees
  * either marker, and `finalizeTargetBuild`/`runTargetLane` never contained them to begin with.
@@ -487,9 +487,10 @@ function detectCommitSide(span: string, fileSource: string): string {
  *  - `none` — the lane neither reserves (in its own span or via the shared pick site) nor reads.
  */
 const CLAIM_BEFORE_PICK_CANDIDATE_VAR: Partial<Record<LaneId, string>> = {
-  // The literal candidate-list expression at each call site (dispatch.ts:3428 / :3481) — an
+  // The literal candidate-list expression at each call site — an
   // explicit per-lane allowlist, not a generic "claimBeforePick( appears somewhere" scan, so a
-  // future third call site cannot silently get attributed to the wrong lane.
+  // future call site cannot silently get attributed to the wrong lane.
+  planning: 'planningCandidateIds',
   target: 'targetedQueued',
   batch: 'groups',
 };
@@ -635,11 +636,11 @@ function extractNamedSpan(src: string, functionName: string, forLane: LaneId, fi
 }
 
 /**
- * `runDispatch`'s own span, comments-stripped — the ONE place both `claimBeforePick(` call sites
- * live post-WI-186 (dispatch.ts:3428 for the target lane's queue, :3481 for the batch lane's).
+ * `runDispatch`'s own span, comments-stripped — the ONE place all three `claimBeforePick(` call
+ * sites live (planning, target, and batch).
  * Computed once and passed into every `buildRow` call so a lane whose own span cannot see its
- * reservation (the target lane) can still be attributed correctly — see `detectClaimArbitration`'s
- * doc comment for why span-only attribution is wrong here specifically.
+ * reservation (planning and target) can still be attributed correctly — see
+ * `detectClaimArbitration`'s doc comment for why span-only attribution is wrong here specifically.
  */
 function findSharedPickSpan(sources: Record<keyof typeof LANE_SOURCE_FILES, string>): string {
   const span = extractNamedSpan(sources.dispatch, 'runDispatch', 'batch', LANE_SOURCE_FILES.dispatch);

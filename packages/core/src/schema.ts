@@ -864,6 +864,8 @@ export type EventDataMap = {
   'item.reopened': ItemReopenedData;
   'item.escalated': ItemEscalatedData;
   'item.blocked': ItemBlockedData;
+  'item.dependency-added': ItemDependencyAddedData;
+  'item.dependency-removed': ItemDependencyRemovedData;
   'item.merged': ItemMergedData;
   'item.certification-amended': ItemCertificationAmendedData;
   'item.accepted': ItemAcceptedData;
@@ -935,7 +937,8 @@ export interface LedgerEvent<T extends string = string> {
 
 const KNOWN_TYPES = new Set<string>([
   'item.captured', 'item.routed', 'item.queued', 'item.parked', 'item.unparked',
-  'item.approved', 'item.rejected', 'item.reopened', 'item.escalated', 'item.blocked', 'item.merged', 'item.certification-amended', 'item.accepted', 'item.feedback', 'item.briefed',
+  'item.approved', 'item.rejected', 'item.reopened', 'item.escalated', 'item.blocked', 'item.dependency-added', 'item.dependency-removed',
+  'item.merged', 'item.certification-amended', 'item.accepted', 'item.feedback', 'item.briefed',
   'item.respec', 'engagement.baseline',
   'item.claimed', 'item.released',
   'session.started', 'session.heartbeat', 'session.ended',
@@ -1034,4 +1037,24 @@ export function makeEvent<T extends string>(
     data,
     v: LEDGER_SCHEMA_VERSION,
   } as LedgerEvent<T>;
+}
+
+/**
+ * First-class scheduling dependency. Edges are append-only facts: add activates (or refreshes)
+ * item→onItem; remove deactivates it. The current release condition is intentionally narrow.
+ */
+export interface ItemDependencyAddedData {
+  onItem: string;
+  /** Absent on the wire means merged-or-accepted (the v0.1 completion condition). */
+  condition?: 'merged-or-accepted';
+  /**
+   * Per item→onItem causal revision. CLI-authored facts increment this under the ledger lock,
+   * making edge state independent of cross-process event-id ordering. Absent is legacy history.
+   */
+  revision?: number;
+}
+export interface ItemDependencyRemovedData {
+  onItem: string;
+  /** See ItemDependencyAddedData.revision. */
+  revision?: number;
 }
