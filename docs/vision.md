@@ -16,8 +16,9 @@ step is an immutable event in one append-only work ledger; every view is a proje
 
 ## The one-line model
 
-> One plane whose dispatcher **yields to the operator's item claims** today; explicitly armed
-> plan runs and richer scope claims are roadmap over the same domain model.
+> One plane whose dispatcher **yields to the operator's item claims** today; queued-item
+> dependencies order work today; plan containers, run windows, and richer scope claims are
+> roadmap over the same domain model.
 
 ## The latency doctrine (why attended mode exists)
 
@@ -79,11 +80,12 @@ Concretely:
      independent provider assignment by stage does not. Eval-driven builder routing can select
      from measured models by spec-size bucket. End-to-end content inspection remains the release
      bar for claiming that sensitive payloads never leave the machine.
-4. **Roadmap — plans make "away" productive, not just busy.** A plan is data — a validated acyclic DAG of
-   ordinary slices — and an evening run is an event: a one-shot bounded window the existing
-   beats honor, closing with an inspectable outcome tally. Morning surface: what shipped by
-   tier, what parked, what's blocked and why — dependency-ordered unattended execution with an
-   inspectable record, not a cron that fires isolated prompts.
+4. **Item ordering is live; plan runs remain roadmap.** Ordinary work items already have an
+   executable lifecycle and a first-class dependency DAG: dispatch leaves unresolved work queued
+   and admits it when every blocker is merged or accepted. The roadmap adds a named plan
+   container over those items and an evening-run event: a one-shot bounded window the existing
+   beats honor, closing with an inspectable outcome tally. It does not add a generic workflow
+   engine.
 5. **Roadmap — the plane teaches its method.** A versioned skills pack — event-model the slice, keep it
    vertical, what reviewable means — projected into worker prompts *and* installable into your
    attended sessions. CLI enforces invariants; skills teach judgment. Both postures share one
@@ -95,7 +97,8 @@ Concretely:
 
 Not a coding agent: v0.1 integrates built-in CLI adapters, with Claude as the exercised autonomous
 worker and Codex/Ollama as experimental text-only adapters. It is not yet an arbitrary
-CLI-model integration contract. Not a workflow engine (plan DAGs are roadmap). Not a team
+CLI-model integration contract. Not a workflow engine (item dependencies are live; named plan
+containers and bounded run windows are roadmap). Not a team
 platform (solo-operator first; multi-seat is not a goal). Not a cloud service (your machine,
 your git, your models, your data).
 
@@ -103,9 +106,9 @@ your git, your models, your data).
 
 | Stage | Delivers |
 |---|---|
-| v0.1 | single-target proof end-to-end · thin console · trust/routing as shipped · method docs |
+| v0.1 | single-target proof end-to-end · executable item lifecycle + dependency DAG · thin console · trust/routing as shipped · method docs |
 | v0.2 | attended scope claims + finish/reconcile + grab verb — the latency answer |
-| v0.3 | plan DAGs + one-shot evening runs + morning outcomes |
+| v0.3 | named plan containers over the item DAG + one-shot evening runs + morning outcomes |
 | v0.4 | any-folder onboarding (`--init`), gate presets (docs/eval), eval-trend projections |
 | later | egress content guards · presence suggestions · multi-target scheduling · recurring windows |
 

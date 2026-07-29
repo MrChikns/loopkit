@@ -182,19 +182,31 @@ flowchart TD
   COLL --> SPEND{"budget or quota<br/>ceiling hit?"}
   SPEND -->|yes| DRAIN["collect-only<br/><small>drain, pick nothing new</small>"]
   SPEND -->|no| PICK["Sort by priority"]
-  PICK --> WAIT{"anything holding<br/>it back?<br/><small>Plate 05</small>"}
-  WAIT -->|yes| LATER["waits for a later beat"]
-  WAIT -->|no| GRP["Group into worktrees"]
-  GRP --> ARB["Claim under the ledger lock<br/><small>re-fold, yield, then claim</small>"]
-  ARB --> SPAWN["Spawn workers in parallel"]
+  PICK --> DEP{"dependency graph<br/>ready?<br/><small>before lane split</small>"}
+  DEP -->|no| LATER["stays queued<br/><small>no park or rewrite</small>"]
+  DEP -->|yes| LANE{"planning · target<br/>or engineering?"}
+  LANE -->|planning| PARB["Fresh locked admission<br/><small>one item immediately before run</small>"]
+  PARB --> PLAN["Run planner serially"]
+  LANE -->|target| CAP["Shared worker capacity"]
+  LANE -->|engineering| GRP["Group into worktrees"]
+  GRP --> CAP
+  CAP --> ARB["Fresh locked admission<br/><small>re-fold, yield, then claim</small>"]
+  ARB --> SPAWN["Spawn worker"]
 
   classDef step fill:#E3F0F2,stroke:#0B6E7F,color:#111820
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
   classDef inert fill:#F1F3F5,stroke:#8B95A1,color:#111820
-  class B,PICK,GRP,COLL step
-  class ARB,SPAWN pass
+  class B,PICK,GRP,COLL,LANE,CAP step
+  class DEP,PARB,ARB,PLAN,SPAWN pass
   class DRAIN,LATER inert
 ```
+
+**Dependency readiness is an admission gate, not a lane.** Dispatch projects the active
+`item.dependency-added`/`item.dependency-removed` edges over the folded items before it separates
+planning, target, and engineering work. A waiting item remains `queued`; after its blockers merge
+or are accepted, the next beat can pick it directly. Every lane then re-folds at its locked
+admission terminal, so a dependency or lifecycle change landing after the first projection still
+wins the race. Canonical semantics: [Operational item flow](event-model.md#operational-item-flow).
 
 **Claim arbitration is not a yes/no read.** The picker's fold is stale by the time it spawns, so
 dispatch re-reads and re-folds the ledger **under the ledger lock**, drops any item a foreign session
@@ -256,32 +268,45 @@ only one is how you conclude the plane cannot express "do B after A". It can.
 
 ```mermaid
 flowchart TD
-  I(["queued item"]) --> C1{"claimed by<br/>another session?"}
-  C1 -->|yes| W1["left alone<br/><small>you own it</small>"]
-  C1 -->|no| C2{"shares a file with<br/>a live build?"}
-  C2 -->|yes| W2["waits its turn"]
-  C2 -->|no| C3{"blocked on<br/>another item?"}
-  C3 -->|yes| W3["held until the<br/>blocker merges"]
-  C3 -->|no| C4{"attempt budget<br/>exhausted?"}
-  C4 -->|yes| W4["needs an explicit<br/>unpark from you"]
-  C4 -->|no| GO["eligible this beat"]
+  subgraph SCHED["Queued scheduling — first-class dependency DAG"]
+    I(["queued item"]) --> D{"all active scheduling<br/>dependencies ready?"}
+    D -->|no| WD["stays queued<br/><small>missing · unresolved · cycle · invalid</small>"]
+    D -->|yes| C1{"claimed by<br/>another session?"}
+    C1 -->|yes| W1["left alone<br/><small>you own it</small>"]
+    C1 -->|no| C2{"shares a file with<br/>a live build?"}
+    C2 -->|yes| W2["waits its turn"]
+    C2 -->|no| C4{"attempt budget<br/>exhausted?"}
+    C4 -->|yes| W4["needs an explicit<br/>unpark from you"]
+    C4 -->|no| GO["eligible this beat"]
+  end
+
+  subgraph PATH["Separate pathology repair path — not the scheduling DAG"]
+    PV(["parked ops victim"]) --> PB["item.blocked / blockedOn<br/><small>repair annotation</small>"]
+    PB --> PR["reactor waits for<br/>repair item outcome"]
+  end
 
   classDef term fill:#111820,stroke:#111820,color:#ffffff
   classDef pass fill:#E7F3EB,stroke:#14713A,color:#111820
   classDef hold fill:#FBF0DF,stroke:#9C5A06,color:#111820
   classDef inert fill:#F1F3F5,stroke:#8B95A1,color:#111820
-  class I term
+  class I,PV term
   class GO pass
-  class W3,W4 hold
-  class W1,W2 inert
+  class W4,PB,PR hold
+  class WD,W1,W2 inert
 ```
 
-- **Semantic dependency is real.** An item can be `blocked` on another item, and the reactor releases
-  it automatically the moment the blocker **merges**
+- **First-class queued scheduling dependencies are live.** `item.dependency-added` activates an
+  item→blocker edge; `item.dependency-removed` deactivates it without rewriting history. All active
+  edges are conjunctive and currently resolve only when their blockers are `merged` or `accepted`.
+  Missing references, unsupported conditions, and cycle components fail closed. The CLI refuses
+  new self-, missing-, or cyclic edges; malformed imported history remains visible and blocked.
+- **`item.blocked` / `blockedOn` is not the scheduling DAG.** It is an older pathology repair
+  relationship on an already parked victim. The reactor releases that victim when its repair item
+  **merges**
   (`packages/core/src/beats/reactor.ts:2122`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
-- **A blocker that cannot merge does not strand the victim silently.** If the blocker is missing
+- **A pathology blocker that cannot merge does not strand the victim silently.** If the repair is missing
   from the ledger or has reached a terminal state without merging, the victim is re-parked as a
   `decision` after **24**<!--pin:blockedWaitTimeoutHours--> hours with the blocker's state attached.
   A live, recovering, planning, held or decision-blocked repair keeps waiting and points you to the

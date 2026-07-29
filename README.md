@@ -39,7 +39,7 @@ $ loopctl new "Add a deleteNote(id) function to src/notes.js with tests"
 
 $ loopctl beat reactor      # routes + queues it
 $ loopctl beat dispatch     # builds in a worktree, runs your gate, merges on green
-  → WI-001  captured → built → gated ✓ → merged into main
+  → WI-001  captured → routed → queued → building → gated ✓ → merged into main
 
 $ cd ~/my-notes-app && git log --oneline -2
   c4d2e81  feat(dispatch): WI-001 (target notes) ← exact merge candidate, gate-proven
@@ -94,6 +94,14 @@ its own and what needs your eyes.**
 
 - **The ledger is the only truth.** Beats and the CLI append events; nothing mutates in place. A
   crashed process changes nothing retroactively — recovery is just re-reading the log.
+- **The item lifecycle is executable.** One typed state machine defines the allowed,
+  event-caused transitions used by the fold: capture, route, queue, build, gate, park, approve,
+  merge, accept, reject, reopen. It is runtime policy, not a diagram that can drift away from
+  behavior.
+- **Dependencies are first-class scheduling facts.** A queued item may depend on one or more
+  other work items. Dispatch admits it only after every active blocker is merged or accepted;
+  missing references, malformed conditions, and cycles fail closed. Waiting changes no lifecycle
+  state—the item stays queued.
 - **Worktree isolation.** Every build runs in its own git worktree with its own file scope
   (`Touches`). Parallel work items are disjoint by construction.
 - **Deterministic gates.** An item merges only when the target's own gate command (its test
@@ -209,8 +217,22 @@ $LOOPCTL beat dispatch    # builds in a worktree OF THE TARGET, gates, merges in
 
 # 6. See what happened
 $LOOPCTL state && $LOOPCTL events --item WI-001
+$LOOPCTL flow --item WI-001       # generated lifecycle + dependency-readiness view
 cd ~/loopkit-demo/notes && git log --oneline -2   # gated merge + worker commit are in YOUR history
 ```
+
+For two existing work items, make the second wait for the first without parking or rewriting it:
+
+```bash
+$LOOPCTL dependency add WI-002 WI-001      # dependent first, blocker second
+$LOOPCTL flow --item WI-002
+$LOOPCTL dependency remove WI-002 WI-001   # append-only removal fact
+```
+
+`dependency add` refuses missing items, self-dependencies, and cycles. These item-level edges are
+live today; a named plan container and bounded `plan run` window are separate roadmap features.
+Canonical event and compatibility semantics live in
+[docs/event-model.md](docs/event-model.md#operational-item-flow).
 
 Notes from real runs: the plane refuses to run agents until `LOOPKIT_AUTONOMY=on` (a fail-safe,
 not a bug) · a target may carry `.claude/settings.json` to grant its workers project-scoped
@@ -240,10 +262,13 @@ The plane encodes an opinionated delivery discipline:
 
 1. **Event-model before coding** — a feature is mapped left-to-right (events → screens →
    commands → read models) before any code; the model doubles as the spec.
-2. **Vertical slices** — every work item is a thin, end-to-end, independently revertable slice.
-3. **One writer per boundary** — ledger appends are single-writer with PID-aware locking;
+2. **Make operational flow executable** — allowed item transitions live in one typed state
+   machine, while cross-item ordering lives in explicit dependency events. Prose and diagrams
+   explain those rules; they do not define a second workflow.
+3. **Vertical slices** — every work item is a thin, end-to-end, independently revertable slice.
+4. **One writer per boundary** — ledger appends are single-writer with PID-aware locking;
    parallel builds are `Touches`-disjoint by construction.
-4. **The gate is the reviewer of record** — human attention goes to product judgment (the
+5. **The gate is the reviewer of record** — human attention goes to product judgment (the
    `review`/`must` tiers), not to re-checking what a test suite already proved.
 
 The discipline itself — stated so it outlives the code — is
@@ -286,6 +311,7 @@ several targets' queues under one set of beats) is not yet built or proven; see
 | macOS (beats via launchd) | Linux / systemd runners |
 | Claude CLI workers (Codex/Ollama adapters present, lightly exercised) | provider-agnostic guarantees |
 | registering and building against one target at a time, end-to-end | multi-target scheduling, or any multi-target run in anger |
+| executable item lifecycle + queued-item dependency DAG | plan containers, run windows, generic workflow engine |
 | solo-operator workflows | teams, RBAC, hosted anything |
 
 This repo is published **read-only** as a reference / build-in-public project: fork, clone, and

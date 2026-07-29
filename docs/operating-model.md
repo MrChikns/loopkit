@@ -1,10 +1,11 @@
 # loopkit operating model — one plane, two postures
 
-Status: ratified design, **partly built**. The v0.1 core ships single-target delivery and
-*item-level* attended claims; the file-scope claim layer and the whole plan layer described below
-are committed roadmap, in order. Every capability on this page is marked so you can tell shipped
-from planned without opening the source. This doc is the contract for how the plane and a human
-operator share one repository without slowing each other down.
+Status: ratified design, **partly built**. The v0.1 core ships single-target delivery, an
+executable work-item lifecycle, first-class queued-item dependencies, and *item-level* attended
+claims. File-scope claims, named plan containers, and bounded plan-run windows described below are
+committed roadmap, in order. Every capability on this page is marked so you can tell shipped from
+planned without opening the source. This doc is the contract for how the plane and a human operator
+share one repository without slowing each other down.
 
 **Status marks.** The vocabulary of [`plane-flows.md`](plane-flows.md), of which this page needs
 two marks:
@@ -23,8 +24,9 @@ what the mark is telling you.
 ## The idea in one line
 
 One event-sourced delivery plane whose dispatcher **yields to explicit operator claims** while you
-work — ✅ per work item, ⚪ per file scope — and, once the plan layer lands (⚪), **executes
-explicitly armed plan runs** while you're away. Two UX presets, not two systems.
+work — ✅ per work item, ⚪ per file scope — and already orders ordinary queued items through a
+✅ dependency DAG. Named plan containers and explicitly armed run windows remain ⚪ roadmap.
+Two UX presets, not two systems.
 
 "Attended mode" and "plan mode" are presets over the same domain model: same ledger, same fold,
 same worktrees, same gates, same acceptance tiers. What changes is *who holds scope* and *what is
@@ -88,12 +90,19 @@ The item-level lifecycle shipping today is the same shape one level down: `item.
 The problem: schedulers everywhere fire *single tasks* (cron → prompt → PR). Nobody executes a
 dependency-ordered, multi-slice plan unattended with an inspectable record.
 
-The loopkit answer is a **plan as data, a run as an event**. None of it is built: no `plan.*`
-event exists in the ledger schema and there is no `plan` verb on the CLI.
+**✅ The scheduling substrate is already live.** Ordinary work items follow one executable,
+event-caused lifecycle, and `item.dependency-added` / `item.dependency-removed` maintain a
+first-class DAG over queued work. Dispatch considers an item ready only when every active blocker
+is merged or accepted; a waiting item stays queued. This is item ordering, not a plan engine.
+See [the canonical event semantics](event-model.md#operational-item-flow).
 
-- ⚪ `loopctl plan define <file>` will validate an acyclic DAG of work items (slices with
-  dependencies), appending the items plus one `plan.defined` atomically. The plan is then
-  inspectable state, not an agent's private intention.
+**⚪ The plan container and run window are not built.** The roadmap answer is a **plan as data, a
+run as an event**: no `plan.*` event exists in the ledger schema and there is no `plan` verb on
+the CLI.
+
+- ⚪ `loopctl plan define <file>` will name and validate a container over ordinary items and their
+  existing dependency edges, appending any new items/edges plus one `plan.defined` atomically.
+  The plan is then inspectable state, not an agent's private intention.
 - ⚪ `loopctl plan run <plan> --from <t> --until <t>` will append `plan.run-requested` for a
   bounded, one-shot window ("tonight, 22:00–06:00"). The **existing always-running beats** are to
   honor it: within the window, dispatch prefers the plan's ready slices (dependencies satisfied,
@@ -133,11 +142,14 @@ prompts can't enforce claims, gates, or recording.)
    target name. A work item's `target` is stamped once, on `item.captured`, and every downstream
    event inherits it through the fold instead of re-stamping
    it<!--exists:envelopeTargetStamp-->.
-2. ⚪ `plan.defined` · `plan.run-requested` · `plan.run-closed { outcome }`
-3. ⚪ `scope.claimed { touches, ttl }` · `scope.renewed` · `scope.released` — the file-scope layer.
+2. ✅ Work-item flow: the typed lifecycle definition drives fold transitions, and
+   `item.dependency-added { onItem, condition?, revision? }` /
+   `item.dependency-removed { onItem, revision? }` maintain append-only scheduling edges.
+3. ⚪ `plan.defined` · `plan.run-requested` · `plan.run-closed { outcome }`
+4. ⚪ `scope.claimed { touches, ttl }` · `scope.renewed` · `scope.released` — the file-scope layer.
    ✅ Its item-scope counterparts ship today: `item.claimed { sessionId, ttlMinutes }` ·
    `item.released`.
-4. ⚪ Existing item/gate/merge trail extended with `delivery: 'attended' | 'dispatch'` — attended
+5. ⚪ Existing item/gate/merge trail extended with `delivery: 'attended' | 'dispatch'` — attended
    work is the same lifecycle, differently delivered. There is no `delivery` field yet; ✅
    `item.merged` carries an optional `sessionId` today, which is attribution only and never
    behaviour.
@@ -146,9 +158,9 @@ prompts can't enforce claims, gates, or recording.)
 
 | Stage | Ships |
 |---|---|
-| **v0.1** (now) ✅ | single-target proof end-to-end · thin console · README + demo · three handwritten, repo-local Claude Code commands in [`.claude/commands/`](../.claude/commands/) (`/drive`, `/plane-check`, `/board`; not the versioned skills pack above) · **attended item claims** (`session`/`claim`/`release`), shipped ahead of the original sequence per [ADR-007](decisions/ADR-007-claim-arbitration.md) — the CLI drain that shipped beside them was deleted in [ADR-013](decisions/ADR-013-delete-the-conductor.md). Plans appear **only as this roadmap**. |
+| **v0.1** (now) ✅ | single-target proof end-to-end · executable item lifecycle · queued-item dependency DAG · thin console · README + demo · three handwritten, repo-local Claude Code commands in [`.claude/commands/`](../.claude/commands/) (`/drive`, `/plane-check`, `/board`; not the versioned skills pack above) · **attended item claims** (`session`/`claim`/`release`), shipped ahead of the original sequence per [ADR-007](decisions/ADR-007-claim-arbitration.md) — the CLI drain that shipped beside them was deleted in [ADR-013](decisions/ADR-013-delete-the-conductor.md). Named plan containers and run windows appear **only as this roadmap**. |
 | v0.2 ⚪ | `scope.claimed`-style *file-scope* claims + `reconcile` (the fast path) — item-level claiming already shipped in v0.1 |
-| v0.3 ⚪ | plan DAG + one-shot run windows (the evening run) · **flip-gated releases** (see below) |
+| v0.3 ⚪ | named plan containers over the live item DAG + one-shot run windows (the evening run) · **flip-gated releases** (see below) |
 | later ⚪ | recurring schedules · presence suggestions · multi-target scheduling · skill registries |
 
 **On "1.0" — there deliberately isn't one.** The versions above deepen the *proof*; they do not
