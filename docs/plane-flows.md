@@ -162,7 +162,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1494`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1580`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -687,7 +687,7 @@ flowchart TD
 - Current merges fold to five explicit states: `not-configured`, `pending`, `succeeded`, `failed`
   and `timed-out`; a legacy merge with no configuration evidence remains honestly **unknown**.
   Explicit lifecycle success sets compatibility `deployed` true
-  (`packages/core/src/fold.ts:820`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
+  (`packages/core/src/fold.ts:895`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
   none changes the item's merged/accepted state.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
@@ -708,7 +708,7 @@ flowchart TD
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
   `unknown`.
 - ⚪ **There is no automatic rollback anywhere.** A merge's `certification.rollback` is a string the
-  worker wrote and you read (`packages/core/src/fold.ts:744`<!--cite:certificationRollback-->). Nothing
+  worker wrote and you read (`packages/core/src/fold.ts:819`<!--cite:certificationRollback-->). Nothing
   executes it.
 
 ---

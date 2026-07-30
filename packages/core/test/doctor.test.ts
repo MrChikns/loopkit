@@ -497,6 +497,7 @@ test('doctor: routed-stuck requeue carries cumulative attempt count from fold', 
     maxConvNum: 0,
     failureCatalog: new Map(),
     sessions: new Map(),
+    transitionDrops: new Map(),
   };
 
   const dr = runDoctor(result, deadProbe);
