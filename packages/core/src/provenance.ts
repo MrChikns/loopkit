@@ -74,14 +74,42 @@ export type IndeterminateCause =
   | 'target-not-registered' | 'non-linear-ancestry' | 'break-glass-multiple';
 
 /**
+ * WI-241 — who/what is vouching for a receipt's gate evidence, independent of whether that
+ * evidence exists at all (`hasGate`). Two shapes, by EXECUTION, not by actor identity:
+ *   - 'gate-run': a `gate.passed` event (a real spawnSync gate execution recorded by the beat)
+ *     or a `gateCommand` string (the command the beat actually ran) — evidence a process ran.
+ *   - 'self-declared': the free-text `gate`/`gateResult` fields — an assertion typed into the
+ *     SAME `item.merged` event that also carries the commit, with no independent execution
+ *     record. This is the shape an attended coordinator hand-appends (`loopctl append
+ *     item.merged --data '{"gate": "..."}'`) — the appending agent vouching for its own commit,
+ *     the exact gap this item exists to name (69 of 185 real receipts carry no gate evidence at
+ *     all; of the ones that do, only this distinguishes "a gate ran" from "someone said so").
+ * `undefined` when `hasGate` is false — there is nothing to attest to attestation-wise.
+ */
+export type GateAttestation = 'gate-run' | 'self-declared';
+
+/**
  * A `item.merged` receipt extracted from the ledger. `commit` is absent for no-code merges
  * (e.g. planning-lane items) — such a receipt matches no commit (shaMatches fails closed on
  * `undefined`), which is correct: a receipt for nothing landed cannot vouch for something that
  * did. `hasGate` is true when ANY of the three legitimate gate-evidence shapes was present on
  * the merge (see {@link extractMergeReceipts}) — a `gate.passed` event on the same item, a
  * `gateCommand` string, or free-text `gate`/`gateResult` (attended-coordinator merges).
+ * `gateAttestation` (WI-241) further classifies WHICH shape, so a receipt whose only evidence
+ * is a self-declared claim can be told apart from one backed by a real gate execution.
+ * `attestedByActor` is the ledger event's own `actor` field (schema.ts's LedgerEvent.actor) —
+ * already recorded on every event, just not previously threaded through this extraction; no new
+ * ledger event or schema field was needed to name who appended the receipt.
  */
-export interface MergeReceipt { item: string; ts: string; commit?: string; hasGate: boolean; gateDetail?: string }
+export interface MergeReceipt {
+  item: string;
+  ts: string;
+  commit?: string;
+  hasGate: boolean;
+  gateDetail?: string;
+  gateAttestation?: GateAttestation;
+  attestedByActor: string;
+}
 
 /**
  * An open break-glass grant (see the `provenance.break-glass` ledger event in schema.ts).
@@ -92,8 +120,14 @@ export interface BreakGlassGrant { item: string; targetId: string; fromSha: stri
 /** One commit in the verified range (first-parent walk — see verifyProvenance's header note). */
 export interface RangeCommit { sha: string; subject: string; committedAt: string }
 
-/** Per-commit verdict in the report. */
-export interface CommitVerdict { sha: string; subject: string; status: CommitProvenanceStatus; detail: string }
+/**
+ * Per-commit verdict in the report. `gateAttestation` (WI-241) mirrors the matched receipt's
+ * own field (see {@link MergeReceipt}) so a caller can tell a 'verified' commit backed by a
+ * real gate execution apart from one whose only evidence is a self-declared claim, without
+ * re-deriving it from `detail`'s free text. Absent when the verdict carries no receipt at all
+ * (uncovered, break-glass).
+ */
+export interface CommitVerdict { sha: string; subject: string; status: CommitProvenanceStatus; detail: string; gateAttestation?: GateAttestation }
 
 /**
  * Everything {@link verifyProvenance} needs, gathered once by the impure probe
@@ -196,7 +230,8 @@ export function extractMergeReceipts(events: LedgerEvent[]): MergeReceipt[] {
     const gateCommand = typeof data['gateCommand'] === 'string' && data['gateCommand'].trim() ? (data['gateCommand'] as string) : undefined;
     const gateFreeText = [data['gate'], data['gateResult']]
       .find((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    const hasGate = gatePassedItems.has(ev.item) || !!gateCommand || !!gateFreeText;
+    const gateRan = gatePassedItems.has(ev.item) || !!gateCommand;
+    const hasGate = gateRan || !!gateFreeText;
     const gateDetail = gatePassedItems.has(ev.item)
       ? 'gate.passed event'
       : gateCommand
@@ -204,12 +239,20 @@ export function extractMergeReceipts(events: LedgerEvent[]): MergeReceipt[] {
         : gateFreeText
           ? `gate: ${gateFreeText}`
           : undefined;
+    // WI-241 attestation: which of the two EXECUTION shapes backs this receipt's gate evidence,
+    // never derived from anywhere but the same evidence extraction above (one rule, no second
+    // copy) — 'gate-run' when a real gate.passed event or gateCommand is present, 'self-declared'
+    // when the only evidence is the free-text gate/gateResult fields typed onto the SAME event
+    // that also carries the commit. Absent when hasGate is false (nothing to attest to).
+    const gateAttestation: GateAttestation | undefined = !hasGate ? undefined : gateRan ? 'gate-run' : 'self-declared';
     out.push({
       item: ev.item,
       ts: ev.ts,
       commit,
       hasGate,
       ...(gateDetail !== undefined ? { gateDetail } : {}),
+      ...(gateAttestation !== undefined ? { gateAttestation } : {}),
+      attestedByActor: ev.actor,
     });
   }
   return out;
@@ -265,7 +308,17 @@ function classifyCommit(commit: RangeCommit, receipts: MergeReceipt[], grants: B
   const matches = receipts.filter(r => shaMatches(r.commit, commit.sha));
   const withGate = matches.find(r => r.hasGate);
   if (withGate) {
-    return { sha: commit.sha, subject: commit.subject, status: 'verified', detail: `receipt on ${withGate.item} (${withGate.gateDetail ?? 'gate evidence present'})` };
+    // WI-241: name the attestation shape in the human-readable detail too — 'verified' does not
+    // by itself say whether a gate actually ran or an agent merely typed a claim into its own
+    // merge event; this is that fact made visible without changing the status.
+    const attestationNote = withGate.gateAttestation === 'self-declared' ? ', self-declared — no independent gate execution recorded' : '';
+    return {
+      sha: commit.sha,
+      subject: commit.subject,
+      status: 'verified',
+      detail: `receipt on ${withGate.item} (${withGate.gateDetail ?? 'gate evidence present'}${attestationNote})`,
+      ...(withGate.gateAttestation !== undefined ? { gateAttestation: withGate.gateAttestation } : {}),
+    };
   }
   if (matches.length > 0) {
     return { sha: commit.sha, subject: commit.subject, status: 'receipt-without-gate', detail: `receipt on ${matches[0]!.item} but no gate evidence of any shape` };
@@ -356,9 +409,23 @@ export function verifyProvenance(input: ProvenanceInput): ProvenanceReport {
     exitCode = 0;
   }
 
+  // WI-241: how many of the VERIFIED commits are backed only by a self-declared claim rather
+  // than a real gate execution — computed here (not folded into the pass/fail counts above) so
+  // this is visibility, never a new blocking condition. Reported even when every commit is
+  // otherwise 'verified', which is exactly the case this item exists to make legible: "verified"
+  // alone cannot currently distinguish "a gate ran" from "an agent typed a claim into its own
+  // merge event" — this line is the fix.
+  const selfDeclaredVerified = commits.filter(c => c.status === 'verified' && c.gateAttestation === 'self-declared');
+
   const lines = [
     `provenance: ${status.toUpperCase()} — ${commits.length} commit(s) checked`,
     `  verified: ${counts.verified}  break-glass: ${counts['break-glass']}  receipt-without-gate: ${counts['receipt-without-gate']}  uncovered: ${counts.uncovered}`,
+    ...(selfDeclaredVerified.length > 0
+      ? [
+          `  self-declared (verified, but no independent gate execution recorded): ${selfDeclaredVerified.length}`,
+          ...selfDeclaredVerified.map(c => `    self-declared: ${c.sha.slice(0, MIN_SHA_MATCH)} ${c.subject} — ${c.detail}`),
+        ]
+      : []),
     ...commits
       .filter(c => c.status !== 'verified')
       .map(c => `  ${c.status}: ${c.sha.slice(0, MIN_SHA_MATCH)} ${c.subject} — ${c.detail}`),
