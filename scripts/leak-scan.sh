@@ -39,13 +39,18 @@
 # Modes:  --staged  scan the git index (pre-commit)   [default: --worktree]
 #         --head    scan the committed HEAD tree (pre-push)
 #         --worktree scan tracked files in the working tree
-#         --range <rev-range>  scan COMMIT MESSAGES (subject+body) for the given
-#                  range (e.g. `origin/main..HEAD`, or `HEAD --not --remotes`)
-#                  — tree scans never see commit-message-only residue.
+#         --range <rev-range>  scan COMMIT MESSAGES + AUTHOR/COMMITTER METADATA
+#                  (name + email) for the given range (e.g. `origin/main..HEAD`,
+#                  or `HEAD --not --remotes`) — tree scans never see this residue.
 #                  The range is ALWAYS explicit: there is no inferred default,
 #                  because a wrong default that scans nothing looks identical to
 #                  a clean result. Merge commits ARE included (the pre-commit
 #                  hook never runs for them, so this is their only tripwire).
+#                  A commit made on a misconfigured machine (a real personal
+#                  email, a real hostname baked into `user.name`) leaks through
+#                  `git log`'s author/committer fields even when the message
+#                  and diff are spotless, so those fields are part of the
+#                  materialized corpus, not just the subject/body.
 #
 # Exit:   0  clean — a corpus was scanned and nothing matched
 #         1  hit — sensitive residue found (details on stderr)
@@ -162,14 +167,19 @@ case "$MODE" in
   --head)     GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="HEAD" ;;
   --worktree) GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="" ;;
   --range)
-    # Materialise the commit-message corpus as ONE FILE PER COMMIT, named by its
-    # sha, then scan it with the very same `git grep` passes the tree modes use.
-    # Two reasons this is not a plain `grep` over `git log` output:
+    # Materialise the commit-message-AND-metadata corpus as ONE FILE PER COMMIT,
+    # named by its sha, then scan it with the very same `git grep` passes the
+    # tree modes use. Two reasons this is not a plain `grep` over `git log` output:
     #   1. one regex engine everywhere. BSD/macOS `grep` has no `-P`, so piping
     #      the log through `grep -P` made the email and decision-id classes match
     #      NOTHING here — silently, because the error went to /dev/null.
     #   2. a hit is reported as `<sha>:<line-in-message>:<text>` — the same
     #      `path:line:text` shape as a tree hit, and it names the commit.
+    # The materialized file carries author+committer name/email ahead of the
+    # subject/body (`%an <%ae>` / `%cn <%ce>`, then `%s%n%b`): a commit made on a
+    # misconfigured machine can have a spotless message yet a real personal
+    # email or hostname-derived name in these fields, and that never reaches a
+    # tree scan at all — it lives only in commit metadata.
     if ! SHAS=$(git rev-list $RANGE 2>&1); then
       echo "leak-scan: --range '$RANGE' is not a valid rev-range:" >&2
       printf '%s\n' "$SHAS" >&2
@@ -185,7 +195,7 @@ case "$MODE" in
     TMP=$(mktemp -d "${TMPDIR:-/tmp}/leak-scan.XXXXXX")
     printf '%s\n' "$SHAS" | while IFS= read -r sha; do
       [ -n "$sha" ] || continue
-      git log -1 --format='%s%n%b' "$sha" > "$TMP/$sha"
+      git log -1 --format='%an <%ae>%n%cn <%ce>%n%s%n%b' "$sha" > "$TMP/$sha"
     done
     echo "leak-scan: --range '$RANGE' — scanning $NCOMMITS commit message(s)." >&2
     GREP="git grep --no-index -I -nE"; GREP_P="git grep --no-index -I -nP"; REV=""

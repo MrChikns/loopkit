@@ -88,6 +88,121 @@ function makeCommitFixtureRepo(messages: string[]): {
 const SESSION_TRAILER =
   'Claude-Session: https://claude.ai/code/session_EXAMPLEONLYnotarealsession'; // leak-scan:allow-agent-session
 
+// A real-shaped (but synthetic) personal email for the author/committer
+// metadata tests below. The EMAIL class has no per-line escape-hatch marker
+// (unlike agent-session/decision-id), so the literal is assembled from parts
+// instead of written as one token — otherwise this file's OWN source would
+// trip the same detector it exists to test.
+const SYNTHETIC_PERSONAL_EMAIL = ['nobody', 'fakemailhost.dev'].join('@');
+
+/**
+ * A fixture repo with a clean message+diff on every commit, but ONE commit
+ * whose author and/or committer identity (name/email) is overridden via the
+ * standard `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars — the exact shape a
+ * misconfigured machine produces (real personal email, or a hostname-derived
+ * name) even when the message and tree are spotless.
+ */
+function makeIdentityFixtureRepo(overrides: {
+  authorName?: string;
+  authorEmail?: string;
+  committerName?: string;
+  committerEmail?: string;
+}): { dir: string; shas: string[]; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'leak-scan-identity-fixture-'));
+  const g = (args: string[], env?: NodeJS.ProcessEnv) =>
+    spawnSync('git', args, { cwd: dir, stdio: 'pipe', encoding: 'utf8', env: { ...process.env, ...env } });
+  g(['init', '-q', '-b', 'main']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  g(['config', 'commit.gpgsign', 'false']);
+  const shas: string[] = [];
+  writeFileSync(join(dir, 'f0.txt'), 'harmless content 0\n');
+  g(['add', 'f0.txt']);
+  g(['commit', '-q', '--no-verify', '-m', 'feat: base']);
+  shas.push(g(['rev-parse', 'HEAD']).stdout.trim());
+
+  writeFileSync(join(dir, 'f1.txt'), 'harmless content 1\n');
+  g(['add', 'f1.txt']);
+  g(
+    ['commit', '-q', '--no-verify', '-m', 'feat: an entirely clean subject and body'],
+    {
+      GIT_AUTHOR_NAME: overrides.authorName ?? 't',
+      GIT_AUTHOR_EMAIL: overrides.authorEmail ?? 't@t',
+      GIT_COMMITTER_NAME: overrides.committerName ?? 't',
+      GIT_COMMITTER_EMAIL: overrides.committerEmail ?? 't@t',
+    },
+  );
+  shas.push(g(['rev-parse', 'HEAD']).stdout.trim());
+  return { dir, shas, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('leak-scan --range: a real personal email in AUTHOR metadata blocks, even with a clean message', () => {
+  const { dir, shas, cleanup } = makeIdentityFixtureRepo({ authorEmail: SYNTHETIC_PERSONAL_EMAIL });
+  try {
+    assert.equal(
+      spawnSync('sh', [scriptPath, '--head'], { cwd: dir, encoding: 'utf8' }).status,
+      0,
+      'tree scan should be clean: the residue is metadata-only',
+    );
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: a real personal email in COMMITTER metadata blocks too', () => {
+  const { dir, shas, cleanup } = makeIdentityFixtureRepo({ committerEmail: SYNTHETIC_PERSONAL_EMAIL });
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: a denylisted operator name in AUTHOR metadata blocks via .leakpatterns.local', () => {
+  const { dir, shas, cleanup } = makeIdentityFixtureRepo({ authorName: 'Jane Doe' });
+  try {
+    writeFileSync(join(dir, '.leakpatterns.local'), 'Jane Doe\n');
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: ordinary fixture identity (name/email "t") does not false-positive', () => {
+  const { dir, cleanup } = makeIdentityFixtureRepo({});
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: the standard AI co-author identity (noreply email) is not a leak', () => {
+  const { dir, cleanup } = makeIdentityFixtureRepo({
+    authorName: 'Claude',
+    authorEmail: 'noreply@anthropic.com',
+    committerName: 'Claude',
+    committerEmail: 'noreply@anthropic.com',
+  });
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
 test('leak-scan --range: an agent session trailer in a commit MESSAGE blocks, and names the commit', () => {
   const { dir, shas, cleanup } = makeCommitFixtureRepo([
     'feat: first clean commit',
