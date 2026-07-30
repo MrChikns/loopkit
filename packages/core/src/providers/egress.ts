@@ -50,11 +50,18 @@ function containsSecretAssignment(content: string): boolean {
   for (const match of content.matchAll(ASSIGNMENT_RE)) {
     const value = (match[2] ?? match[3] ?? match[4] ?? '').trim();
     if (value.length < 16 || PLACEHOLDER_RE.test(value) || REFERENCE_VALUE_RE.test(value)) continue;
-    // Require compact, credential-shaped literal material: letters + digits, reasonable
-    // diversity, and no call/reference punctuation. Known provider prefixes are handled by
-    // their dedicated rules above this generic assignment fallback.
-    if (/\s|[()[\]{}]/.test(value) || !/[A-Za-z]/.test(value) || !/\d/.test(value)) continue;
-    if (new Set(value).size < 8) continue;
+    // Require a compact, non-prose literal: no raw whitespace (a genuine multi-word match is
+    // prose, not a token) and at least one letter (so a bare numeric id doesn't trip this).
+    // Exclude opening bracket/paren/brace characters: legitimate credential material never
+    // contains them, and the unquoted branch of ASSIGNMENT_RE can capture a truncated fragment
+    // of a property/index reference (e.g. `settings["privateKey"]` -> `settings["privateKey`)
+    // that no longer matches REFERENCE_VALUE_RE once mangled — this exclusion is what keeps
+    // that case from false-positiving, not a defence against real secrets.
+    // Deliberately do NOT require a digit or a minimum character-class diversity: real
+    // credentials are routinely pure-alphabetic or low-diversity. Fail closed — when the shape
+    // is ambiguous, flag it. Known provider prefixes are handled by their dedicated rules above
+    // this generic assignment fallback.
+    if (/\s|[([{]/.test(value) || !/[A-Za-z]/.test(value)) continue;
     return true;
   }
   return false;
