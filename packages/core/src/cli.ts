@@ -12,6 +12,8 @@
  *   slo [--json]                      Print the SLO board
  *   compact [--dry-run]               Archive old ops segments
  *   audit <target-path> [--json]      Target-readiness hygiene check + autonomy tier
+ *   verify-provenance [<target-path>] [--json]  Verify a commit range against the ledger (WI-232)
+ *   provenance break-glass --reason "<why>"     Time-boxed, ledgered exception to provenance (WI-232)
  *
  *   beat reactor|dispatch             implemented
  *   approve|reject <item> [--trail]   deterministic operator verb (implemented)
@@ -45,6 +47,7 @@ import { runAudit } from './audit/index.js';
 import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import { loadConfig, resolvePlaneHome, ensurePlaneHome } from './config.js';
 import { readTargetManifest, manifestHash, mintTargetId, resolveRegisteredTarget } from './target.js';
+import { gatherProvenanceInput, verifyProvenance, extractBreakGlassGrants, openGrants } from './provenance.js';
 import { foldCosts, CostRow, formatQuotaWindowLabel } from './costs.js';
 import { collectInteractiveUsage } from './collectors/interactive-usage.js';
 import { collectCodexUsage } from './collectors/codex-usage.js';
@@ -148,6 +151,10 @@ Commands:
   execution-config [--json] [--days N] Execution-config-by-model: accept rate, first-pass gate rate, cost/accept, retries/accept
   compact [--dry-run]                  Archive old ops segments
   audit <target-path> [--json]         Target-readiness hygiene check + autonomy tier
+  verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>] [--ref <refname>] [--json]
+                                        Verify a commit range against the operator's real ledger (WI-232)
+  provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+                                        Time-boxed, ledgered exception to provenance verification (WI-232)
   route <item>                         [not yet implemented]
   park|accept <item>                   [not yet implemented]
 
@@ -1495,6 +1502,173 @@ async function cmdAudit(rest: string[]): Promise<void> {
   }
 }
 
+/**
+ * Resolve a target path (positional or --target, defaulting to REPO_ROOT) and its registered
+ * targetId (fold lookup by repoPath) — the ONE resolution shared by verify-provenance and
+ * provenance break-glass, so the two commands can never disagree about which target a path
+ * names. Fails loudly on a nonexistent path (before any git/ledger I/O); returns targetId:null
+ * for an unregistered target rather than throwing — verifyProvenance's 'target-not-registered'
+ * cause is the correct, load-bearing outcome for that case (see provenance.ts).
+ */
+async function resolveProvenanceTarget(
+  rest: string[],
+): Promise<{ repoPath: string; targetId: string | null; targetName: string }> {
+  const targetFlag = getFlag(rest, '--target');
+  const positional = positionals(rest, ['--target', '--from', '--to', '--ref']).find(a => !a.startsWith('--'));
+  const rawPath = targetFlag ?? positional ?? REPO_ROOT;
+  let repoPath = resolve(rawPath);
+  if (!existsSync(repoPath)) {
+    console.error(`Target path not found: ${repoPath}`);
+    process.exit(1);
+  }
+  // Normalize through `git rev-parse --show-toplevel`, exactly like `cmdTarget`'s `add` — on
+  // macOS /tmp is a symlink to /private/tmp, so a plain `resolve()` here would silently mismatch
+  // the repoPath a real `target add` registered (byRepoPath is a literal-string comparison).
+  // Falls back to the resolve()'d path when git can't resolve it (non-repo path — byRepoPath
+  // will simply find no match, which is the correct target-not-registered outcome).
+  const toplevel = spawnSync('git', ['-C', repoPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  if (toplevel.status === 0 && toplevel.stdout.trim()) repoPath = toplevel.stdout.trim();
+
+  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const result = fold(allEvents);
+  const reg = result.targets.byRepoPath(repoPath);
+  return { repoPath, targetId: reg?.targetId ?? null, targetName: reg?.name ?? repoPath };
+}
+
+/**
+ * verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>]
+ *                    [--ref <refname>] [--json]
+ *
+ * Verify a commit range against the operator's real ledger (see provenance.ts's module header
+ * for WHY this exists). Exit codes are the API — 0 verified, 1 uncovered, 2 indeterminate
+ * (fail-closed), 3 break-glass-open — never remapped here.
+ */
+async function cmdVerifyProvenance(rest: string[]): Promise<void> {
+  const asJson = hasFlag(rest, '--json');
+  const from = getFlag(rest, '--from');
+  const to = getFlag(rest, '--to');
+  const ref = getFlag(rest, '--ref');
+
+  const { repoPath, targetId, targetName } = await resolveProvenanceTarget(rest);
+
+  // --ref is the not-a-promotion-boundary case: pre-push fires once per pushed ref, including
+  // topic branches. Verifying the DEFAULT branch's provenance when an unrelated feature branch
+  // is pushed would be a false coupling — and a gate that blocks unrelated work is a gate that
+  // gets disabled. This is a NAMED pass, not a vacuous one: it decides and states the decidable
+  // fact "this ref is not a promotion boundary", as opposed to silently checking nothing (the
+  // exact failure class this whole item exists to close — see provenance.ts's header).
+  if (ref !== undefined) {
+    let defaultBranch: string | undefined;
+    try {
+      defaultBranch = readTargetManifest(repoPath).defaultBranch;
+    } catch {
+      defaultBranch = undefined;
+    }
+    if (defaultBranch === undefined || ref !== `refs/heads/${defaultBranch}`) {
+      const line = `provenance: not a promotion boundary (${ref || '(no ref)'}) — provenance is checked when the default branch is published`;
+      if (asJson) {
+        console.log(JSON.stringify({ status: 'not-a-promotion-boundary', ref, defaultBranch, lines: [line] }));
+      } else {
+        console.log(line);
+      }
+      process.exit(0);
+    }
+  }
+
+  const input = await gatherProvenanceInput({
+    repoPath,
+    ledgerDir: LEDGER_DIR,
+    ...(from !== undefined ? { from } : {}),
+    ...(to !== undefined ? { to } : {}),
+    targetId,
+  });
+  // targetName from the manifest/registration record when we have one, else the resolved path —
+  // display only; verifyProvenance's decision is keyed on targetId, never on this string.
+  const report = verifyProvenance({ ...input, targetName });
+
+  if (asJson) {
+    console.log(JSON.stringify(report));
+  } else {
+    for (const line of report.lines) console.log(line);
+  }
+  process.exit(report.exitCode);
+}
+
+/**
+ * provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+ *
+ * The audited exception to commit-provenance verification (schema.ts's ProvenanceBreakGlassData
+ * doc comment: a ledger event, never a commit-message trailer — a trailer is a self-declared
+ * assertion, a ledger event is an operator act recorded where the audit lives). Every refusal
+ * below happens BEFORE any ledger write.
+ */
+async function cmdProvenanceBreakGlass(rest: string[]): Promise<void> {
+  const usageLine = 'Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]';
+  const reason = getFlag(rest, '--reason');
+  const hoursStr = getFlag(rest, '--hours');
+
+  const { repoPath, targetId } = await resolveProvenanceTarget(rest);
+  if (targetId === null) {
+    console.error(`Target is not registered: ${repoPath} — run 'loopctl target add ${repoPath}' first.`);
+    process.exit(1);
+  }
+
+  if (!reason || reason.trim().length < 12) {
+    console.error(`${usageLine}\n--reason must carry at least 12 characters of real text — an unexplained bypass is exactly what break-glass exists to prevent.`);
+    process.exit(1);
+  }
+
+  const hours = hoursStr !== undefined ? Number(hoursStr) : 24;
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 72) {
+    console.error(`${usageLine}\n--hours must be a positive number capped at 72 (got: ${hoursStr ?? '(default 24)'}).`);
+    process.exit(1);
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + hours * 60 * 60 * 1000).toISOString();
+
+  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const openForTarget = openGrants(extractBreakGlassGrants(allEvents), targetId, now.toISOString());
+  if (openForTarget.length > 0) {
+    const g = openForTarget[0]!;
+    console.error(`Refused — a break-glass grant is already open for this target: ${g.item} (expires ${g.expiresAt}). At most one may be outstanding per target.`);
+    process.exit(1);
+  }
+
+  const fromShaResult = spawnSync('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const fromSha = fromShaResult.status === 0 ? fromShaResult.stdout.trim() : '(unresolvable)';
+
+  // Capture the retro-certification obligation FIRST, through the same captureIntent every
+  // other capture goes through (no second id-minting/capture path — see verbs.ts).
+  const { wiId: retroItem } = await captureIntent(LEDGER_DIR, {
+    text: `RETRO-CERTIFICATION (break-glass) — ${reason}. Commits made under this grant landed without a gate receipt and must be reviewed and certified after the fact.`,
+    source: 'cli',
+  });
+
+  const ev = makeEvent('cli', retroItem, 'provenance.break-glass', {
+    targetId,
+    fromSha,
+    reason,
+    expiresAt,
+    retroItem,
+  });
+  await appendEvents(LEDGER_DIR, [ev]);
+
+  console.log(`Granted break-glass on ${retroItem}, expires ${expiresAt}.`);
+  console.log(`Retro-certification obligation recorded on ${retroItem}.`);
+  console.log(`While open, 'loopctl verify-provenance' reports break-glass-open (exit 3) for covered commits — never a plain green.`);
+}
+
+async function cmdProvenance(rest: string[]): Promise<void> {
+  const sub = rest[0];
+  if (sub === 'break-glass') {
+    await cmdProvenanceBreakGlass(rest.slice(1));
+  } else {
+    console.error('Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]');
+    process.exit(1);
+  }
+}
+
 async function cmdCompact(rest: string[]): Promise<void> {
   const dryRun = hasFlag(rest, '--dry-run');
   const cfg = loadConfig(REPO_ROOT);
@@ -1773,6 +1947,14 @@ async function main(): Promise<void> {
 
     case 'audit':
       await cmdAudit(rest);
+      break;
+
+    case 'verify-provenance':
+      await cmdVerifyProvenance(rest);
+      break;
+
+    case 'provenance':
+      await cmdProvenance(rest);
       break;
 
     case 'conv':

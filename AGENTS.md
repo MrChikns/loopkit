@@ -110,3 +110,50 @@ just one target among however many are registered. For the full contract of how 
 *any* target repo (including this one) should talk to the plane — capture intents, read the
 board, what never to do — see `docs/agent-integration.md`, including a snippet adopters paste
 into their own repo's `AGENTS.md`/`CLAUDE.md` that covers the self-target case too.
+
+### Mechanically enforced (WI-232)
+
+The rule above used to be words only. `loopctl verify-provenance` makes it checkable: it walks
+first-parent commits above the declared baseline and requires, for each, a real `item.merged`
+receipt whose recorded commit SHA matches, backed by gate evidence. It runs **locally**, at
+promotion boundaries, because the ledger is the operator's private plane-home, not this repo.
+
+**Boundaries, honestly enumerated.** `git push` (the `pre-push` hook) — **covered, blocking**: an
+unreceipted commit above the baseline refuses the push. The plane's own merge paths (reactor,
+dispatch, the attended coordinator) — **covered by construction**, since they write the receipt.
+`deployCommand` and the dist-drift self-heal inside `loopctl doctor` — **NOT COVERED in this
+slice**: not blocked, and not automatically detected either. A local, ungoverned `main` can
+become the running runtime with no push at all, so this is a genuine promotion path, and today
+the only thing that looks at it is `loopctl verify-provenance` run by hand. Blocking it was
+rejected deliberately — a fail-closed check inside a recovery path can wedge a plane permanently
+(unreadable ledger → cannot rebuild dist → cannot run `loopctl` → cannot repair the ledger) —
+but the follow-up shape is a *reported* provenance finding on the health surface, and until that
+exists this is the most likely place the next version of this incident happens. Do not read the
+push gate as covering it.
+
+**Fail-closed.** An empty/unresolvable range, an unreadable ledger, non-linear ancestry (a
+force-push), an unregistered target, a missing or non-ancestor baseline, or more than one open
+break-glass grant all resolve **indeterminate**, and indeterminate blocks. "0 commits checked" is
+a failure here, not a pass — the original incident was a silent one.
+
+**The escape hatch.** `loopctl provenance break-glass --target <repo> --reason "<why>"` opens a
+time-boxed grant, at most one outstanding per target, and auto-creates a retro-certification work
+item; while open, the range reports `break-glass-open` instead of green. A recorded exception
+exists because a rule with no exit gets bypassed by disabling the mechanism — `--no-verify` leaves
+no trace, so an audited exception beats a silent one.
+
+**The baseline.** `loopkit.target.json`'s `provenanceBaseline` names the commit provenance is
+verified *from*; below it is retro-certified under the work items listed there — an operator
+assertion recorded in a reviewable file, not a fact the tool derived.
+
+**What this does not prove.** It checks the operator's local ledger, so it proves a receipt
+exists — not that the work was correct. This is accident prevention, not an adversarial security
+boundary: the verifier, the ledger, and the agents all run under the same OS identity, so anything
+with a local shell could forge a receipt or move the baseline. No signed commits, no cryptographic
+attestation.
+
+**External contributors carry nothing per commit.** A fork or PR author has no plane ledger and
+needs none. The intended shape is CI proving the contributor's range by running the gate, with the
+receipt written by the maintainer or the plane at merge time; this repo currently auto-closes PRs
+regardless (`.github/workflows/close-prs.yml`, `CONTRIBUTING.md`), so that path serves adopters
+and forks rather than being exercised here.

@@ -1,43 +1,120 @@
 #!/bin/sh
-# Pre-push leak tripwire — scans the committed HEAD tree AND the commit-message
-# range about to be pushed (tree scans never see commit-message-only residue —
-# see scripts/leak-scan.sh --range), and refuses to push under a non-noreply
-# author identity. Installed via `scripts/install-hooks.sh`.
+# Pre-push tripwires. TWO independent gates, deliberately not nested in each other:
 #
-# The range pass is also the ONLY tripwire a merge commit gets: git does not run
-# pre-commit for merges, so a merge's own message reaches history unscanned until
-# this hook sees it (`git rev-list <range>` includes merge commits).
+#   1. leak-scan — scans the committed HEAD tree AND the commit-message range about to be
+#      pushed (tree scans never see commit-message-only residue — see scripts/leak-scan.sh
+#      --range), and refuses to push under a non-noreply author identity. The range pass is
+#      also the ONLY tripwire a merge commit gets: git does not run pre-commit for merges, so
+#      a merge's own message reaches history unscanned until this hook sees it.
+#
+#   2. provenance (WI-232) — verifies the lineage this push publishes against the operator's
+#      real ledger. `git push` is a promotion boundary, so it is where mechanical provenance
+#      verification is ENFORCED rather than merely documented.
+#
+# The per-ref loop below is NOT conditional on leak-scan being present. An earlier draft
+# nested the provenance gate inside `if [ -x scripts/leak-scan.sh ]`, which meant deleting or
+# chmod-ing one tripwire silently disabled the other — a control that disappears without
+# saying so is precisely the failure class WI-232 exists to close.
+#
+# Installed via `scripts/install-hooks.sh`.
 ROOT=$(git rev-parse --show-toplevel)
-if [ -x "$ROOT/scripts/leak-scan.sh" ]; then
-  sh "$ROOT/scripts/leak-scan.sh" --head || {
+
+# The provenance CLI is a build artifact, not tracked source. If it is missing, BLOCK rather
+# than skip: a promotion gate that silently disappears whenever the build artifact happens to
+# be absent is the same hole one layer down (53 commits reached `main` with no work item, no
+# gate record, no acceptance event — see AGENTS.md "Mechanically enforced (WI-232)").
+PROVENANCE_CLI="$ROOT/packages/core/dist/cli.js"
+if [ ! -f "$PROVENANCE_CLI" ]; then
+  echo "pre-push BLOCKED — $PROVENANCE_CLI not found. Build it first:" >&2
+  echo "  (cd $ROOT/packages/core && npm run build)" >&2
+  echo "A missing build artifact is not a reason to skip the provenance gate." >&2
+  exit 1
+fi
+
+LEAK_SCAN="$ROOT/scripts/leak-scan.sh"
+if [ -x "$LEAK_SCAN" ]; then
+  sh "$LEAK_SCAN" --head || {
     echo "pre-push BLOCKED by leak-scan (tree). Override (after review) with: git push --no-verify" >&2
     exit 1
   }
-  ZERO=0000000000000000000000000000000000000000
-  while read -r local_ref local_sha remote_ref remote_sha; do
-    [ -z "$local_sha" ] && continue
-    [ "$local_sha" = "$ZERO" ] && continue  # branch delete — nothing to scan
+else
+  echo "pre-push NOTE — $LEAK_SCAN missing or not executable; the leak tripwire did NOT run." >&2
+fi
+
+ZERO=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "$local_sha" ] && continue
+  [ "$local_sha" = "$ZERO" ] && continue  # branch delete — nothing to scan
+
+  if [ -x "$LEAK_SCAN" ]; then
     if [ "$remote_sha" = "$ZERO" ]; then
       RANGE="$local_sha --not --remotes"    # new ref — scan whatever isn't on any remote yet
     else
       RANGE="$remote_sha..$local_sha"
     fi
     STATUS=0
-    sh "$ROOT/scripts/leak-scan.sh" --range $RANGE || STATUS=$?
-    # Exit 3 = the range held 0 commits. That is a legitimate state here (a new
-    # ref whose tip already exists on another remote publishes no new messages),
-    # so it does not block — but it is ANNOUNCED, never silently read as clean.
+    sh "$LEAK_SCAN" --range $RANGE || STATUS=$?
+    # Exit 3 = the range held 0 commits. That is a legitimate state here (a new ref whose tip
+    # already exists on another remote publishes no new messages), so it does not block — but
+    # it is ANNOUNCED, never silently read as clean.
     case "$STATUS" in
       0) ;;
       3) echo "pre-push NOTE — 0 commit messages scanned for $local_ref (empty range); the HEAD-tree scan above still applies." >&2 ;;
       *) echo "pre-push BLOCKED by leak-scan (commit log for $local_ref). Override (after review) with: git push --no-verify" >&2
          exit 1 ;;
     esac
-  done
-fi
+  fi
+
+  # Provenance gate, per-ref: verifies exactly the lineage this ref publishes. `--ref` names
+  # the pushed ref so a topic branch takes the not-a-promotion-boundary path instead of being
+  # blocked by the default branch's unrelated state; `--to` pins the exact tip being pushed
+  # rather than whatever HEAD happens to be by the time this loop iteration runs.
+  PROV_STATUS=0
+  node "$PROVENANCE_CLI" verify-provenance --target "$ROOT" --ref "$remote_ref" --to "$local_sha" || PROV_STATUS=$?
+  case "$PROV_STATUS" in
+    0) ;;
+    3) echo "############################################################" >&2
+       echo "# PROVENANCE: BREAK-GLASS OPEN for $ROOT ($local_ref)" >&2
+       echo "# This push is allowed only because a time-boxed break-glass" >&2
+       echo "# grant currently covers it. A retro-certification work item" >&2
+       echo "# exists and still owes gate + acceptance after the fact." >&2
+       echo "############################################################" >&2
+       ;;
+    1) echo "pre-push BLOCKED by verify-provenance ($local_ref) — one or more commits above" >&2
+       echo "the declared baseline have no matching ledger receipt or gate evidence." >&2
+       echo "Run: loopctl verify-provenance --target . --ref $remote_ref --to $local_sha" >&2
+       echo "to see which commits. Override (after review) with: git push --no-verify" >&2
+       exit 1
+       ;;
+    2) # Indeterminate is FATAL here, unlike the leak-scan --range pass above, where exit 3
+       # (0 commits scanned) is a NOTE and the push continues — an empty range there just
+       # means nothing new to check for leaks. An indeterminate provenance result is not the
+       # same shape: the causes (empty/unresolvable range, unreadable ledger, non-linear
+       # ancestry, unregistered target, missing/non-ancestor baseline, more than one open
+       # break-glass grant) all mean the check COULD NOT RUN, and a provenance check that
+       # reports success without checking anything is exactly the silent-pass failure this
+       # gate exists to close.
+       echo "pre-push BLOCKED by verify-provenance ($local_ref) — indeterminate (exit 2)." >&2
+       echo "The check could not run. For the cause, run:" >&2
+       echo "  loopctl verify-provenance --target . --ref $remote_ref --to $local_sha" >&2
+       echo "This is fatal, not a pass: 'nothing checked' is not 'clean'." >&2
+       echo "Override (after review) with: git push --no-verify" >&2
+       exit 1
+       ;;
+    *) echo "pre-push BLOCKED by verify-provenance ($local_ref) — unrecognized exit status $PROV_STATUS." >&2
+       echo "Unknown status fails closed. Override (after review) with: git push --no-verify" >&2
+       exit 1
+       ;;
+  esac
+done
+
 EMAIL=$(git config user.email)
 case "$EMAIL" in
   *users.noreply.github.com) ;;
   *) echo "pre-push BLOCKED — non-noreply author email configured: $EMAIL" >&2; exit 1 ;;
 esac
+
+# Override note, same convention as the leak-scan messages above: `git push --no-verify`
+# leaves no trace, whereas `loopctl provenance break-glass --reason "<why>"` is the
+# supported, recorded exception.
 exit 0

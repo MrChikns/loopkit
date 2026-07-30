@@ -860,6 +860,25 @@ export interface DiagnosisRecordedData {
   repairItem?: string;
 }
 
+/**
+ * provenance.break-glass — WI-232 mechanical governance: an operator's explicit, time-boxed
+ * exception to commit-provenance verification (see provenance.ts). Deliberately a LEDGER EVENT
+ * rather than a commit-message trailer: an earlier design tried the trailer (`Work-Item: WI-123`)
+ * and it was rejected as theater — an agent that bypasses the plane can equally type a fake
+ * trailer, which relocates a silent failure into an unverified assertion instead of closing it.
+ * A ledger event is an operator ACT recorded exactly where the audit already lives, it is
+ * time-boxed (see `expiresAt`), and — enforced by `verifyProvenance`'s 'break-glass-multiple'
+ * precondition — at most one may be outstanding per target at a time.
+ */
+export interface ProvenanceBreakGlassData {
+  targetId: string;
+  fromSha: string;
+  reason: string;
+  expiresAt: string;
+  /** The follow-up work item that carries the exempted range through gate + acceptance after the fact. */
+  retroItem?: string;
+}
+
 /** All recognized data shapes by type string */
 export type EventDataMap = {
   'item.captured': ItemCapturedData;
@@ -891,6 +910,7 @@ export type EventDataMap = {
   'conv.closed': ConvClosedData;
   'target.registered': TargetRegisteredData;
   'target.manifest-updated': TargetManifestUpdatedData;
+  'provenance.break-glass': ProvenanceBreakGlassData;
   'deploy.requested': DeployRequestedData;
   'deploy.launched': DeployLaunchedData;
   'deploy.succeeded': DeploySucceededData;
@@ -964,6 +984,7 @@ const KNOWN_TYPES = new Set<string>([
   'diagnosis.recorded',
   'conv.started', 'conv.promoted', 'conv.closed',
   'target.registered', 'target.manifest-updated',
+  'provenance.break-glass',
 ]);
 
 export function isKnownType(t: string): t is KnownEventType {
