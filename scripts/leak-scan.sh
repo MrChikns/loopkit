@@ -39,13 +39,18 @@
 # Modes:  --staged  scan the git index (pre-commit)   [default: --worktree]
 #         --head    scan the committed HEAD tree (pre-push)
 #         --worktree scan tracked files in the working tree
-#         --range <rev-range>  scan COMMIT MESSAGES (subject+body) for the given
-#                  range (e.g. `origin/main..HEAD`, or `HEAD --not --remotes`)
-#                  — tree scans never see commit-message-only residue.
+#         --range <rev-range>  scan COMMIT MESSAGES + AUTHOR/COMMITTER METADATA
+#                  (name + email) for the given range (e.g. `origin/main..HEAD`,
+#                  or `HEAD --not --remotes`) — tree scans never see this residue.
 #                  The range is ALWAYS explicit: there is no inferred default,
 #                  because a wrong default that scans nothing looks identical to
 #                  a clean result. Merge commits ARE included (the pre-commit
 #                  hook never runs for them, so this is their only tripwire).
+#                  A commit made on a misconfigured machine (a real personal
+#                  email, a real hostname baked into `user.name`) leaks through
+#                  `git log`'s author/committer fields even when the message
+#                  and diff are spotless, so those fields are part of the
+#                  materialized corpus, not just the subject/body.
 #
 # Exit:   0  clean — a corpus was scanned and nothing matched
 #         1  hit — sensitive residue found (details on stderr)
@@ -102,7 +107,20 @@ glpat-[0-9A-Za-z_-]{20,}
 # without this the commit-message corpus below flags every single one and the
 # tripwire gets routinely overridden. The lookbehind pins the match to the START of
 # a local part, so `no-reply@…` can't be re-matched from a later offset.
-EMAIL='(?<![A-Za-z0-9._%+-])(?!no-?reply@)[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}'
+# The trailing `(?<!users\.noreply\.github\.com)(?=[^A-Za-z0-9.]|$)` is the SAME
+# idea for one specific, narrow host: GitHub's own commit-identity placeholder
+# (`<id>+<username>@users.noreply.github.com`) contains no real identity beyond
+# a public GitHub username, and became reachable by this class the moment --range
+# started scanning AUTHOR/COMMITTER metadata (WI-243) — every commit an operator
+# makes with GitHub's privacy setting on now carries this domain, so without the
+# exemption --range self-wedges on the operator's own ordinary history. The
+# exclusion is anchored to the domain's exact end (lookbehind matches only when
+# `users.noreply.github.com` is immediately followed by a non-domain character or
+# end-of-line), so `users.noreply.github.com` as a mere PREFIX of a longer, hostile
+# domain (`…@users.noreply.github.com.evil.com`) still matches and blocks. This is
+# deliberately narrow to ONE host, not a general "widen the noreply list" — do not
+# add further hosts here without a fresh decision.
+EMAIL='(?<![A-Za-z0-9._%+-])(?!no-?reply@)[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}(?<!users\.noreply\.github\.com)(?=[^A-Za-z0-9.]|$)'
 
 # Concrete private decision-log citation: `D-NNN` (optionally `D-NNN-SUFFIX`, e.g.
 # `D-042-H-CHAT`), word-bounded so `ADR-NNN` never matches, and not immediately
@@ -162,14 +180,19 @@ case "$MODE" in
   --head)     GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="HEAD" ;;
   --worktree) GREP="git grep -I -nE";            GREP_P="git grep -I -nP";          REV="" ;;
   --range)
-    # Materialise the commit-message corpus as ONE FILE PER COMMIT, named by its
-    # sha, then scan it with the very same `git grep` passes the tree modes use.
-    # Two reasons this is not a plain `grep` over `git log` output:
+    # Materialise the commit-message-AND-metadata corpus as ONE FILE PER COMMIT,
+    # named by its sha, then scan it with the very same `git grep` passes the
+    # tree modes use. Two reasons this is not a plain `grep` over `git log` output:
     #   1. one regex engine everywhere. BSD/macOS `grep` has no `-P`, so piping
     #      the log through `grep -P` made the email and decision-id classes match
     #      NOTHING here — silently, because the error went to /dev/null.
     #   2. a hit is reported as `<sha>:<line-in-message>:<text>` — the same
     #      `path:line:text` shape as a tree hit, and it names the commit.
+    # The materialized file carries author+committer name/email ahead of the
+    # subject/body (`%an <%ae>` / `%cn <%ce>`, then `%s%n%b`): a commit made on a
+    # misconfigured machine can have a spotless message yet a real personal
+    # email or hostname-derived name in these fields, and that never reaches a
+    # tree scan at all — it lives only in commit metadata.
     if ! SHAS=$(git rev-list $RANGE 2>&1); then
       echo "leak-scan: --range '$RANGE' is not a valid rev-range:" >&2
       printf '%s\n' "$SHAS" >&2
@@ -185,7 +208,7 @@ case "$MODE" in
     TMP=$(mktemp -d "${TMPDIR:-/tmp}/leak-scan.XXXXXX")
     printf '%s\n' "$SHAS" | while IFS= read -r sha; do
       [ -n "$sha" ] || continue
-      git log -1 --format='%s%n%b' "$sha" > "$TMP/$sha"
+      git log -1 --format='%an <%ae>%n%cn <%ce>%n%s%n%b' "$sha" > "$TMP/$sha"
     done
     echo "leak-scan: --range '$RANGE' — scanning $NCOMMITS commit message(s)." >&2
     GREP="git grep --no-index -I -nE"; GREP_P="git grep --no-index -I -nP"; REV=""
