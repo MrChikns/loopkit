@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { requireCleanCheckout } from '../src/git-safety.js';
+import { requireCleanCheckout, isPlaneArtifact } from '../src/git-safety.js';
 import {
   closeMergedCluster,
   constructTargetMergeCandidate,
@@ -183,6 +183,96 @@ test('exact merge candidate is no-ff, atomically published, and syncs a clean ch
     assert.equal(git(root, ['rev-parse', 'HEAD']).stdout.toString().trim(), candidate.commit);
     assert.equal(readFileSync(join(root, 'built.txt'), 'utf8'), 'built\n');
     assert.equal(requireCleanCheckout(root).ok, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a prior publish that crashed between detach and restore leaves a clean detached checkout that the NEXT merge re-attaches honestly', () => {
+  const root = makeRepo();
+  try {
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+
+    // Simulate exactly the on-disk state a crash between closeMergedCluster's detach and its
+    // restore checkout leaves behind: primary checkout detached, HEAD at the (still-current)
+    // destination tip, tree clean. No live process needs to actually crash for this — the
+    // recoverable STATE is what matters, not how it was produced.
+    git(root, ['checkout', '--detach', expectedMain]);
+    assert.equal(git(root, ['branch', '--show-current']).stdout.toString().trim(), '',
+      'precondition: primary checkout is detached, simulating the post-crash wedge');
+    assert.equal(requireCleanCheckout(root).ok, true, 'precondition: tree is clean');
+
+    // A second, unrelated build now completes and reaches its own closeMergedCluster call —
+    // this is the "next merge" that must observe and repair the wedge, not fail open.
+    git(root, ['branch', 'build2', expectedMain]);
+    git(root, ['checkout', 'build2']);
+    writeFileSync(join(root, 'second.txt'), 'second\n', 'utf8');
+    git(root, ['add', 'second.txt']);
+    git(root, ['commit', '-m', 'second build']);
+    const build2Sha = git(root, ['rev-parse', 'build2']).stdout.toString().trim();
+    // Re-create the detached-at-tip wedge as the ACTUAL primary-checkout state entering the
+    // next closeMergedCluster call (constructTargetMergeCandidate doesn't require a specific
+    // checked-out branch, so building the candidate from build2 is independent of it).
+    git(root, ['checkout', '--detach', expectedMain]);
+    const candidate = constructTargetMergeCandidate(root, 'build2', expectedMain, 'merge build2');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
+
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.checkoutSynced, true,
+      'the wedge must be detected and repaired within this same call, not left detached');
+    assert.equal(result.syncFailureReason, undefined);
+    assert.equal(git(root, ['branch', '--show-current']).stdout.toString().trim(), 'main',
+      'the primary checkout must be re-attached to the destination branch, not left detached');
+    assert.equal(git(root, ['rev-parse', 'main']).stdout.toString().trim(), candidate.commit);
+    assert.equal(git(root, ['rev-parse', 'HEAD']).stdout.toString().trim(), candidate.commit);
+    assert.equal(readFileSync(join(root, 'second.txt'), 'utf8'), 'second\n');
+    assert.equal(build2Sha !== candidate.commit, true, 'sanity: candidate is the merge, not the raw build tip');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a checkout genuinely detached at operator-inspected history (not the destination tip) is left alone, not force-reattached', () => {
+  const root = makeRepo();
+  try {
+    const expectedMain = git(root, ['rev-parse', 'main']).stdout.toString().trim();
+    git(root, ['checkout', '-b', 'build']);
+    writeFileSync(join(root, 'built.txt'), 'built\n', 'utf8');
+    git(root, ['add', 'built.txt']);
+    git(root, ['commit', '-m', 'built']);
+    git(root, ['checkout', 'main']);
+    const candidate = constructTargetMergeCandidate(root, 'build', expectedMain, 'merge build');
+    assert.equal(candidate.ok, true);
+    if (!candidate.ok) return;
+
+    // The operator is deliberately inspecting a commit that is NOT the destination tip —
+    // this must not be mistaken for the crash wedge (which is always detached exactly at the
+    // destination tip).
+    git(root, ['checkout', '--detach', expectedMain === '' ? 'HEAD' : expectedMain]);
+    writeFileSync(join(root, 'tracked.txt'), 'base\n', 'utf8'); // keep tree clean, re-affirm content
+    const historicalSha = git(root, ['rev-parse', 'HEAD~0']).stdout.toString().trim();
+    assert.equal(historicalSha, expectedMain);
+
+    // closeMergedCluster only sees the checked-out state at call time — build an unrelated
+    // detach at a DIFFERENT commit than expectedDestinationSha to prove the narrow match.
+    git(root, ['commit', '--allow-empty', '-m', 'operator inspection commit']);
+    const operatorSha = git(root, ['rev-parse', 'HEAD']).stdout.toString().trim();
+    assert.notEqual(operatorSha, expectedMain);
+
+    const result = closeMergedCluster(root, candidate.commit, 'main', expectedMain);
+    // Not the crash wedge shape (HEAD != expectedDestinationSha) — falls through to the
+    // ordinary "not currently on the destination branch" path: publishes, does not touch or
+    // restore the primary checkout.
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.checkoutSynced, false);
+    assert.equal(result.syncFailureReason, undefined);
+    assert.equal(git(root, ['rev-parse', 'HEAD']).stdout.toString().trim(), operatorSha,
+      'the operator-inspected detached HEAD must be left exactly as found');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
