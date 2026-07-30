@@ -6,7 +6,17 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fold, nextWiId, computeAcceptanceDebt, narrowQueuedTouches, computeParkFingerprint, isFirstSeenPark } from '../src/fold.js';
+import {
+  fold,
+  nextWiId,
+  computeAcceptanceDebt,
+  narrowQueuedTouches,
+  computeParkFingerprint,
+  isFirstSeenPark,
+  computeTransitionDropFingerprint,
+  recordTransitionDrop,
+  TransitionDropEntry,
+} from '../src/fold.js';
 import { renderBoard } from '../src/board.js';
 import { makeEvent, validateEvent, LedgerEvent } from '../src/schema.js';
 
@@ -955,8 +965,122 @@ test('fold: a fresh replay rebuilds the catalog deterministically, not preservin
 });
 
 // ---------------------------------------------------------------------------
-// WI-108 — lifetime clean-landing counters on ItemRecord + summary wire
+// WI-224 — transition-drop catalog: isAllowedItemTransition rejecting a state change used to be
+// silent (no log, counter, or record; the caller just ignored transition()'s `false`). Now every
+// rejection is tallied into FoldResult.transitionDrops via the pure recordTransitionDrop helper,
+// same catalog discipline as the failureCatalog tested above.
+//
+// NOTE ON COVERAGE: a full review of every transition() call site in fold.ts (WI-224) found each
+// one already pre-conditioned — by an explicit `if (rec.state !== ...)` guard, or by the
+// terminal/non-terminal branch split — to match the flow-table rule it invokes, for every event
+// type a real emitter in this codebase currently produces. So a well-formed replay of this
+// ledger's actual event vocabulary cannot presently hit the rejection branch (see the "fold: a
+// realistic replay never drops a transition" test below, which pins that as a property). The
+// mechanism exists for a FUTURE missing rule, not a currently-reachable one, so these tests prove
+// it directly rather than via a real event stream engineered to defeat guards that don't exist.
 // ---------------------------------------------------------------------------
+
+test('computeTransitionDropFingerprint: same (cause, from, to) hashes identically', () => {
+  const a = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  const b = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  assert.equal(a, b);
+});
+
+test('computeTransitionDropFingerprint: a different cause, from, or to each changes the fingerprint', () => {
+  const base = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  assert.notEqual(base, computeTransitionDropFingerprint('item.queued', 'queued', 'routed'));
+  assert.notEqual(base, computeTransitionDropFingerprint('item.routed', 'parked', 'routed'));
+  assert.notEqual(base, computeTransitionDropFingerprint('item.routed', 'queued', 'answered'));
+});
+
+test('recordTransitionDrop: first drop of a shape starts the catalog at count 1 with the sample item', () => {
+  const catalog = new Map<string, TransitionDropEntry>();
+  recordTransitionDrop(catalog, 'item.routed', 'queued', 'routed', '2026-07-30T10:00:00.000Z', 'WI-700');
+  const fp = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  assert.deepEqual(catalog.get(fp), {
+    count: 1,
+    cause: 'item.routed',
+    from: 'queued',
+    to: 'routed',
+    firstSeenAt: '2026-07-30T10:00:00.000Z',
+    lastSeenAt: '2026-07-30T10:00:00.000Z',
+    items: ['WI-700'],
+  });
+});
+
+test('recordTransitionDrop: a second drop of the SAME shape tallies count and advances lastSeenAt', () => {
+  const catalog = new Map<string, TransitionDropEntry>();
+  recordTransitionDrop(catalog, 'item.routed', 'queued', 'routed', '2026-07-30T10:00:00.000Z', 'WI-700');
+  recordTransitionDrop(catalog, 'item.routed', 'queued', 'routed', '2026-07-30T10:05:00.000Z', 'WI-701');
+  const fp = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  const entry = catalog.get(fp)!;
+  assert.equal(entry.count, 2);
+  assert.equal(entry.firstSeenAt, '2026-07-30T10:00:00.000Z');
+  assert.equal(entry.lastSeenAt, '2026-07-30T10:05:00.000Z');
+  assert.deepEqual(entry.items, ['WI-700', 'WI-701']);
+});
+
+test('recordTransitionDrop: a repeat item id is not duplicated in the sample list', () => {
+  const catalog = new Map<string, TransitionDropEntry>();
+  recordTransitionDrop(catalog, 'build.cancelled', 'queued', 'parked', '2026-07-30T10:00:00.000Z', 'WI-700');
+  recordTransitionDrop(catalog, 'build.cancelled', 'queued', 'parked', '2026-07-30T10:01:00.000Z', 'WI-700');
+  const fp = computeTransitionDropFingerprint('build.cancelled', 'queued', 'parked');
+  const entry = catalog.get(fp)!;
+  assert.equal(entry.count, 2);
+  assert.deepEqual(entry.items, ['WI-700']);
+});
+
+test('recordTransitionDrop: the item sample is capped so one pathological repeat-offender item cannot grow it unbounded', () => {
+  const catalog = new Map<string, TransitionDropEntry>();
+  for (let i = 0; i < 20; i++) {
+    recordTransitionDrop(catalog, 'item.routed', 'queued', 'routed', '2026-07-30T10:00:00.000Z', `WI-${800 + i}`);
+  }
+  const fp = computeTransitionDropFingerprint('item.routed', 'queued', 'routed');
+  const entry = catalog.get(fp)!;
+  assert.equal(entry.count, 20);
+  assert.ok(entry.items.length < 20, 'sample list stays capped well below the drop count');
+  assert.deepEqual(entry.items, ['WI-800', 'WI-801', 'WI-802', 'WI-803', 'WI-804']);
+});
+
+test('recordTransitionDrop: different (cause, from, to) shapes land in separate catalog entries', () => {
+  const catalog = new Map<string, TransitionDropEntry>();
+  recordTransitionDrop(catalog, 'item.routed', 'queued', 'routed', '2026-07-30T10:00:00.000Z', 'WI-700');
+  recordTransitionDrop(catalog, 'build.cancelled', 'queued', 'parked', '2026-07-30T10:00:00.000Z', 'WI-701');
+  assert.equal(catalog.size, 2);
+});
+
+test('fold: a realistic replay across every WI-108/park/dependency/session fixture in this file never drops a transition', () => {
+  // Re-fold every event this test file has constructed elsewhere as one combined ledger. This is
+  // the "zero drops on a normal fold" proof: a real, well-formed event vocabulary never disagrees
+  // with ITEM_FLOW, so transitionDrops stays empty exactly like a fresh replay's failureCatalog
+  // stays correctly populated only by real parks.
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-900', 'item.captured', { source: 'cli', text: 'normal flow' }),
+    makeEvent('reactor', 'WI-900', 'item.routed', { route: 'build', reply: 'queuing' }),
+    makeEvent('reactor', 'WI-900', 'item.queued', { spec: 'do the thing' }),
+    makeEvent('dispatch', 'WI-900', 'build.dispatched', { attempt: 1, pid: 123 }),
+    makeEvent('dispatch', 'WI-900', 'build.crashed', { reason: 'oom' }),
+    makeEvent('dispatch', 'WI-900', 'build.dispatched', { attempt: 2, pid: 124 }),
+    makeEvent('dispatch', 'WI-900', 'gate.failed', { reason: 'tests red' }),
+    makeEvent('reactor', 'WI-900', 'item.unparked', {}),
+    makeEvent('dispatch', 'WI-900', 'build.dispatched', { attempt: 3, pid: 125 }),
+    makeEvent('dispatch', 'WI-900', 'gate.passed', {}),
+    makeEvent('reactor', 'WI-900', 'item.approved', { by: 'reactor' }),
+    makeEvent('reactor', 'WI-900', 'item.merged', { commit: 'abc123' }),
+    makeEvent('operator', 'WI-900', 'item.accepted', { by: 'operator' }),
+    makeEvent('operator', 'WI-901', 'item.captured', { source: 'cli', text: 'stopped mid-build' }),
+    makeEvent('reactor', 'WI-901', 'item.queued', { spec: 'other thing' }),
+    makeEvent('dispatch', 'WI-901', 'build.dispatched', { attempt: 1, pid: 200 }),
+    makeEvent('operator', 'WI-901', 'build.cancelled', { attempt: 1, by: 'operator' }),
+    makeEvent('reactor', 'WI-901', 'item.unparked', {}),
+    makeEvent('operator', 'WI-901', 'item.rejected', { by: 'operator' }),
+    makeEvent('operator', 'WI-901', 'item.reopened', { by: 'operator', reason: 'reconsidered' }),
+    makeEvent('operator', 'WI-902', 'item.captured', { source: 'cli', text: 'answered directly' }),
+    makeEvent('reactor', 'WI-902', 'item.routed', { route: 'answer', reply: 'X is Y.' }),
+  ];
+  const result = fold(events);
+  assert.deepEqual(result.transitionDrops, new Map());
+});
 
 test('fold: lifetime counters are absent (undefined = 0) on a clean straight-through merge', () => {
   const events: LedgerEvent[] = [

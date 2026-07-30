@@ -68,6 +68,23 @@ export function computeParkFingerprint(reason: string | undefined, parkKind?: st
   return createHash('sha1').update(`${parkKind ?? ''}:${normalized}`).digest('hex').slice(0, 16);
 }
 
+/**
+ * Deterministic fingerprint for one (cause, from, to) transition-drop shape (see
+ * TransitionDropEntry) — same pure-hash discipline as computeParkFingerprint/
+ * computeErrorFingerprint. Groups every drop of the same shape across items and replays into one
+ * catalog entry.
+ */
+export function computeTransitionDropFingerprint(
+  cause: ItemTransitionCause,
+  from: ItemState,
+  to: ItemState,
+): string {
+  return createHash('sha1').update(`${cause}:${from}->${to}`).digest('hex').slice(0, 16);
+}
+
+/** Cap on TransitionDropEntry.items — a diagnostic sample, not a full audit log. */
+const MAX_SAMPLE_ITEMS = 5;
+
 // ---------------------------------------------------------------------------
 // Per-item state
 // ---------------------------------------------------------------------------
@@ -518,6 +535,55 @@ export interface FailureCatalogEntry {
   lastSeenAt: string;
 }
 
+/**
+ * One (cause, from, to) shape's tally in the transition-drop catalog (see
+ * computeTransitionDropFingerprint). WI-224: isAllowedItemTransition silently rejects any event
+ * whose (from, cause, to) is missing from ITEM_FLOW.transitions — the item just stops advancing.
+ * That silence was the actual defect; the transition table itself is not currently believed
+ * wrong (see fold()'s `transition` doc comment). `items` carries the small sample of item ids
+ * that hit this exact shape (capped — see MAX_SAMPLE_ITEMS) so an operator can find a live
+ * example without the catalog growing unbounded on a pathological repeat-offender item.
+ */
+export interface TransitionDropEntry {
+  count: number;
+  cause: ItemTransitionCause;
+  from: ItemState;
+  to: ItemState;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  /** Up to MAX_SAMPLE_ITEMS distinct item ids observed hitting this drop shape, in first-seen order. */
+  items: string[];
+}
+
+/**
+ * Pure recorder for one transition-drop occurrence — extracted out of fold()'s `transition`
+ * closure so the tally logic (new entry vs. bump-existing, sample cap) is directly unit-testable
+ * without needing a real event stream to first defeat every fold.ts call-site guard (WI-224
+ * review found every current call site already pre-conditions its state so the flow table can
+ * never reject it in practice — see the review notes on transitionDrops). Mutates `catalog` in
+ * place, mirroring the failureCatalog tally pattern above; never throws.
+ */
+export function recordTransitionDrop(
+  catalog: Map<string, TransitionDropEntry>,
+  cause: ItemTransitionCause,
+  from: ItemState,
+  to: ItemState,
+  ts: string,
+  itemId: string,
+): void {
+  const fp = computeTransitionDropFingerprint(cause, from, to);
+  const entry = catalog.get(fp);
+  if (!entry) {
+    catalog.set(fp, { count: 1, cause, from, to, firstSeenAt: ts, lastSeenAt: ts, items: [itemId] });
+    return;
+  }
+  entry.count += 1;
+  entry.lastSeenAt = ts;
+  if (!entry.items.includes(itemId) && entry.items.length < MAX_SAMPLE_ITEMS) {
+    entry.items.push(itemId);
+  }
+}
+
 export interface FoldResult {
   items: Map<string, ItemRecord>;
   conversations: Map<string, ConversationRecord>;
@@ -544,6 +610,15 @@ export interface FoldResult {
    * item ever carries a claim and the beats behave exactly as before sessions existed.
    */
   sessions: Map<string, SessionRecord>;
+  /**
+   * WI-224: transitions the flow table (flow.ts ITEM_FLOW) rejected as not allowed from the
+   * item's current state, keyed by computeTransitionDropFingerprint(cause, from, to). Same
+   * catalog discipline as failureCatalog — a pure fold derivation, in event order, that a fresh
+   * replay rebuilds identically every time. Empty on every ledger folded so far (see
+   * transition-drops.test.ts); this exists so a FUTURE missing transition is a counted,
+   * diagnosable fact instead of an item that silently stops advancing.
+   */
+  transitionDrops: Map<string, TransitionDropEntry>;
 }
 
 function newItem(id: string): ItemRecord {
@@ -864,6 +939,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
   const conversations = new Map<string, ConversationRecord>();
   const targets = new TargetsProjection();
   const failureCatalog = new Map<string, FailureCatalogEntry>();
+  const transitionDrops = new Map<string, TransitionDropEntry>();
   const sessions = new Map<string, SessionRecord>();
   const dependencyVersions = new Map<string, DependencyEdgeFact>();
   let maxWiNum = 0;
@@ -894,13 +970,23 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
     return conversations.get(id)!;
   }
 
+  // WI-224: isAllowedItemTransition rejecting a transition used to be silent — the item just
+  // stopped advancing with no log, counter, or diagnostic record. Record every rejection via
+  // recordTransitionDrop (same catalog discipline as the failureCatalog above: deterministic
+  // fingerprint, pure fold derivation, never thrown — see the doc comment on
+  // FoldResult.transitionDrops). This must NEVER throw: replay of historical ledgers is proven
+  // exact against a real ~21.5k-event ledger and that property must not regress just because a
+  // rule is missing from ITEM_FLOW.
   function transition(
     rec: ItemRecord,
     state: ItemState,
     cause: ItemTransitionCause,
     ts: string,
   ): boolean {
-    if (!isAllowedItemTransition(rec.state, state, cause)) return false;
+    if (!isAllowedItemTransition(rec.state, state, cause)) {
+      recordTransitionDrop(transitionDrops, cause, rec.state, state, ts, rec.id);
+      return false;
+    }
     rec.state = state;
     rec.transitions[state] = ts;
     return true;
@@ -1594,7 +1680,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
     }
   }
 
-  return { items, conversations, targets, maxWiNum, maxConvNum, failureCatalog, sessions };
+  return { items, conversations, targets, maxWiNum, maxConvNum, failureCatalog, sessions, transitionDrops };
 }
 
 interface DependencyEdgeFact {
