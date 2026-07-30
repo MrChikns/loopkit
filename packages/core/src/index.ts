@@ -46,6 +46,10 @@ export * from './hygiene.js';
 // Target-readiness audit (loopctl audit)
 export * from './audit/index.js';
 
+// Commit provenance verification (WI-232 mechanical governance) — verify a commit range against
+// the operator's real ledger, never a commit-message trailer. See provenance.ts's header comment.
+export * from './provenance.js';
+
 // Autonomy: THE plane kill-switch predicate — shared by both beat gates and the console's
 // execution-mode pill so the two can never disagree about what "armed" means.
 export * from './autonomy.js';

@@ -129,6 +129,32 @@ export interface TargetManifest {
   promptsDir: string;
   /** Max minutes a single build agent may run against this target before timing out. Default: 45. */
   buildTimeoutMinutes: number;
+  /**
+   * WI-232 — the declared commit-provenance baseline (see {@link ProvenanceBaseline}). Absent =
+   * undefined, deliberately NOT defaulted: unlike every other field on this manifest, "no
+   * baseline declared" and "baseline is the repo root" are different facts, and defaulting one
+   * to the other would silently choose a scope no operator asserted.
+   */
+  provenanceBaseline?: ProvenanceBaseline;
+}
+
+/**
+ * WI-232 mechanical governance — the declared line below which commit-provenance verification
+ * (see provenance.ts) does not run. A baseline is a DECLARED, RECORDED assertion, not a
+ * machine-verified fact: the point is that "we don't look below here, and here is who says why"
+ * is auditable (it lives in the versioned manifest, under review like any other change), whereas
+ * a hardcoded sha buried in a script would not be. Absent from the manifest = provenance
+ * verification refuses to run at all (`verifyProvenance`'s 'no-baseline' cause) rather than
+ * silently defaulting to "everything" or "nothing" — a target opts in by declaring where its
+ * own proven history starts.
+ */
+export interface ProvenanceBaseline {
+  /** Commit at/below which provenance is not verified. */
+  commit: string;
+  /** Why the line is here — an operator assertion, not a machine-verified fact. */
+  reason: string;
+  /** Work items under which everything below the line was retro-certified. */
+  certifiedBy: string[];
 }
 
 /** Filename of the manifest at a target repo's root. */
@@ -241,6 +267,26 @@ export function parseTargetManifest(raw: unknown): TargetManifest {
     }
   }
 
+  // provenanceBaseline (WI-232) — optional, NOT defaulted: absent stays undefined (see the field
+  // doc comment). Same clear path-prefixed error style as every other validator above.
+  let provenanceBaseline: TargetManifest['provenanceBaseline'];
+  const baselineRaw = r['provenanceBaseline'] as Record<string, unknown> | undefined;
+  if (baselineRaw !== undefined) {
+    if (typeof baselineRaw !== 'object' || Array.isArray(baselineRaw)) {
+      throw new Error(`${TARGET_MANIFEST_FILENAME}: provenanceBaseline must be an object`);
+    }
+    const commit = baselineRaw['commit'];
+    if (typeof commit !== 'string' || !commit.trim()) {
+      throw new Error(`${TARGET_MANIFEST_FILENAME}: provenanceBaseline.commit must be a non-empty string`);
+    }
+    const reason = baselineRaw['reason'];
+    if (typeof reason !== 'string' || !reason.trim()) {
+      throw new Error(`${TARGET_MANIFEST_FILENAME}: provenanceBaseline.reason must be a non-empty string`);
+    }
+    const certifiedBy = requireStringArray(baselineRaw['certifiedBy'], 'provenanceBaseline.certifiedBy');
+    provenanceBaseline = { commit, reason, certifiedBy };
+  }
+
   return {
     name,
     defaultBranch: strOr('defaultBranch', MANIFEST_DEFAULTS.defaultBranch),
@@ -259,6 +305,7 @@ export function parseTargetManifest(raw: unknown): TargetManifest {
     acceptance,
     promptsDir: strOr('promptsDir', MANIFEST_DEFAULTS.promptsDir),
     buildTimeoutMinutes: (buildTimeout as number | undefined) ?? MANIFEST_DEFAULTS.buildTimeoutMinutes,
+    ...(provenanceBaseline !== undefined ? { provenanceBaseline } : {}),
   };
 }
 

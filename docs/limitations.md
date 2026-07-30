@@ -60,7 +60,7 @@ says exist are checked the same way, against the symbol that backs them.
 ## Event schema evolution
 
 - **The envelope is versioned; there is still no upcaster.** Every event now carries a `v` stamped by
-  the single construction path (`packages/core/src/schema.ts:1047`<!--cite:makeEventStampsVersion-->), at
+  the single construction path (`packages/core/src/schema.ts:1068`<!--cite:makeEventStampsVersion-->), at
   `LEDGER_SCHEMA_VERSION` = **1**<!--pin:LEDGER_SCHEMA_VERSION-->; an absent `v` on a legacy line reads
   as 1. What does **not** exist is any migration machinery: no upcaster, no per-type payload version,
   no re-interpretation step in the fold. *Bounded:* the fold reads fields defensively (absent or
@@ -238,6 +238,27 @@ says exist are checked the same way, against the symbol that backs them.
   does not linger. *What remains:* the original capture text is still on the trail and still the right
   thing to read when you want to know what was *asked*, as opposed to what is being *built* — the two
   legitimately differ after a steer, and no surface tries to reconcile them.
+
+## Provenance verification checks receipts, not correctness
+
+- **Provenance verification proves a receipt exists, not that the work behind it was good.**
+  Mechanical provenance checking (WI-232) walks the commits on a target's default branch above a
+  declared baseline and confirms each one has a matching ledger receipt and gate evidence, at the
+  local promotion boundaries it actually runs on — a `git push`, today. *Bounded:* it is accident
+  prevention, not an adversarial security boundary. The verifier, the ledger, and the agents doing
+  the work all run under the same local operator identity, so a process with local shell access
+  could forge a receipt or move the declared baseline; nothing here is cryptographically signed or
+  attested. It also does not run at every possible promotion boundary — a deploy step or a
+  dist-drift self-heal that turns a local, ungoverned branch tip into the running runtime is a real
+  path to production, and nothing checks it there today: not blocked, and not automatically
+  detected either, only reachable by running the verifier by hand. Blocking it was rejected on
+  purpose, because a fail-closed check inside a recovery path risks wedging the plane instead of
+  protecting it; a reported health finding is the intended shape and is not built yet. And it only verifies forward
+  from the declared baseline; commits at or below that line are accepted on the strength of the
+  baseline's own stated reasoning, not re-examined by the tool. *Matters when:* you read a green
+  provenance check as a correctness or security guarantee rather than what it is — evidence that
+  the plane's own process was followed, checked against records the same identity that did the work
+  also controls.
 
 ## Deliberately deferred (not bugs — scope)
 

@@ -55,4 +55,15 @@ you hand it (ancestor commits outside that range go unexamined — see
 — branch and tag names, reflog, git notes, and semantic residue that no regex can
 describe are all out of its reach.
 
+## Provenance gate
+
+The same `sh scripts/install-hooks.sh` step also arms a provenance gate on `git push`,
+for repos registered as a loopkit target (this one included). It checks that every
+commit above a declared baseline has a real ledger receipt and gate evidence before
+the push is allowed through — see `AGENTS.md` ("Mechanically enforced (WI-232)") for
+the full rule. It needs a built `packages/core/dist` to run and blocks rather than
+skips if that's missing. Outside contributors are not required to carry anything
+per commit for this — since PRs aren't accepted here anyway (above), it mainly
+matters if you're driving the plane against your own fork or target repo.
+
 Thanks for stopping by. 🙌

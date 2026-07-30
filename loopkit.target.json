@@ -11,5 +11,10 @@
   },
   "depsWorkdirs": [
     "."
-  ]
+  ],
+  "provenanceBaseline": {
+    "commit": "09bf969",
+    "reason": "Provenance is verified from here forward. Everything at or below this commit predates mechanical verification: a six-day range of commits landed on the default branch outside the plane, and was retro-certified afterwards by review rather than by a gate receipt. The line is an operator assertion recorded here on purpose — the alternative, a bare SHA hardcoded in source, is not auditable.",
+    "certifiedBy": ["WI-225", "WI-226", "WI-227", "WI-228", "WI-229", "WI-230", "WI-231"]
+  }
 }
