@@ -3565,6 +3565,80 @@ test('reactor: exit-file present + worktree STILL present is NOT limbo-reaped ev
   }
 });
 
+// ── WI-257: the live reactor beat wires a real provenance probe into stepDoctor ─────
+// WI-239/WI-240 added runDoctor's provenanceProbe param, but stepDoctor never passed one —
+// the beat-cadence check only ever ran via a hand-run `loopctl doctor`. These prove the
+// reactor beat now surfaces a provenanceFinding end-to-end (report-only: never an event).
+
+test('reactor: an injected provenanceProbe surfaces its finding on the doctor step detail (real wiring, not the inert default)', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
+    ]);
+
+    const fakeReport = {
+      status: 'uncovered' as const,
+      commits: [],
+      counts: { verified: 0, 'receipt-without-gate': 0, 'break-glass': 0, uncovered: 1 },
+      exitCode: 1,
+      lines: ['provenance: UNCOVERED — 1 commit(s) checked'],
+    };
+    const provenanceProbe = () => fakeReport;
+
+    const result = await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: null,
+      config: makeTestConfig(),
+      provenanceProbe,
+    });
+
+    const doctorStep = result.steps.find(s => s.step === 'doctor');
+    assert.ok(doctorStep, 'doctor step should exist');
+    assert.ok(doctorStep.ok, `doctor step failed: ${doctorStep.detail}`);
+    assert.match(doctorStep.detail ?? '', /provenance: uncovered/,
+      'a reactor-invoked doctor run carries the injected provenanceFinding through to its step detail');
+
+    // Report-only: no event of any kind was written for the provenance finding itself.
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.data && JSON.stringify(e.data).includes('provenance')).length, 0,
+      'a provenance finding must never itself become a ledger event — report-only (WI-239/WI-240 doctrine)');
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test('reactor: with no provenanceProbe injected, stepDoctor falls back to the REAL probe — an unregistered repo yields no finding (never a false report)', async () => {
+  const ledgerDir = makeTempDir();
+  const repoRoot = makeTempDir();
+  try {
+    await seedLedger(ledgerDir, [
+      makeEvent('cli', 'WI-001', 'item.captured', { source: 'cli', text: 'x' }, '2026-01-01T00:00:00Z'),
+    ]);
+
+    // No provenanceProbe injected AND no target.registered event for this repoRoot — the real
+    // probe's selfTargetReg lookup (foldResult.targets.byRepoPath) finds nothing, so it must
+    // decline (null), same as cmdDoctor's own gatherSelfProvenance guard. Proves the real
+    // wiring path runs (not just the inert doctor.ts default) without needing a live git repo.
+    const result = await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on',
+      provider: null,
+      config: makeTestConfig(),
+    });
+
+    const doctorStep = result.steps.find(s => s.step === 'doctor');
+    assert.ok(doctorStep, 'doctor step should exist');
+    assert.ok(doctorStep.ok, `doctor step failed: ${doctorStep.detail}`);
+    assert.doesNotMatch(doctorStep.detail ?? '', /provenance:/,
+      'an unregistered repo yields no provenance finding — never a false report');
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 // ── stall-reap kill target: pid vs. detached pgid ───────────────────────────────────
 // The stall-recovery guard must SIGTERM the live worker before salvage reads its worktree.
 // A legacy synchronous build records only a `pid`; a detached build (setsid) records only a
