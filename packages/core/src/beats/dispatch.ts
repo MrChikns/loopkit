@@ -67,7 +67,13 @@ import { LedgerMaxIds } from '../doctor.js';
 import { readEpochStampFile } from '../slo.js';
 import { withLock } from '../ledger.js';
 import { mintSessionId } from '../session.js';
-import { requireCleanCheckout } from '../git-safety.js';
+import {
+  requireCleanCheckout,
+  isDependencyPlumbing,
+  isWorkerManifest,
+  isPlaneRuntimeEvidence,
+  isPlaneArtifact,
+} from '../git-safety.js';
 import { isItemDependencyReady, projectDependencyGraph } from '../flow.js';
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1018,39 @@ export function constructTargetMergeCandidate(
 }
 
 /**
+ * A prior `closeMergedCluster` call that crashed between its detach (below) and its restore
+ * checkout leaves the primary checkout permanently detached, HEAD exactly at the destination
+ * branch's own tip, tree clean (WI-222 W4/D19). That is recoverable: an ordinary `git checkout
+ * <mergeDestination>` from there is a pure ref-flip (HEAD already equals the branch tip and the
+ * tree is already clean — never a reset, never data-losing), and it re-attaches the checkout so
+ * merges stop drifting the working tree away from what the branch actually publishes.
+ *
+ * Deliberately narrow: only fires when the tree is clean AND HEAD equals `expectedDestinationSha`
+ * exactly. A detach at some OTHER commit is not proven to be this crash artifact (could be a
+ * deliberate operator inspection mid-detach) — leave it alone rather than guess.
+ */
+function reattachIfCleanlyDetachedAtDestinationTip(
+  gitRoot: string,
+  mergeDestination: string,
+  expectedDestinationSha: string,
+): { reattached: boolean; reason?: string } {
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: gitRoot, stdio: 'pipe' });
+  const headSha = head.status === 0 ? head.stdout.toString().trim() : '';
+  if (!headSha || headSha !== expectedDestinationSha) return { reattached: false };
+  const reattach = spawnSync('git', ['checkout', mergeDestination], { cwd: gitRoot, stdio: 'pipe' });
+  if (reattach.status !== 0) {
+    return {
+      reattached: false,
+      reason: `found the primary checkout cleanly detached at destination tip ${expectedDestinationSha} `
+        + `(a prior publish likely crashed between detach and restore) but re-attach failed: ${
+          reattach.stderr?.toString().trim() ?? 'unknown'
+        }`,
+    };
+  }
+  return { reattached: true };
+}
+
+/**
  * Atomically publish an already-constructed and gated merge candidate. `git update-ref` compares
  * the destination against the exact SHA the gate covered; a losing writer can never land stale
  * state. Only after CAS succeeds do we synchronize a clean primary checkout of that destination.
@@ -1022,7 +1061,7 @@ export function closeMergedCluster(
   mergeDestination: string,
   expectedDestinationSha: string,
   hooks?: { beforePublish?: () => void; afterPublishBeforeSync?: () => void },
-): { ok: true; commit: string; checkoutSynced: boolean; warning?: string }
+): { ok: true; commit: string; checkoutSynced: boolean; syncFailureReason?: 'editor-write-preserved'; warning?: string }
   | { ok: false; stage: 'precondition'; reason: string }
   | { ok: false; stage: 'destination-moved'; reason: string }
   | { ok: false; stage: 'publish'; reason: string } {
@@ -1040,9 +1079,13 @@ export function closeMergedCluster(
   if (!precondition.ok) {
     return { ok: false, stage: 'precondition', reason: precondition.reason };
   }
+  const reattach = reattachIfCleanlyDetachedAtDestinationTip(gitRoot, mergeDestination, expectedDestinationSha);
+  if (reattach.reason) {
+    return { ok: false, stage: 'precondition', reason: reattach.reason };
+  }
   const checkedOut = spawnSync('git', ['branch', '--show-current'], { cwd: gitRoot, stdio: 'pipe' });
   const checkedOutBranch = checkedOut.status === 0 ? checkedOut.stdout.toString().trim() : '';
-  const mustRestoreDestination = checkedOutBranch === mergeDestination;
+  const mustRestoreDestination = reattach.reattached || checkedOutBranch === mergeDestination;
   if (mustRestoreDestination) {
     // Detach the clean primary tree from the ref before CAS. After publication, an ordinary
     // checkout reattaches it and lets Git—not a forced reset—refuse any overwrite if an editor
@@ -1096,6 +1139,10 @@ export function closeMergedCluster(
   }
 
   if (!mustRestoreDestination) {
+    // The primary checkout was never on the destination branch to begin with (a different
+    // branch, or a detach at some commit other than the destination tip) — nothing to
+    // restore, so there is no "edit preserved" to report. Distinct from the sync-refused
+    // case below: that one really did stop an overwrite of an intervening editor write.
     return { ok: true, commit: candidateMergeSha, checkoutSynced: false };
   }
 
@@ -1106,6 +1153,7 @@ export function closeMergedCluster(
       ok: true,
       commit: candidateMergeSha,
       checkoutSynced: false,
+      syncFailureReason: 'editor-write-preserved',
       warning: `published '${mergeDestination}' but ordinary checkout preserved an intervening edit: ${
         sync.stderr?.toString().trim() ?? 'unknown'
       }`,
@@ -1302,25 +1350,11 @@ export function operatorNotesFor(allEvents: LedgerEvent[], itemId: string): stri
  * checked something else out. Either is a no-commit-shaped failure, not a green build.
  * Returns null when clean, or a human-readable reason string when not.
  */
-/** Dependency plumbing is never work product. setupWorktreeDeps provisions node_modules
- *  as SYMLINKS, and gitignore's dir-only `node_modules/` pattern does not match symlinks —
- *  so they surface as `??` in porcelain and would otherwise wrongly park a green committed build. */
-export function isDependencyPlumbing(porcelainLine: string): boolean {
-  const p = porcelainLine.slice(3).trim();
-  return p === 'node_modules' || p === 'node_modules/' ||
-    p.endsWith('/node_modules') || p.endsWith('/node_modules/') ||
-    p.startsWith('node_modules/') || p.includes('/node_modules/');
-}
-
-/**
- * Worker manifests are left at the worktree root by the worker and must
- * not trigger the dirty-tree gate. They are never committed (excluded by root .gitignore),
- * so fixture repos that lack the root gitignore need this exemption as defence-in-depth.
- */
-export function isWorkerManifest(porcelainLine: string): boolean {
-  const p = porcelainLine.slice(3).trim();
-  return /^MANIFEST-WI-[A-Za-z0-9-]+\.json$/.test(p);
-}
+// isDependencyPlumbing / isWorkerManifest / isPlaneRuntimeEvidence / isPlaneArtifact now
+// live in ../git-safety.ts (WI-222) — requireCleanCheckout needs the same predicates, so
+// they moved to the lower-level module both this file and git-safety.ts depend on, rather
+// than forking a second copy here. Re-exported for existing callers (salvage.ts, tests).
+export { isDependencyPlumbing, isWorkerManifest, isPlaneRuntimeEvidence, isPlaneArtifact };
 
 function verifyWorktreeState(wtPath: string, expectedBranch: string): string | null {
   const cur = spawnSync('git', ['branch', '--show-current'], { cwd: wtPath, stdio: 'pipe' });
@@ -3032,9 +3066,17 @@ async function finalizeTargetBuild(
     expectedCommit: mergeCommit,
     ...(!closeResult.checkoutSynced && manifest.deployCommand
       ? {
-        preflightFailure:
-          `deploy handoff blocked: target '${manifest.name}' published ${mergeCommit}, but its primary checkout ` +
-          `could not synchronize without overwriting an intervening editor write; no deploy command was launched`,
+        // Two genuinely different causes (WI-222 D20): a real editor write mid-boundary is
+        // an operator-caused, self-clearing stop (their next ordinary checkout resolves it).
+        // The other shape — checkout wasn't on the destination branch to sync in the first
+        // place — is a plane/config state, not an editor edit; blaming an edit here sends the
+        // operator hunting a write that never happened.
+        preflightFailure: closeResult.syncFailureReason === 'editor-write-preserved'
+          ? `deploy handoff blocked: target '${manifest.name}' published ${mergeCommit}, but its primary checkout ` +
+            `could not synchronize without overwriting an intervening editor write; no deploy command was launched`
+          : `deploy handoff blocked: target '${manifest.name}' published ${mergeCommit}, but its primary checkout ` +
+            `was not on '${manifest.defaultBranch}' to synchronize (run 'git checkout ${manifest.defaultBranch}' ` +
+            `in the target checkout); no deploy command was launched`,
       }
       : {}),
   });

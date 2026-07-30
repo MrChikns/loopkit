@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 import { makeEvent, LedgerEvent, ItemMergedData, MERGE_EVIDENCE_FILES_CAP } from '../src/schema.js';
 import { fold } from '../src/fold.js';
@@ -746,6 +747,64 @@ test('deploy: fireDeployOnMerge runs nothing when deployCommand is empty', async
     const deadline = Date.now() + 2000;
     while (!existsSync(sentinel) && Date.now() < deadline) { /* spin briefly */ }
     assert.equal(existsSync(sentinel), true, 'a non-empty deployCommand does run');
+  } finally {
+    cleanDir(dir);
+  }
+});
+
+test('deploy: fireDeployOnMerge preflight does not refuse on plane runtime evidence (WI-222 D22)', async () => {
+  const dir = makeTempDir();
+  try {
+    const g = (args: string[]) => spawnSync('git', args, { cwd: dir, stdio: 'pipe' });
+    g(['init', '-b', 'main']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(dir, 'tracked.txt'), 'base\n', 'utf8');
+    g(['add', 'tracked.txt']);
+    g(['commit', '-m', 'init']);
+    const head = g(['rev-parse', 'HEAD']).stdout.toString().trim();
+
+    // Same D22 scenario as the checkout-sync guard: a target repo that doesn't gitignore
+    // the plane's own runtime evidence must not have the deploy preflight refuse on it.
+    mkdirSync(join(dir, '.ai', 'runs', 'loopkit'), { recursive: true });
+    writeFileSync(join(dir, '.ai', 'runs', 'loopkit', 'WI-1-attempt-1.log'), 'log\n', 'utf8');
+
+    const sentinel = join(dir, 'deployed.txt');
+    const result = await fireDeployOnMerge(dir, `touch ${sentinel}`, ['WI-001'], undefined, head);
+    assert.equal(result.started, true,
+      `plane-artifact-only residue must not block the deploy preflight: ${
+        result.started ? '' : result.reason
+      }`);
+    const deadline = Date.now() + 2000;
+    while (!existsSync(sentinel) && Date.now() < deadline) { /* spin briefly */ }
+    assert.equal(existsSync(sentinel), true, 'the deploy command must actually run once the preflight passes');
+  } finally {
+    cleanDir(dir);
+  }
+});
+
+test('deploy: fireDeployOnMerge preflight still refuses when genuine operator work is uncommitted', async () => {
+  const dir = makeTempDir();
+  try {
+    const g = (args: string[]) => spawnSync('git', args, { cwd: dir, stdio: 'pipe' });
+    g(['init', '-b', 'main']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    writeFileSync(join(dir, 'tracked.txt'), 'base\n', 'utf8');
+    g(['add', 'tracked.txt']);
+    g(['commit', '-m', 'init']);
+    const head = g(['rev-parse', 'HEAD']).stdout.toString().trim();
+
+    // Genuine uncommitted operator work — must still block the deploy preflight.
+    writeFileSync(join(dir, 'tracked.txt'), 'operator draft\n', 'utf8');
+
+    const sentinel = join(dir, 'deployed.txt');
+    const result = await fireDeployOnMerge(dir, `touch ${sentinel}`, ['WI-001'], undefined, head);
+    assert.equal(result.started, false, 'real uncommitted work must still refuse the deploy preflight');
+    if (result.started) return;
+    assert.match(result.reason, /checkout changes/);
+    assert.match(result.reason, /tracked\.txt/);
+    assert.equal(existsSync(sentinel), false, 'the deploy command must not run when the preflight refuses');
   } finally {
     cleanDir(dir);
   }

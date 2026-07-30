@@ -41,6 +41,7 @@ import {
   existsSync, readFileSync, readdirSync, mkdirSync, symlinkSync, lstatSync,
 } from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
+import { isPlaneArtifact } from '../git-safety.js';
 
 /** A local dependency discovered in a workdir's package.json (`file:` spec or workspace). */
 interface FileDep {
@@ -428,8 +429,15 @@ export async function fireDeployOnMerge(
       { cwd: repoRoot, encoding: 'utf8' },
     );
     const observed = head.status === 0 ? head.stdout.trim() : '';
-    const residue = status.status === 0 ? status.stdout.trim() : 'git status failed';
-    if (observed !== expectedCommit || residue) {
+    // Same artifact filter as requireCleanCheckout (git-safety.ts, WI-222): a target repo
+    // that doesn't gitignore the plane's own .ai/runs evidence or node_modules symlinks
+    // must never have this preflight refuse on the plane's own writes.
+    const residueLines = status.status === 0
+      ? status.stdout.split('\n').filter(Boolean).filter(l => !isPlaneArtifact(l))
+      : [];
+    const statusFailed = status.status !== 0;
+    const residue = statusFailed ? 'git status failed' : residueLines.join('\n');
+    if (observed !== expectedCommit || statusFailed || residueLines.length > 0) {
       return {
         started: false,
         reason:
