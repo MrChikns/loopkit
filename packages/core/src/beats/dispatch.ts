@@ -49,7 +49,7 @@ import { setupWorktreeDeps } from './worktree-deps.js';
 import { requestDeployOnMerge } from '../deploy.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
-import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
+import { captureWorktreeDiff, buildJudgePrompt, buildGateResultSummary, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
 import { runClaimAuditGate, preMergeRiskHoldReason, AcceptanceTierClassifyConfig } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
@@ -2060,7 +2060,8 @@ export async function runPostBuildGuards(
   let judgeVerdict: JudgeStageResult | undefined;
   if (config.judge && ctx.judge?.provider) {
     const diff = captureWorktreeDiff(ctx.wtPath, ctx.baseSha, 20_000);
-    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches, ctx.judge.itemCriteria);
+    const gateSummary = buildGateResultSummary(gateOutcome, ctx.gateCommand);
+    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches, ctx.judge.itemCriteria, gateSummary);
     try {
       const judgeRunResult = await runJudge(ctx.judge.provider, ctx.judge.model, prompt, ctx.judge.timeoutMs);
       judgeVerdict = { run: judgeRunResult, model: ctx.judge.model, providerName: ctx.judge.provider.name };
@@ -5151,7 +5152,8 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             const finalBase = headBefore !== branchBase ? headBefore : branchBase;
             const diff = captureWorktreeDiff(w.wtPath, finalBase, judgeMaxDiffChars);
 
-            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches, r.criteria);
+            const gateSummary = buildGateResultSummary(gateOutcome, gateId);
+            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches, r.criteria, gateSummary);
 
             let judgeRunResult;
             const injected = opts.judgeResults?.get(r.id);

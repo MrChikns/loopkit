@@ -96,13 +96,65 @@ export function captureCommitRangeDiff(
 }
 
 // ---------------------------------------------------------------------------
+// Gate-result summary (WI-234)
+// ---------------------------------------------------------------------------
+
+const GATE_SUMMARY_TRUNCATION_MARKER = '\n[gate output truncated]';
+const GATE_SUMMARY_MAX_CHARS = 600;
+
+/**
+ * Best-effort extraction of a test pass/fail count from raw gate output. Gate commands vary
+ * (npm test runners, custom scripts), so this recognizes a few common shapes
+ * (`N passing` / `N failing`, `tests: N`) and returns undefined rather than guessing when
+ * nothing matches — an absent count is honest; a wrong one is not.
+ */
+function extractTestCounts(output: string): { passing?: number; failing?: number } {
+  const passingMatch = /(\d+)\s+passing/i.exec(output);
+  const failingMatch = /(\d+)\s+failing/i.exec(output);
+  const result: { passing?: number; failing?: number } = {};
+  if (passingMatch) result.passing = parseInt(passingMatch[1]!, 10);
+  if (failingMatch) result.failing = parseInt(failingMatch[1]!, 10);
+  return result;
+}
+
+/**
+ * Build a compact gate-result summary for the judge prompt (WI-234). The judge reviews the diff
+ * blind to whether the gate (build/tests) actually passed — a real objective signal that never
+ * reached it before. This intentionally carries ONLY the gate's own pass/fail verdict, reason,
+ * and (best-effort) test counts — NEVER the builder's manifest, transcript, or claims, which
+ * would compromise the judge's independence from the builder (see this file's header).
+ *
+ * Returns undefined when no gate outcome is available (e.g. the judge is invoked outside a
+ * gated pipeline) so callers can omit the section entirely rather than print an empty one.
+ */
+export function buildGateResultSummary(
+  gateOutcome: { passed: boolean; reason: string; output?: string } | undefined,
+  gateCommand?: string,
+): string | undefined {
+  if (!gateOutcome) return undefined;
+  const counts = extractTestCounts(gateOutcome.output ?? '');
+  const lines: string[] = [];
+  lines.push(`Gate: ${gateOutcome.passed ? 'PASSED' : 'FAILED'}`);
+  if (gateCommand) lines.push(`Command: ${gateCommand}`);
+  if (counts.passing !== undefined || counts.failing !== undefined) {
+    lines.push(`Tests: ${counts.passing ?? '?'} passing, ${counts.failing ?? '?'} failing`);
+  }
+  lines.push(`Reason: ${gateOutcome.reason}`);
+  const combined = lines.join('\n');
+  if (combined.length <= GATE_SUMMARY_MAX_CHARS) return combined;
+  const keep = GATE_SUMMARY_MAX_CHARS - GATE_SUMMARY_TRUNCATION_MARKER.length;
+  return combined.slice(0, Math.max(0, keep)) + GATE_SUMMARY_TRUNCATION_MARKER;
+}
+
+// ---------------------------------------------------------------------------
 // Judge prompt builder
 // ---------------------------------------------------------------------------
 
 /**
  * Build the judge prompt. The judge is an independent reviewer who did NOT write
  * the code. It sees ONLY the work-item spec, its acceptance criteria, the declared Touches,
- * and the diff. No tools, no repo access, no builder transcript.
+ * a compact gate-result summary (pass/fail + counts, WI-234 — NEVER the builder's manifest or
+ * transcript), and the diff. No tools, no repo access, no builder transcript.
  *
  * WHY CRITERIA CHANGE WHAT SPEC_SATISFIED MEANS (WI-193 win 2). Without them the judge grades
  * the diff against a free-prose `spec` — a narrative that is often written *alongside* the work
@@ -131,9 +183,16 @@ export function buildJudgePrompt(
   diff: string,
   touches?: string,
   criteria?: string[],
+  gateSummary?: string,
 ): string {
   const touchesLine = touches
     ? `Declared Touches (code area the change is authorized to modify): ${touches}\n`
+    : '';
+  const gateBlock = gateSummary
+    ? `
+GATE RESULT (objective evidence — NOT the builder's claims):
+${gateSummary}
+`
     : '';
   const hasCriteria = Array.isArray(criteria) && criteria.length > 0;
   const criteriaBlock = hasCriteria
@@ -161,7 +220,7 @@ WORK ITEM: ${itemId}
 ${touchesLine}
 WORK ITEM SPEC:
 ${spec}
-${criteriaBlock}
+${criteriaBlock}${gateBlock}
 THE DIFF (git diff --stat + patch, possibly truncated):
 ${diff || '(empty diff — no changes detected)'}
 

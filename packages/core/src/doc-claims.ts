@@ -766,8 +766,12 @@ export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
     declaration: /^\s{2}criteria\?: string\[\],$/,
     referencedBy: [
       {
+        // WI-234 appended a trailing gateSummary arg after criteria (the gate-result summary,
+        // itself independent evidence — never the builder's own claims), so the call no longer
+        // ends the line at `criteria)`. Match `criteria` followed by a comma (another arg
+        // follows) OR the closing paren, so either call shape still proves criteria is passed.
         file: 'dispatch',
-        pattern: /buildJudgePrompt\(.*criteria\)/i,
+        pattern: /buildJudgePrompt\(.*criteria[,)]/i,
         proves: "the lane that runs the judge actually passes the item's criteria into the prompt",
       },
     ],

@@ -101,17 +101,17 @@ flowchart TD
 [`lane-matrix.md`](lane-matrix.md) — a table derived by static analysis of each lane's own function
 span and pinned by its own drift test. If this prose and that table disagree, the table is right.
 
-- **Planning** (`packages/core/src/beats/dispatch.ts:2436`<!--cite:runPlanningLane-->) — runs *before* the
+- **Planning** (`packages/core/src/beats/dispatch.ts:2437`<!--cite:runPlanningLane-->) — runs *before* the
   engineering and target picks, spawns serially, never opens a worktree and never writes a file. Its
   only output is child work items. Correspondingly it has no commit step, no gate and no judge.
-- **Target** (`packages/core/src/beats/dispatch.ts:3139`<!--cite:runTargetLane-->) — a targeted item is
+- **Target** (`packages/core/src/beats/dispatch.ts:3140`<!--cite:runTargetLane-->) — a targeted item is
   built in **its own repo**, gated by **that target's** declared gate command, and merged into that
   target's default branch. It runs serially and never touches the plane's batch machinery. At the
   merge terminal it re-reads that default branch; if it moved, the target lane rebases, recomputes
   the build's actual changed files, constructs the exact no-fast-forward candidate and runs the
   target gate on that exact commit. Publication is an atomic compare-and-swap; a losing writer
   loops through replay, candidate construction and gating again
-  (`packages/core/src/beats/dispatch.ts:2897`<!--cite:targetPostIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:2898`<!--cite:targetPostIntegrationRegate-->).
 - **Engineering** — the lane Plates 04–08 describe in detail. The only lane with the scout stage, the
   spine guard and a push step; it shares the post-integration re-gate invariant with target.
 - An **attended drain** is not a fourth lane. When you drive the plane by hand, a coordinator agent
@@ -225,14 +225,14 @@ That is the only reason a CLI drain and a running beat can overlap safely.
 
 **Degraded modes stop picks without stopping the beat.** A daily-spend ceiling, or any
 `provider:window` quota reading at or above **80**<!--pin:quotaThresholdPct-->% of its ceiling
-(`packages/core/src/beats/dispatch.ts:3775`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
+(`packages/core/src/beats/dispatch.ts:3776`<!--cite:quotaDegraded-->), flips dispatch to collect-only for
 that beat: already-finished detached builds still drain, nothing new spawns. Fail-open — no quota
 snapshots means no degradation.
 
 **Provider health is a chain, not a single provider.** In dispatch, the auth preflight and a
 mid-build auth failure mark the current builder provider unhealthy; preflight then falls over to the
 next tool-capable provider
-(`packages/core/src/beats/dispatch.ts:3956`<!--cite:providerFallback-->), and a later successful
+(`packages/core/src/beats/dispatch.ts:3957`<!--cite:providerFallback-->), and a later successful
 dispatch preflight clears the marker. With no healthy provider for an item's sensitivity tier, the
 item parks rather than routing to a disallowed one. Reactor content-call errors use their own
 per-item backoff; they do not trip this shared provider breaker.
@@ -258,7 +258,7 @@ variables, transcripts, or files a provider may later read through tools.
   **1**<!--pin:batchMaxItems-->. Raised above 1, dispatch deliberately pulls *overlapping*, small items
   — sonnet-model, not a blocker, spec under **1500**<!--pin:BATCH_SPEC_MAX--> characters — into one
   worktree so they share one gate and one merge
-  (`packages/core/src/beats/dispatch.ts:3900`<!--cite:batchColocation-->). Overlap therefore has two
+  (`packages/core/src/beats/dispatch.ts:3901`<!--cite:batchColocation-->). Overlap therefore has two
   outcomes, not one: co-location if it is enabled and the items are small, waiting otherwise.
 - ⚪ **Detached dispatch is off by default.** When `execution.detachedDispatch` is enabled and the
   selected builder is a Claude CLI provider, eligible engineering groups write on-disk exit files
@@ -395,7 +395,7 @@ redirect the destination or invent a publication step.
   an item carries criteria the judge is handed them as the bar, told they were written before the diff
   existed, and asked to walk them one at a time — `yes` only if *every* one is met, and a criterion it
   cannot verify from the diff counts as unmet
-  (`packages/core/src/judge.ts:153`<!--cite:judgeCriteriaBar-->). Grading free prose was the weak
+  (`packages/core/src/judge.ts:212`<!--cite:judgeCriteriaBar-->). Grading free prose was the weak
   version of this check: a `spec` written alongside the work drifts toward describing what was built,
   so the judge ended up asking whether the diff resembled its own description. An item with no
   criteria (captured before they were required) gets the previous prompt unchanged.
@@ -415,7 +415,7 @@ redirect the destination or invent a publication step.
 - The scope check forgives a test file added beside the code it changed — in every repo shape, not just
   a monorepo. That exemption was monorepo-only until recently.
 - 🔵 A crashed or stalled worker has its uncommitted work captured as a salvage patch before the
-  worktree is removed (`packages/core/src/beats/dispatch.ts:4648`<!--cite:salvageOnCrash-->), and the next
+  worktree is removed (`packages/core/src/beats/dispatch.ts:4649`<!--cite:salvageOnCrash-->), and the next
   attempt resumes from it.
 
 ---
@@ -457,7 +457,7 @@ flowchart TD
 
 - The invariant: **no build reaches its destination without a gate covering every commit that landed
   since its branch point**, including parallel merges from the same beat
-  (`packages/core/src/beats/dispatch.ts:5103`<!--cite:postIntegrationRegate-->).
+  (`packages/core/src/beats/dispatch.ts:5104`<!--cite:postIntegrationRegate-->).
 - The target lane applies the same invariant with its own manifest gate: re-read destination,
   rebase when needed, construct the exact no-fast-forward commit, gate that commit, then publish
   the default-branch ref with an expected-old-SHA compare-and-swap. A CAS loss repeats the whole
@@ -467,9 +467,9 @@ flowchart TD
 - The push race is a *second*, later collision — master moved between the local merge and the push.
   Recovery re-fetches, verifies that the primary checkout has no staged, unstaged, or untracked
   operator state, then hard-resets it onto the new tip
-  (`packages/core/src/beats/dispatch.ts:5293`<!--cite:pushRaceReset-->), re-merges the approved branch and
+  (`packages/core/src/beats/dispatch.ts:5295`<!--cite:pushRaceReset-->), re-merges the approved branch and
   re-gates against the **fresh** base before retrying the push
-  (`packages/core/src/beats/dispatch.ts:5319`<!--cite:pushRaceRegate-->). A dirty checkout stops the
+  (`packages/core/src/beats/dispatch.ts:5321`<!--cite:pushRaceRegate-->). A dirty checkout stops the
   recovery and records exact porcelain path evidence instead of discarding it.
 - Every failure here is a park, never a force. A conflict, red candidate gate or exhausted CAS retry
   stops the item; nothing is published past a disagreement.
@@ -542,11 +542,11 @@ and are promoted only by a manual config change after burn-in.
 - 🔵 **A lone detached targeted build used to strand in `building` forever** — no gate, no merge, no
   park, and a queue that went quiet for no visible reason. A guard existed that runs the target lane
   when a prior beat left a detached targeted build in flight
-  (`packages/core/src/beats/dispatch.ts:3734`<!--cite:detachedTargetGuard-->, per
+  (`packages/core/src/beats/dispatch.ts:3735`<!--cite:detachedTargetGuard-->, per
   [ADR-008](decisions/ADR-008-detached-dispatch-staging.md) §3) but it sat *behind* the beat's early
   returns, so it was unreachable in exactly its own scenario: the generic collector deliberately skips
   targeted items, correctly, since they merge into a different repo
-  (`packages/core/src/beats/dispatch.ts:3434`<!--cite:collectorSkipsTargets-->), leaving nothing
+  (`packages/core/src/beats/dispatch.ts:3435`<!--cite:collectorSkipsTargets-->), leaving nothing
   collected and nothing queued. WI-178 hoisted the guard above **four** such returns — empty queue,
   daily budget, quota pressure, and all-groups-conflicting — each of which stranded the identical
   shape. Deliberately a *reachability* fix and not a dwell timeout: the doctor already owns the
