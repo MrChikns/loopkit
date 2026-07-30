@@ -151,9 +151,9 @@ Commands:
   execution-config [--json] [--days N] Execution-config-by-model: accept rate, first-pass gate rate, cost/accept, retries/accept
   compact [--dry-run]                  Archive old ops segments
   audit <target-path> [--json]         Target-readiness hygiene check + autonomy tier
-  verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>] [--ref <refname>] [--json]
+  verify-provenance [<target-path>] [--target <name-or-path>] [--from <sha>] [--to <ref>] [--ref <refname>] [--json]
                                         Verify a commit range against the operator's real ledger (WI-232)
-  provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+  provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]
                                         Time-boxed, ledgered exception to provenance verification (WI-232)
   route <item>                         [not yet implemented]
   park|accept <item>                   [not yet implemented]
@@ -1564,16 +1564,48 @@ async function cmdAudit(rest: string[]): Promise<void> {
  * names. Fails loudly on a nonexistent path (before any git/ledger I/O); returns targetId:null
  * for an unregistered target rather than throwing — verifyProvenance's 'target-not-registered'
  * cause is the correct, load-bearing outcome for that case (see provenance.ts).
+ *
+ * WI-242 — `--target` here used to accept ONLY a filesystem path, the one command in the whole
+ * CLI where `--target` didn't mean a registered NAME (every other command — `loopctl new
+ * --target <name>`, `loopctl target add`'s registration — resolves `--target` through
+ * `byName`). On a safety control, that mismatch surfaced as a confusing "Target path not found"
+ * for the ordinary case of naming a target the way the rest of the CLI teaches you to. Fixed by
+ * trying `byName` FIRST when `--target` is given: a registered name resolves to its manifest's
+ * repoPath exactly like every other target-resolving command. A value that is not a registered
+ * name falls through to the PATH form unchanged — this is a deliberate alias, not a breaking
+ * change: the pre-push hook invokes `verify-provenance --target "$ROOT"` (an absolute path) and
+ * existing tests pass a path via `--target` too, and neither can collide with a registered
+ * target's `name` in practice. The bare positional form (`verify-provenance <path>`, no `--target`
+ * at all) is untouched — it was always path-only and stays that way.
  */
 async function resolveProvenanceTarget(
   rest: string[],
 ): Promise<{ repoPath: string; targetId: string | null; targetName: string }> {
   const targetFlag = getFlag(rest, '--target');
   const positional = positionals(rest, ['--target', '--from', '--to', '--ref']).find(a => !a.startsWith('--'));
+
+  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const result = fold(allEvents);
+
+  // --target as a registered NAME (the convention everywhere else in loopctl) — tried first,
+  // before any path resolution, so a name match never falls through to a confusing
+  // "path not found" for what is in fact a valid, registered target.
+  if (targetFlag !== undefined) {
+    const byName = result.targets.byName(targetFlag);
+    if (byName) {
+      return { repoPath: byName.repoPath, targetId: byName.targetId, targetName: byName.name };
+    }
+  }
+
+  // Alias: --target (unmatched as a name) or the bare positional, as a PATH — the original
+  // (and, for the positional form, only ever) behaviour.
   const rawPath = targetFlag ?? positional ?? REPO_ROOT;
   let repoPath = resolve(rawPath);
   if (!existsSync(repoPath)) {
-    console.error(`Target path not found: ${repoPath}`);
+    const asNameHint = targetFlag !== undefined
+      ? ` ('${targetFlag}' is also not a registered target name — run 'loopctl target list' to see what is)`
+      : '';
+    console.error(`Target path not found: ${repoPath}${asNameHint}`);
     process.exit(1);
   }
   // Normalize through `git rev-parse --show-toplevel`, exactly like `cmdTarget`'s `add` — on
@@ -1584,19 +1616,22 @@ async function resolveProvenanceTarget(
   const toplevel = spawnSync('git', ['-C', repoPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
   if (toplevel.status === 0 && toplevel.stdout.trim()) repoPath = toplevel.stdout.trim();
 
-  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
-  const result = fold(allEvents);
   const reg = result.targets.byRepoPath(repoPath);
   return { repoPath, targetId: reg?.targetId ?? null, targetName: reg?.name ?? repoPath };
 }
 
 /**
- * verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>]
+ * verify-provenance [<target-path>] [--target <name-or-path>] [--from <sha>] [--to <ref>]
  *                    [--ref <refname>] [--json]
  *
  * Verify a commit range against the operator's real ledger (see provenance.ts's module header
  * for WHY this exists). Exit codes are the API — 0 verified, 1 uncovered, 2 indeterminate
  * (fail-closed), 3 break-glass-open — never remapped here.
+ *
+ * `--target` accepts a registered target NAME (WI-242 — the convention every other loopctl
+ * command uses) OR a path (the original, still-supported alias); see
+ * resolveProvenanceTarget's doc comment for why both forms coexist. The bare positional form
+ * (`verify-provenance <path>`, no `--target`) is path-only, unchanged.
  */
 async function cmdVerifyProvenance(rest: string[]): Promise<void> {
   const asJson = hasFlag(rest, '--json');
@@ -1650,15 +1685,19 @@ async function cmdVerifyProvenance(rest: string[]): Promise<void> {
 }
 
 /**
- * provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+ * provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]
  *
  * The audited exception to commit-provenance verification (schema.ts's ProvenanceBreakGlassData
  * doc comment: a ledger event, never a commit-message trailer — a trailer is a self-declared
  * assertion, a ledger event is an operator act recorded where the audit lives). Every refusal
  * below happens BEFORE any ledger write.
+ *
+ * `--target` accepts a registered NAME or a path — see resolveProvenanceTarget (WI-242), shared
+ * verbatim with verify-provenance so the two commands can never disagree about which target a
+ * value names.
  */
 async function cmdProvenanceBreakGlass(rest: string[]): Promise<void> {
-  const usageLine = 'Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]';
+  const usageLine = 'Usage: loopctl provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]';
   const reason = getFlag(rest, '--reason');
   const hoursStr = getFlag(rest, '--hours');
 
@@ -1719,7 +1758,7 @@ async function cmdProvenance(rest: string[]): Promise<void> {
   if (sub === 'break-glass') {
     await cmdProvenanceBreakGlass(rest.slice(1));
   } else {
-    console.error('Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]');
+    console.error('Usage: loopctl provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]');
     process.exit(1);
   }
 }

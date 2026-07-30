@@ -180,6 +180,82 @@ test('verify-provenance: an unregistered target → exit 2 indeterminate', async
   }
 });
 
+// ---------------------------------------------------------------------------
+// WI-242: --target accepts a registered NAME (the convention everywhere else in loopctl),
+// aliasing (never replacing) the original path form.
+// ---------------------------------------------------------------------------
+
+test('verify-provenance --target <registered-name>: resolves the SAME target as the path form', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-target-name-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const { root, pinCommitSha } = makeTargetRepo(join(base, 'repo')); // manifest name: 'acme-web'
+    await runLoopctl(ledgerDir, 'target', 'add', root);
+    await receiptPinCommit(ledgerDir, pinCommitSha);
+    const commitSha = commitFile(root, 'a.txt', 'one\n', 'feature commit');
+    await runLoopctl(ledgerDir, 'append', 'gate.passed', '--item', 'WI-900', '--data', JSON.stringify({ tests: 'ok' }));
+    await runLoopctl(ledgerDir, 'append', 'item.merged', '--item', 'WI-900', '--data', JSON.stringify({ commit: commitSha }));
+
+    const byName = await runLoopctl(ledgerDir, 'verify-provenance', '--target', 'acme-web');
+    assert.equal(byName.code, 0, `expected exit 0, got ${byName.code}: ${byName.stdout}\n${byName.stderr}`);
+    assert.match(byName.stdout, /VERIFIED/);
+
+    const byPath = await runLoopctl(ledgerDir, 'verify-provenance', '--target', root);
+    assert.equal(byPath.code, byName.code, 'name form and path form must agree on the same target');
+    assert.equal(byPath.stdout, byName.stdout, 'name form and path form must produce an identical report');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('provenance break-glass --target <registered-name>: also resolves by name, same as verify-provenance', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-bg-target-name-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const { root } = makeTargetRepo(join(base, 'repo')); // manifest name: 'acme-web'
+    await runLoopctl(ledgerDir, 'target', 'add', root);
+
+    const out = await runLoopctl(ledgerDir, 'provenance', 'break-glass', '--target', 'acme-web', '--reason', 'operator hand-recovering by name');
+    assert.equal(out.code, 0, `expected exit 0, got ${out.code}: ${out.stdout}\n${out.stderr}`);
+    assert.match(out.stdout, /Granted break-glass/);
+
+    const events = await loadAllEvents(ledgerDir);
+    const grants = events.filter(e => e.type === 'provenance.break-glass');
+    assert.equal(grants.length, 1);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('verify-provenance --target <path> (UNCHANGED alias): a path that happens to not match any registered name still resolves as a path, exactly as before', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-target-path-alias-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const { root, pinCommitSha } = makeTargetRepo(join(base, 'repo'));
+    await runLoopctl(ledgerDir, 'target', 'add', root);
+    await receiptPinCommit(ledgerDir, pinCommitSha);
+
+    const out = await runLoopctl(ledgerDir, 'verify-provenance', '--target', root);
+    assert.equal(out.code, 0, `expected exit 0, got ${out.code}: ${out.stdout}\n${out.stderr}`);
+    assert.match(out.stdout, /VERIFIED/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('verify-provenance --target <unresolvable-value>: clear error naming BOTH failed resolutions (path AND name)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-target-unresolvable-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const out = await runLoopctl(ledgerDir, 'verify-provenance', '--target', 'no-such-target-anywhere');
+    assert.notEqual(out.code, 0);
+    assert.match(out.stderr, /Target path not found/);
+    assert.match(out.stderr, /not a registered target name/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('verify-provenance --ref refs/heads/some-topic-branch: not a promotion boundary, exit 0, and does NOT report verified', async () => {
   const base = mkdtempSync(join(tmpdir(), 'prov-topic-branch-'));
   const ledgerDir = join(base, 'ledger');
