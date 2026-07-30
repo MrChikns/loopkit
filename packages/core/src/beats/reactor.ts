@@ -45,7 +45,7 @@ import {
 import { getRunbook, RunbookContext, resolveHealMode } from '../runbooks.js';
 import { setupWorktreeDeps } from './worktree-deps.js';
 import { closeStalePendingDeploys, reconcileDeployIntents, requestDeployOnMerge } from '../deploy.js';
-import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity } from './dispatch.js';
+import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity, capPromptSection, PROMPT_SECTION_CAPS } from './dispatch.js';
 import { classifyParkForAutoApprove, parseOverstepReason, parseDependencyReason } from '../approval.js';
 import { classifyAcceptanceTier, splitTouches, acceptanceClassifyFiles, hasEvidenceGap } from '../acceptance.js';
 import { readTargetManifest, resolveRegisteredTarget, lookupRegisteredTarget } from '../target.js';
@@ -1528,8 +1528,11 @@ async function stepRoute(
 
       // Build a focused routing prompt for this item
       const attachPaths = resolveAttachmentPaths(rec.sourceText);
+      // WI-236: the same shared cap dispatch's buildPrompt/buildBatchPrompt use — the router
+      // inlines the item's raw captured TEXT and its attachment list with no mechanical cap
+      // otherwise, so one oversized capture would bloat the whole routing call.
       const attachSection = attachPaths.length > 0
-        ? `\n\nATTACHMENTS (operator uploaded — you MAY Read these image/file paths before classifying):\n${attachPaths.map(p => `- ${p}`).join('\n')}`
+        ? `\n\nATTACHMENTS (operator uploaded — you MAY Read these image/file paths before classifying):\n${capPromptSection(attachPaths.map(p => `- ${p}`).join('\n'), PROMPT_SECTION_CAPS.attachments, 'ATTACHMENTS')}`
         : '';
       // A spec-less 'queued' item that the operator unparked is an APPROVED decision-park: the
       // operator already answered "yes, do this". Bias it to build — never re-park it for
@@ -1552,7 +1555,10 @@ async function stepRoute(
       const relatedItemsSection = relatedItemsBody
         ? `\n\nRELATED IN-FLIGHT ITEMS (overlapping Touches or dependency edges — deterministic, not exhaustive):\n${relatedItemsBody}`
         : '';
-      const itemPrompt = `${promptPrefix}${routerPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}${relatedItemsSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
+      const itemText = rec.sourceText
+        ? capPromptSection(rec.sourceText, PROMPT_SECTION_CAPS.spec, 'TEXT')
+        : '(empty)';
+      const itemPrompt = `${promptPrefix}${routerPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${itemText}${attachSection}${approvalSection}${relatedItemsSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
 
       if (opts.dryRun) {
         out.push(makeEvent('reactor', rec.id, 'item.routed', {
