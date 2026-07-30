@@ -67,6 +67,38 @@ test('credential scanner: secret assignment covers bare and prefixed env/YAML/JS
   }
 });
 
+test('credential scanner: catches credential-shaped literals regardless of character class (WI-221)', () => {
+  const shapes: Array<[string, string]> = [
+    ['all-alphabetic token', 'api_key=QpfjxmvHazykobtnrLscdiweuKgnhx'],
+    ['low-distinct-character token', 'token=aaaaaaaaaaaaaaaaaaaa1111111111'],
+    ['normal mixed alphanumeric token', 'password=Nq3Rt7Vy1Wc5Zb9Df2Gh6Jk8Lm4Pq'],
+  ];
+  for (const [label, content] of shapes) {
+    assert.ok(
+      scanSecretRuleIds(content).includes('secret-assignment'),
+      `expected ${label} to be flagged: ${content.split(/[:=]/, 1)[0]}`,
+    );
+  }
+});
+
+test('invokeProvider: all-alphabetic and low-diversity credential assignments produce a BLOCKING verdict (WI-221)', async () => {
+  const shapes = [
+    'api_key=QpfjxmvHazykobtnrLscdiweuKgnhx',
+    'token=aaaaaaaaaaaaaaaaaaaa1111111111',
+  ];
+  for (const content of shapes) {
+    let calls = 0;
+    const provider = makeProvider('external', async () => {
+      calls++;
+      return { ok: true, text: 'unexpected' };
+    });
+    const result = await invokeProvider(provider, { prompt: content });
+    assert.equal(calls, 0, `provider.run must not fire for: ${content.split(/[:=]/, 1)[0]}`);
+    assert.equal(result.ok, false, `expected a blocking verdict for: ${content.split(/[:=]/, 1)[0]}`);
+    assert.equal(result.ok ? undefined : result.code, 'egress-blocked');
+  }
+});
+
 test('credential scanner: ignores placeholders, redactions, variables, examples, and an unpaired AWS id', () => {
   const safeExamples = [
     'API_KEY=$API_KEY',
