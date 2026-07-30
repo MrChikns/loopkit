@@ -43,7 +43,12 @@ or a plain terminal.
 ## 2. How an interactive assistant should behave in a target repo
 
 If the repo you are working in contains `loopkit.target.json`, a delivery plane may be driving
-it. The contract:
+it — and that includes loopkit's own repo, which registers itself as a target of its own plane
+([ADR-005](decisions/ADR-005-self-hosting.md)). "This is the framework's own source" or "the
+operator just wants it done in this session" is not an exemption from the manifest's presence;
+it selects the attended coordinator path (§3 below), not a bypass of the ledger. **The canonical
+rule: if a checkout is registered as a loopkit target — including loopkit itself — every
+code-bearing change needs a work item and a delivery receipt.** The contract:
 
 - **Capture, don't duplicate.** New feature/fix intent the operator voices should be captured
   as a work item — `loopctl new "<text>"` — not silently built inline, unless the operator
@@ -83,18 +88,31 @@ not install any of these helpers, and there is no provider-neutral plugin regist
 
 ### Copy-paste snippet for a target repo's `AGENTS.md` / `CLAUDE.md`
 
-Adapt the paths, then paste:
+Adapt the paths, then paste. This applies verbatim whether the repo you're registering is your
+own project or loopkit itself — a self-hosting plane is not a special case:
 
 ```markdown
 ## Delivery plane (loopkit)
 
-This repo is a registered target of a loopkit plane (`loopkit.target.json` at the root).
+This repo is a registered target of a loopkit plane (`loopkit.target.json` at the root). That
+holds even if this repo *is* loopkit, or is the plane's own tooling — registration, not identity,
+is what triggers the contract.
+
+**Canonical rule:** every code-bearing change needs a work item and a delivery receipt — a
+`build.dispatched → gate.* → item.merged` trail from the beats, or the attended coordinator's
+evidence-carrying `item.merged`. "Do it in-session" selects the attended coordinator; it does
+not bypass the ledger. This holds regardless of which agent or provider is driving the session.
+
 - Capture build/fix intent as work items instead of building inline:
   `node <path-to-loopkit>/packages/core/dist/cli.js new "<plain-English intent>"`
 - Before editing, check for in-flight items on the same surface: `... cli.js board`
 - Never edit `.jsonl` ledger files, never run `... beat reactor|dispatch` from inside an
   agent session, and leave `<worktreePrefix>*` sibling directories alone.
 - approve/reject/accept are operator verbs — recommend, don't execute them.
+- **Break-glass:** a human committing directly outside any plane session (no agent involved) is
+  the one narrow exception, not a route for an agent to take when the ledger is inconvenient. If
+  an agent ever commits without a work item, it must state the reason in the commit message and
+  open a follow-up work item so the change gets gate + acceptance after the fact.
 ```
 
 ## 3. High-level: what this is good for (the 60-second version)
