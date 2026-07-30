@@ -46,3 +46,87 @@ narrow, uncontested fixes; broader or in-flight fixes are recorded as follow-ups
   carry explicit updates. Follow-ups for classes 6 and 8 remain open and require a design call
   or work outside this audit's narrow scope.
 - All identifiers here are generic; no downstream target or product names are referenced.
+
+## 2026-07-30 hardening wave
+
+Two further passes landed after the dated audit above: a morning pass closing several of the
+gaps this catalog and adjacent operational near-misses had surfaced, and an afternoon attended
+drain adding prompt-input and promotion-governance hardening on top. Both are merged to the
+default branch; neither rewrites the verdict table above, which stays a historical record of
+its own dated pass.
+
+**Morning wave (WI-218…232):**
+
+- **Self-target governance contract** (WI-218) — the plane's own repo and a build target it
+  manages are no longer conflated in agent-facing docs; the self-target contract is reconciled
+  across `AGENTS.md`/`CLAUDE.md`/`docs/agent-integration.md`.
+- **Deploy relaunch storm + timeout pre-emption** (WI-219) — a pending deploy no longer gets
+  relaunched repeatedly within a single beat, and a beat timeout no longer pre-empts in-flight
+  crash-recovery ordering.
+- **Merge evidence recorded before cleanup** (WI-220) — the target-lane merge evidence event is
+  now appended before the worktree/branch cleanup that would otherwise destroy the only record
+  of what happened.
+- **Egress-guard credential-shape false negatives** (WI-221) — the egress guard no longer skips
+  whole classes of secret by shape; the false-negative gap is closed.
+- **Deploy reconciliation pinned to the gated merge SHA** (WI-223) — reconciliation no longer
+  drifts onto whatever the branch tip happens to be; it is pinned to the SHA that actually passed
+  the gate.
+- **Detached-checkout wedge recovery + artifact filtering** (WI-222) — a crash-detached target
+  checkout is re-attached, and plane-artifact residue no longer blocks the clean-checkout guards
+  that deploy relies on.
+- **Observable fold transition rejections** (WI-224) — a rejected item-flow state transition is
+  now surfaced instead of silently dropped.
+- **Ledger-verified commit provenance at promotion boundaries** (WI-232) — the provenance
+  verifier (see ADR-014) starts here: commits reaching the default branch are checked against the
+  operator's real ledger, not a forgeable trailer.
+
+**Afternoon attended drain (WI-234…246, WI-257):**
+
+- **Judge prompts carry a gate-result summary** (WI-234) — the reviewer sees what the gate
+  actually reported, not just the diff.
+- **Router prompts carry a related-in-flight-items projection** (WI-235) — routing decisions are
+  made with visibility into what else is already queued or building.
+- **Shared truncation helper caps previously-unbounded prompt inputs** (WI-236) — the
+  uncapped-input class from earlier passes gets a single reusable cap rather than a
+  site-by-site fix.
+- **Provenance verifier runs report-only on the reactor doctor beat, and covers the dist-drift
+  self-heal path** (WI-239, WI-240) — the promotion check is no longer only a push-time gate; it
+  watches on a beat cadence and also covers the local, ungoverned-runtime-promotion path a
+  push-time gate never observes.
+- **Merge receipts carry gate-run vs self-declared attestation** (WI-241) — a receipt whose
+  gate evidence is an execution record (a beat-recorded `gate.passed`) is now distinguished from
+  one whose gate evidence is a free-text claim typed onto the same merge event.
+- **`leak-scan --range` scans author/committer identity, with an anchored GitHub-noreply
+  exemption** (WI-243) — identity fields are no longer a blind spot in range-mode scans; the
+  placeholder noreply domain is exempted by an anchored match, not a loose substring.
+- **A commit-msg hook rejects agent session-URL trailers** (WI-244) — a session URL can no
+  longer land in a commit message at the source.
+- **Dispatch fails loudly on a target/repoRoot mismatch before any worktree is created**
+  (WI-246) — the mismatch is caught before it can produce a worktree pointed at the wrong repo.
+- **Provenance probe wired live onto the reactor beat** (WI-257) — the doctor-beat provenance
+  check from WI-239 is connected to the real probe implementation rather than a stub.
+
+Full design context for the provenance work (WI-232, WI-239-241, WI-257) is
+[ADR-014](decisions/ADR-014-provenance-verification.md); it also states plainly what this wave
+does *not* yet buy (report-only self-heal coverage, receipt-without-attempt-binding, non-adversarial
+break-glass timing).
+
+### Open items from the 2026-07-30 cross-referenced audit
+
+Two independent reviewers (one Claude-based, one Codex-based) scanned the framework separately;
+findings were cross-referenced afterward. The following themes came out of both scans and are
+tracked as work items, not yet closed:
+
+- Worker/gate subprocess environment isolation, and scanning inbound worker output for leakage —
+  the top gap of the two scans.
+- Terminal-event durability ordering — merge receipts should be durable before cleanup on every
+  lane, not only the one lane WI-220 fixed.
+- A reclaim protocol for the ledger/beat lock — token-conditional reclaim plus lease renewal,
+  rather than the current liveness-only checks.
+- Launch-intent journaling before a worker is spawned.
+- Binding provenance gate evidence to a specific attempt and SHA, closing the gap ADR-014 already
+  names.
+- Console CSRF/CSP hardening, plus inline-SVG hardening.
+- Fold ordering that does not depend on wall-clock time.
+- Self-heal promotion preconditions — requiring a clean checkout pinned to a receipted SHA before
+  a self-heal path is allowed to promote.
