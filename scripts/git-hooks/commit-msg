@@ -1,0 +1,62 @@
+#!/bin/sh
+# commit-msg — rejects a commit whose MESSAGE carries an agent session-URL
+# trailer: a `<Something>-Session:` header line whose value is a URL, or a
+# bare link into an agent console (see the match patterns below for the
+# exact shapes). leak-scan:allow-agent-session
+#
+# This is a LOCAL, commit-time checkpoint for the same residue class the
+# `AGENTSESSION` pass in scripts/leak-scan.sh already blocks at push time
+# (via `--range`, see pre-push). leak-scan's --range pass only runs when a
+# ref is pushed, so an agent session trailer otherwise lives in local history
+# from the moment `git commit` succeeds; this hook catches it a beat earlier,
+# before the commit exists at all, so it's the author's own agent tooling
+# that gets corrected rather than something a later push (or another
+# operator's clone) has to notice and squash/rebase away.
+#
+# Deliberately a SEPARATE, narrower check rather than a call into
+# leak-scan.sh: leak-scan's --range mode operates on a *rev-range* of
+# already-made commits materialized via `git log`, not on the draft message
+# file git hands a commit-msg hook before the commit is created — bolting a
+# single-message mode onto that script is a bigger change than this hook's
+# scope covers. If leak-scan.sh's AGENTSESSION patterns change, keep this
+# hook's patterns in sync by eye (both are small and this comment cross-links
+# them for that purpose).
+#
+# Installed via `scripts/install-hooks.sh` (same core.hooksPath as pre-commit
+# and pre-push).
+#
+# Matches, case-insensitively:
+#   1. a `<Something>-Session:` trailer line (any prefix, e.g. `Claude-Session:`,
+#      `X-Session:`) whose value is a URL.
+#   2. a bare `claude.ai/code/session...` URL anywhere in the message, even
+#      without a trailer prefix.
+# Prose that merely NAMES the class ("don't add a Claude-Session trailer")
+# does not match either pattern: #1 requires a colon-then-URL on the same
+# line (a trailer shape, not a sentence), and #2 requires the literal
+# `claude.ai/code/session` URL path, which prose discussing the convention
+# has no reason to contain verbatim. This intentionally does not block
+# EVERY mention of the words "Claude-Session" in prose (e.g. a commit fixing
+# this very hook can describe the trailer by name) — only the trailer/URL
+# shape itself.
+
+MSG_FILE="$1"
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+  exit 0
+fi
+
+# Strip comment lines (git leaves the `# Please enter the commit message...`
+# scissors block in the file for interactive commits) before matching, so a
+# trailer only counts if the author actually left it in the real message.
+HITS=$(grep -vE '^[[:space:]]*#' "$MSG_FILE" | grep -iE \
+  -e '^[A-Za-z][A-Za-z0-9]*-session:[[:space:]]*https?://' \
+  -e 'claude\.ai/code/session' \
+  || true)
+
+if [ -n "$HITS" ]; then
+  echo "commit-msg BLOCKED — an agent session-URL trailer is in the commit message:" >&2
+  printf '%s\n' "$HITS" >&2
+  echo "--- strip the Claude-Session/session-URL trailer line and commit again." >&2
+  echo "    (published history should never carry a link to a private agent session)" >&2
+  exit 1
+fi
+exit 0
