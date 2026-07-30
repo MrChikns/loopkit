@@ -45,11 +45,11 @@ import {
 import { getRunbook, RunbookContext, resolveHealMode } from '../runbooks.js';
 import { setupWorktreeDeps } from './worktree-deps.js';
 import { closeStalePendingDeploys, reconcileDeployIntents, requestDeployOnMerge } from '../deploy.js';
-import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity } from './dispatch.js';
+import { beatLockOwnerAlive, writeBeatHeartbeat, BeatLockAcquisition, getChangedFiles, mergeEvidence, resolveProviderForSensitivity, itemSensitivity, capPromptSection, PROMPT_SECTION_CAPS } from './dispatch.js';
 import { classifyParkForAutoApprove, parseOverstepReason, parseDependencyReason } from '../approval.js';
 import { classifyAcceptanceTier, splitTouches, acceptanceClassifyFiles, hasEvidenceGap } from '../acceptance.js';
 import { readTargetManifest, resolveRegisteredTarget, lookupRegisteredTarget } from '../target.js';
-import { normalizeTouches } from '../touches.js';
+import { normalizeTouches, touchesConflict } from '../touches.js';
 import { decideTierWindow, effectiveTierWindows, tallyVerdictsSince, TierCalibrationConfig } from '../calibration.js';
 import { spendForDay } from '../costs.js';
 import { readLastbeat, writeLastbeat, countsChanged } from '../hygiene.js';
@@ -1329,6 +1329,70 @@ function reparkHasNoNewEvidence(newReason: string, priorReason: string | undefin
   return true; // every significant token was already in the prior reason
 }
 
+// ---------------------------------------------------------------------------
+// Related-items projection (WI-235)
+// ---------------------------------------------------------------------------
+
+/** In-flight states worth surfacing as a routing sibling — resolved items (accepted/rejected/
+ *  done) carry no collision risk for a NEW item being routed right now. */
+const RELATED_ITEMS_IN_FLIGHT_STATES = new Set<ItemRecord['state']>([
+  'queued', 'building', 'gated', 'parked', 'approved',
+]);
+
+const RELATED_ITEMS_MAX_LINES = 10;
+const RELATED_ITEMS_MAX_CHARS = 1000;
+const RELATED_ITEMS_TRUNCATION_MARKER = '(truncated — more related items exist)';
+
+/** One-line label for a sibling row: the router-stamped title, else a truncated spec/text. */
+function relatedItemOneLiner(rec: ItemRecord): string {
+  const raw = (rec.title ?? rec.spec ?? rec.sourceText ?? '').trim().replace(/\s+/g, ' ');
+  return raw.length > 80 ? `${raw.slice(0, 77)}...` : raw || '(no title)';
+}
+
+/**
+ * Build a compact, deterministic (no LLM) related-items projection for the router prompt: the
+ * in-flight siblings whose Touches overlap `candidate`'s, or that share a dependency edge with
+ * it. The router otherwise sees ONLY the candidate's own captured text — no awareness that the
+ * fold already holds a colliding or dependent item — so it cannot route around in-flight work.
+ *
+ * Each row is `id (state): one-line title`. Hard-capped at RELATED_ITEMS_MAX_LINES lines and
+ * RELATED_ITEMS_MAX_CHARS chars, with a visible truncation marker appended when either cap
+ * trims real rows — never a silently partial list.
+ */
+export function buildRelatedItemsProjection(
+  candidate: ItemRecord,
+  allItems: Iterable<ItemRecord>,
+): string {
+  const siblings: ItemRecord[] = [];
+  for (const other of allItems) {
+    if (other.id === candidate.id) continue;
+    if (!RELATED_ITEMS_IN_FLIGHT_STATES.has(other.state)) continue;
+    const touchesOverlap = touchesConflict(candidate.touches, other.touches);
+    const depEdge = (candidate.dependencies ?? []).some(d => d.item === other.id)
+      || (other.dependencies ?? []).some(d => d.item === candidate.id);
+    if (touchesOverlap || depEdge) siblings.push(other);
+  }
+  if (siblings.length === 0) return '';
+
+  // Deterministic order: id ascending (WI-NNN sorts naturally as a string here since every id
+  // shares the same prefix width in practice; falling back to string order costs nothing).
+  siblings.sort((a, b) => a.id.localeCompare(b.id));
+
+  const lines: string[] = [];
+  let truncated = false;
+  for (const s of siblings) {
+    if (lines.length >= RELATED_ITEMS_MAX_LINES) { truncated = true; break; }
+    lines.push(`${s.id} (${s.state}): ${relatedItemOneLiner(s)}`);
+  }
+  let body = lines.join('\n');
+  if (body.length > RELATED_ITEMS_MAX_CHARS) {
+    truncated = true;
+    const keep = RELATED_ITEMS_MAX_CHARS - RELATED_ITEMS_TRUNCATION_MARKER.length - 1;
+    body = body.slice(0, Math.max(0, keep));
+  }
+  return truncated ? `${body}\n${RELATED_ITEMS_TRUNCATION_MARKER}` : body;
+}
+
 async function stepRoute(
   opts: ReactorOptions,
   cfg: LoopkitConfig,
@@ -1464,8 +1528,11 @@ async function stepRoute(
 
       // Build a focused routing prompt for this item
       const attachPaths = resolveAttachmentPaths(rec.sourceText);
+      // WI-236: the same shared cap dispatch's buildPrompt/buildBatchPrompt use — the router
+      // inlines the item's raw captured TEXT and its attachment list with no mechanical cap
+      // otherwise, so one oversized capture would bloat the whole routing call.
       const attachSection = attachPaths.length > 0
-        ? `\n\nATTACHMENTS (operator uploaded — you MAY Read these image/file paths before classifying):\n${attachPaths.map(p => `- ${p}`).join('\n')}`
+        ? `\n\nATTACHMENTS (operator uploaded — you MAY Read these image/file paths before classifying):\n${capPromptSection(attachPaths.map(p => `- ${p}`).join('\n'), PROMPT_SECTION_CAPS.attachments, 'ATTACHMENTS')}`
         : '';
       // A spec-less 'queued' item that the operator unparked is an APPROVED decision-park: the
       // operator already answered "yes, do this". Bias it to build — never re-park it for
@@ -1480,7 +1547,18 @@ async function stepRoute(
  • PURE MULTI-SLICE EPIC (only slicing/sequencing remains — NO unresolved choice) → ROUTE: park, and SPEC MUST begin with "needs planner decomposition: <one line why>". This routes to the planner and leaves the operator's desk.
  • A SPECIFIC unresolved choice the approval did NOT settle (an architecture/scope/design fork) → ROUTE: park, and SPEC MUST begin with "needs decision: <the ONE precise open question>". State that exact question only — do NOT restate the original bundled reason.`
         : '';
-      const itemPrompt = `${promptPrefix}${routerPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${rec.sourceText ?? '(empty)'}${attachSection}${approvalSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
+      // WI-235: a compact, deterministic (no LLM) related-items projection — in-flight siblings
+      // whose Touches overlap this item's or that share a dependency edge with it. Without this
+      // the router sees only this item's own text and cannot route around work already in
+      // flight that would collide or that this item depends on.
+      const relatedItemsBody = buildRelatedItemsProjection(rec, foldResult.items.values());
+      const relatedItemsSection = relatedItemsBody
+        ? `\n\nRELATED IN-FLIGHT ITEMS (overlapping Touches or dependency edges — deterministic, not exhaustive):\n${relatedItemsBody}`
+        : '';
+      const itemText = rec.sourceText
+        ? capPromptSection(rec.sourceText, PROMPT_SECTION_CAPS.spec, 'TEXT')
+        : '(empty)';
+      const itemPrompt = `${promptPrefix}${routerPrompt}${promptSuffix}\n\nROUTE THIS ITEM ONLY:\nID: ${rec.id}\nTEXT: ${itemText}${attachSection}${approvalSection}${relatedItemsSection}\n\nReturn ONLY the ROUTE:/SPEC:/TOUCHES:/MODEL:/PRIORITY:/CRITERIA:/REPLY: block described above.`;
 
       if (opts.dryRun) {
         out.push(makeEvent('reactor', rec.id, 'item.routed', {

@@ -82,7 +82,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **Both integration terminals re-gate the exact combined destination state.** The engineering
   lane will not merge a branch whose base moved without rebasing and re-running the gate over the
   combined state, and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:5103`<!--cite:postIntegrationRegate-->). The target lane now
+  (`packages/core/src/beats/dispatch.ts:5161`<!--cite:postIntegrationRegate-->). The target lane now
   re-reads its declared default branch, replays onto a moved tip, constructs and gates the exact
   no-fast-forward candidate, then updates the local destination with an expected-old-SHA
   compare-and-swap (`packages/core/src/beats/dispatch.ts:2735`). A CAS loss repeats that bounded
@@ -103,7 +103,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3792`<!--cite:queuedClaimDeference-->), which is a read, and all
+  (`packages/core/src/beats/dispatch.ts:3850`<!--cite:queuedClaimDeference-->), which is a read, and all
   three dispatch lanes — planning, engineering, and target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before admission. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat

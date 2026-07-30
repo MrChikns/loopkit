@@ -49,7 +49,7 @@ import { setupWorktreeDeps } from './worktree-deps.js';
 import { requestDeployOnMerge } from '../deploy.js';
 import { spendForDay } from '../costs.js';
 import { computeQuotaPressure } from '../quota-pressure.js';
-import { captureWorktreeDiff, buildJudgePrompt, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
+import { captureWorktreeDiff, buildJudgePrompt, buildGateResultSummary, runJudge, mergeVerdictData, JudgeRunResult } from '../judge.js';
 import { runClaimAuditGate, preMergeRiskHoldReason, AcceptanceTierClassifyConfig } from '../acceptance.js';
 import { TargetManifest, resolveRegisteredTarget } from '../target.js';
 import { captureSalvage, findSalvagePatch, applySalvagePatch, buildResumeNote } from '../salvage.js';
@@ -2060,7 +2060,8 @@ export async function runPostBuildGuards(
   let judgeVerdict: JudgeStageResult | undefined;
   if (config.judge && ctx.judge?.provider) {
     const diff = captureWorktreeDiff(ctx.wtPath, ctx.baseSha, 20_000);
-    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches, ctx.judge.itemCriteria);
+    const gateSummary = buildGateResultSummary(gateOutcome, ctx.gateCommand);
+    const prompt = buildJudgePrompt(ctx.judge.itemId, ctx.judge.spec, diff, ctx.judge.itemTouches, ctx.judge.itemCriteria, gateSummary);
     try {
       const judgeRunResult = await runJudge(ctx.judge.provider, ctx.judge.model, prompt, ctx.judge.timeoutMs);
       judgeVerdict = { run: judgeRunResult, model: ctx.judge.model, providerName: ctx.judge.provider.name };
@@ -2157,6 +2158,45 @@ export function parseBrief(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt-section truncation (WI-236 — attention-budget hardening)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE one truncation helper for prompt-assembly-time inputs that carry no mechanical cap: spec
+ * text, operator notes, repair context, and attachment lists. Scout output (parseBrief, 4K),
+ * pathology diffs, and judge diffs (captureWorktreeDiff et al) already have their own caps —
+ * this closes the remaining gap, where buildPrompt/buildBatchPrompt (this file) and the router's
+ * per-item prompt (reactor.ts) inline those four inputs directly with no size limit, so one
+ * oversized capture (an operator pasting a huge document, a long msg.out history, a runaway
+ * attachment list) could bloat the whole worker/router invocation.
+ *
+ * Defaults are deliberately generous — spec/notes/evidence should rarely truncate in practice;
+ * this is a backstop against a genuinely oversized input, not a routine limiter. One-parser
+ * doctrine (WI-236): dispatch's single-item AND batch paths, and the reactor's router prompt,
+ * all call this SAME function rather than each growing its own truncate-and-say-so copy (as
+ * assembleRepairEvidence's diff/gate caps and operatorNotesFor's per-note cap already had to).
+ *
+ * Byte-identical passthrough when `text` is within `maxChars` — a normal-size input is never
+ * touched, so this can wrap every call site unconditionally without changing today's output.
+ */
+export function capPromptSection(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) return text;
+  const marker = `\n[${label} truncated — ${text.length} chars over the ${maxChars}-char cap]`;
+  const keep = Math.max(0, maxChars - marker.length);
+  return text.slice(0, keep) + marker;
+}
+
+/** Generous per-section caps (WI-236) — sized well above any realistic single input so a normal
+ *  spec/notes/evidence/attachment-list never truncates; a genuinely oversized one now visibly
+ *  does instead of silently bloating the whole prompt. */
+export const PROMPT_SECTION_CAPS = {
+  spec: 40_000,
+  operatorNotes: 8_000,
+  repairEvidence: 20_000,
+  attachments: 4_000,
+} as const;
+
+// ---------------------------------------------------------------------------
 // Build prompt
 // ---------------------------------------------------------------------------
 
@@ -2225,25 +2265,36 @@ export function buildPrompt(
   // read once, up front, before the worker turns to attempt-specific mechanics (RESUME NOTE and
   // REPAIR EVIDENCE describe what THIS attempt's predecessor did/broke). A human's own diagnosis
   // is higher-trust than a scout's, so it is read early, not buried after the failure mechanics.
-  const operatorNotesSection = operatorNotes ? `\n\n${operatorNotes}` : '';
+  // WI-236: operatorNotes/repairContext/spec/attachments carried no mechanical cap at THIS
+  // assembly point (operatorNotesFor already caps the ledger-history piece, but a caller could
+  // still pass anything here) — capPromptSection is the one shared backstop, applied uniformly.
+  const cappedOperatorNotes = operatorNotes
+    ? capPromptSection(operatorNotes, PROMPT_SECTION_CAPS.operatorNotes, 'OPERATOR NOTES')
+    : undefined;
+  const operatorNotesSection = cappedOperatorNotes ? `\n\n${cappedOperatorNotes}` : '';
   const resumeSection = resumeNote ? `\n\n${resumeNote}` : '';
-  const attachSuffix = attachments?.length
-    ? `\n\nATTACHMENTS (operator uploaded — Read these paths before implementing):\n${attachments.map(p => '- ' + p).join('\n')}`
+  const cappedAttachments = attachments?.length
+    ? capPromptSection(attachments.map(p => '- ' + p).join('\n'), PROMPT_SECTION_CAPS.attachments, 'ATTACHMENTS')
+    : undefined;
+  const attachSuffix = cappedAttachments
+    ? `\n\nATTACHMENTS (operator uploaded — Read these paths before implementing):\n${cappedAttachments}`
     : '';
+  const cappedSpec = capPromptSection(spec, PROMPT_SECTION_CAPS.spec, 'REQUEST');
   // Section order: base → REPO PLAYBOOK → CONTEXT PACK → OPERATOR NOTES → RESUME NOTE →
   // REPAIR EVIDENCE → REQUEST. MANIFEST instruction is appended to every prompt so the worker
   // writes a self-report.
   const prefix = `${base}${playbookSection}${briefSection}${operatorNotesSection}`;
   if (repairEvidence) {
-    return `${prefix}${resumeSection}\n\n${repairEvidence}\n\nREQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
+    return `${prefix}${resumeSection}\n\n${repairEvidence}\n\nREQUEST: ${cappedSpec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
   }
   if (resumeSection) {
-    return `${prefix}${resumeSection}\n\nREQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
+    return `${prefix}${resumeSection}\n\nREQUEST: ${cappedSpec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
   }
   if (repairContext) {
-    return `${prefix}\n\nREPAIR CONTEXT — this is a repair run against fresh master. A previous build failed to merge cleanly; the context below explains what broke. Fix the root cause as part of this implementation.\n${repairContext}\n\nREQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
+    const cappedRepairContext = capPromptSection(repairContext, PROMPT_SECTION_CAPS.repairEvidence, 'REPAIR CONTEXT');
+    return `${prefix}\n\nREPAIR CONTEXT — this is a repair run against fresh master. A previous build failed to merge cleanly; the context below explains what broke. Fix the root cause as part of this implementation.\n${cappedRepairContext}\n\nREQUEST: ${cappedSpec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
   }
-  return `${prefix} REQUEST: ${spec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
+  return `${prefix} REQUEST: ${cappedSpec}${attachSuffix}${MANIFEST_INSTRUCTION}`;
 }
 
 /**
@@ -2264,14 +2315,21 @@ export function buildBatchPrompt(items: { id: string; spec: string; brief?: stri
         : '';
       // OPERATOR NOTES sits right after CONTEXT PACK, before REPAIR EVIDENCE — same rationale
       // as buildPrompt (WI-168): general background before attempt-specific failure mechanics.
-      const operatorNotesSection = it.operatorNotes ? `\n${it.operatorNotes}` : '';
-      const evidenceSection = it.repairEvidence
-        ? `\n${it.repairEvidence}`
-        : '';
+      // WI-236: same shared cap as the single-item path — a batch item's notes/evidence/spec
+      // are otherwise inlined here with no mechanical limit.
+      const cappedNotes = it.operatorNotes
+        ? capPromptSection(it.operatorNotes, PROMPT_SECTION_CAPS.operatorNotes, `OPERATOR NOTES (${it.id})`)
+        : undefined;
+      const operatorNotesSection = cappedNotes ? `\n${cappedNotes}` : '';
+      const cappedEvidence = it.repairEvidence
+        ? capPromptSection(it.repairEvidence, PROMPT_SECTION_CAPS.repairEvidence, `REPAIR EVIDENCE (${it.id})`)
+        : undefined;
+      const evidenceSection = cappedEvidence ? `\n${cappedEvidence}` : '';
       const touchesSection = it.touches
         ? `\nDeclared Touches for ${it.id} (the only files this item is authorized to write): ${it.touches}`
         : '';
-      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${operatorNotesSection}${evidenceSection}\n${it.spec}`;
+      const cappedItemSpec = capPromptSection(it.spec, PROMPT_SECTION_CAPS.spec, `SPEC (${it.id})`);
+      return `### ITEM ${i + 1} — ${it.id}${touchesSection}${briefSection}${operatorNotesSection}${evidenceSection}\n${cappedItemSpec}`;
     })
     .join('\n\n');
   const batchManifestInstruction = `
@@ -5151,7 +5209,8 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
             const finalBase = headBefore !== branchBase ? headBefore : branchBase;
             const diff = captureWorktreeDiff(w.wtPath, finalBase, judgeMaxDiffChars);
 
-            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches, r.criteria);
+            const gateSummary = buildGateResultSummary(gateOutcome, gateId);
+            const prompt = buildJudgePrompt(r.id, judgeSpec, diff, r.touches, r.criteria, gateSummary);
 
             let judgeRunResult;
             const injected = opts.judgeResults?.get(r.id);
