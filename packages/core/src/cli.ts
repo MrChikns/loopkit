@@ -33,7 +33,7 @@ import { compact, formatCompactResult, loadQuarantine } from './hygiene.js';
 import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
 import { formatCriteriaLines } from './criteria.js';
-import { runDoctor, defaultPidProbe, detectDistDrift, DistDriftResult } from './doctor.js';
+import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
 import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
 import {
@@ -47,7 +47,7 @@ import { runAudit } from './audit/index.js';
 import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import { loadConfig, resolvePlaneHome, ensurePlaneHome } from './config.js';
 import { readTargetManifest, manifestHash, mintTargetId, resolveRegisteredTarget } from './target.js';
-import { gatherProvenanceInput, verifyProvenance, extractBreakGlassGrants, openGrants } from './provenance.js';
+import { gatherProvenanceInput, verifyProvenance, extractBreakGlassGrants, openGrants, ProvenanceReport } from './provenance.js';
 import { foldCosts, CostRow, formatQuotaWindowLabel } from './costs.js';
 import { collectInteractiveUsage } from './collectors/interactive-usage.js';
 import { collectCodexUsage } from './collectors/codex-usage.js';
@@ -1394,7 +1394,35 @@ async function cmdDoctor(rest: string[]): Promise<void> {
   const quarantine = loadQuarantine(quarantinePath);
   const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
   const result = fold(allEvents);
-  const doctorResult = runDoctor(result, defaultPidProbe);
+
+  // WI-239 — beat-cadence provenance check: gather (impure, this file) + classify (pure,
+  // doctor.ts) a real ProvenanceReport for THIS repo as a self-hosting target (ADR-005), so an
+  // ungoverned commit on the default branch surfaces on every `loopctl doctor` run — not only
+  // at the next `git push` (pre-push is the only other place verify-provenance runs today; see
+  // AGENTS.md "Mechanically enforced (WI-232)"). Report-only: runDoctor never turns this into a
+  // requeue/park action (see ProvenanceProbe's doc comment in doctor.ts for why).
+  const selfTargetReg = result.targets.byRepoPath(REPO_ROOT);
+  const gatherSelfProvenance = async (): Promise<ProvenanceReport | null> => {
+    if (!selfTargetReg) return null; // this repo isn't a registered target — nothing to check
+    const input = await gatherProvenanceInput({
+      repoPath: REPO_ROOT,
+      ledgerDir: LEDGER_DIR,
+      targetId: selfTargetReg.targetId,
+      targetName: selfTargetReg.name,
+    });
+    return verifyProvenance({ ...input, targetName: selfTargetReg.name });
+  };
+  const beatCadenceReport = await gatherSelfProvenance();
+  const doctorResult = runDoctor(
+    result,
+    defaultPidProbe,
+    { breakerN: 3 },
+    'doctor',
+    defaultProgressProbe,
+    defaultExitFileProbe,
+    defaultWorktreeProbe,
+    () => beatCadenceReport,
+  );
 
   // Dist-drift backstop (self-deploy — see loopkit.target.json deployCommand): the newest
   // merge that resolved to THIS repo (a self-hosting target, ADR-005) vs the newest
@@ -1444,6 +1472,9 @@ async function cmdDoctor(rest: string[]): Promise<void> {
       quarantinedKnown,
       invalidUnknown,
       distDrift: distDrift ?? null,
+      // WI-239: report-only, every status included (see classifyProvenanceFinding's doc
+      // comment) — absent only when this repo isn't a registered target at all.
+      provenanceFinding: doctorResult.provenanceFinding ?? null,
     }, null, 2));
   } else {
     if (doctorResult.orphans.length === 0) {
@@ -1464,6 +1495,13 @@ async function cmdDoctor(rest: string[]): Promise<void> {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — rebuilt via deployCommand.`);
       } else {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — NOT healed: ${distDrift.reason}`);
+      }
+    }
+    // WI-239: printed regardless of drift/orphans — a clean beat should still say the check ran.
+    if (doctorResult.provenanceFinding) {
+      console.log(`Provenance (beat cadence): ${doctorResult.provenanceFinding.status.toUpperCase()}`);
+      if (doctorResult.provenanceFinding.status !== 'verified') {
+        for (const line of doctorResult.provenanceFinding.lines) console.log(`  ${line}`);
       }
     }
   }
