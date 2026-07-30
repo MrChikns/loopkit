@@ -28,7 +28,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { loadAllEventsWithQuarantine, appendEvents, withLock, diffMissingEvents } from '../ledger.js';
 import { fold, FoldResult, ItemRecord, computeAcceptanceDebt, projectEngagement, UnansweredReply, isDecisionPark, isFirstSeenPark, shouldRequeueOpsPark } from '../fold.js';
-import { runDoctor, defaultPidProbe, DoctorConfig, ProgressProbe, ExitFileProbe, WorktreeProbe, reapStaleClaims } from '../doctor.js';
+import { runDoctor, defaultPidProbe, DoctorConfig, ProgressProbe, ExitFileProbe, WorktreeProbe, ProvenanceProbe, reapStaleClaims } from '../doctor.js';
+import { gatherProvenanceInput, verifyProvenance, ProvenanceReport } from '../provenance.js';
 import { reapLeakedWorktrees } from '../worktree-reaper.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
@@ -103,6 +104,15 @@ export interface ReactorOptions {
    * When absent, the real probe (existsSync on the build's recorded worktree path) is used.
    */
   worktreeProbe?: WorktreeProbe;
+  /**
+   * Injected provenance probe (for tests) — WI-257, wires runDoctor's beat-cadence
+   * provenance check (WI-239/WI-240) into the live reactor. When absent, the real probe
+   * gathers a {@link ProvenanceReport} for THIS repo as a self-hosting target (ADR-005),
+   * mirroring cli.ts's cmdDoctor construction exactly (gatherProvenanceInput +
+   * verifyProvenance). Report-only — see ProvenanceProbe's doc comment in doctor.ts for
+   * why this never becomes a requeue/park action.
+   */
+  provenanceProbe?: ProvenanceProbe;
   /** Injected wall-clock (epoch ms) for the doctor's stall-age math (for tests). */
   now?: number;
   /** Injected current-branch probe (for tests). Defaults to `git branch --show-current`. */
@@ -3686,8 +3696,33 @@ async function stepDoctor(
     // a probe; harmless when the worktree is still present (the normal collectable case defers).
     const worktreeProbe: WorktreeProbe = opts.worktreeProbe
       ?? (rec => rec.currentBuild?.worktree ? existsSync(rec.currentBuild.worktree) : true);
+    // WI-257 — real provenance probe wired so the beat-cadence check (WI-239/WI-240) actually
+    // runs every reactor beat, not only via a hand-run `loopctl doctor`. Mirrors cmdDoctor's
+    // gatherSelfProvenance construction exactly (cli.ts): resolve THIS repo as a registered
+    // self-hosting target (ADR-005), then gather+verify. gatherProvenanceInput is async (git/
+    // ledger reads), but runDoctor's ProvenanceProbe contract is synchronous — so the report is
+    // gathered eagerly here (same shape as cmdDoctor's `beatCadenceReport` await) and the probe
+    // passed to runDoctor just returns the already-resolved value. Report-only — runDoctor never
+    // turns this into a requeue/park action (see ProvenanceProbe's doc comment in doctor.ts).
+    let provenanceProbe: ProvenanceProbe;
+    if (opts.provenanceProbe) {
+      provenanceProbe = opts.provenanceProbe;
+    } else {
+      const selfTargetReg = foldResult.targets.byRepoPath(opts.repoRoot);
+      let beatCadenceReport: ProvenanceReport | null = null;
+      if (selfTargetReg) {
+        const input = await gatherProvenanceInput({
+          repoPath: opts.repoRoot,
+          ledgerDir: opts.ledgerDir,
+          targetId: selfTargetReg.targetId,
+          targetName: selfTargetReg.name,
+        });
+        beatCadenceReport = verifyProvenance({ ...input, targetName: selfTargetReg.name });
+      }
+      provenanceProbe = () => beatCadenceReport;
+    }
 
-    const doctorResult = runDoctor(foldResult, pidProbe, doctorConfig, 'reactor', progressProbe, exitFileProbe, worktreeProbe);
+    const doctorResult = runDoctor(foldResult, pidProbe, doctorConfig, 'reactor', progressProbe, exitFileProbe, worktreeProbe, provenanceProbe);
 
     // ADR-007 "stale claims are reaped, never silently dropped": a claim that already reads
     // inactive (isClaimActive false) never blocks a pick, but for audit-trail/fold hygiene the
@@ -3737,10 +3772,18 @@ async function stepDoctor(
       }
     }
 
+    // WI-257 — surface the beat-cadence provenance finding in the step's own detail string
+    // (mirrors cmdDoctor's console.log), so it is observable from a reactor beat and not only
+    // via a hand-run `loopctl doctor`. Report-only: never turned into an event/action above.
+    const provenanceDetail = doctorResult.provenanceFinding
+      ? `provenance: ${doctorResult.provenanceFinding.status}`
+      : undefined;
+
     if (doctorResult.actions.length === 0 && reapEvents.length === 0) {
       const bits = [];
       if (reapEvents.length > 0) bits.push(`${reapEvents.length} stale claims reaped`);
       if (reapedWt > 0) bits.push(`${reapedWt} leaked worktrees reaped`);
+      if (provenanceDetail) bits.push(provenanceDetail);
       return { step, ok: true, eventsWritten: reapEvents.length, mdWritten: false, detail: bits.length ? bits.join('; ') : 'no orphans' };
     }
 
@@ -3825,7 +3868,7 @@ async function stepDoctor(
       ok: true,
       eventsWritten: events.length + reapEvents.length,
       mdWritten: false,
-      detail: `${doctorResult.orphans.length} orphans; ${doctorResult.stalled.length} stalled; ${doctorResult.actions.filter(a => a.type === 'park-breaker').length} breaker trips; ${reapEvents.length} stale claims reaped; ${reapedWt} leaked worktrees reaped`,
+      detail: `${doctorResult.orphans.length} orphans; ${doctorResult.stalled.length} stalled; ${doctorResult.actions.filter(a => a.type === 'park-breaker').length} breaker trips; ${reapEvents.length} stale claims reaped; ${reapedWt} leaked worktrees reaped${provenanceDetail ? `; ${provenanceDetail}` : ''}`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
