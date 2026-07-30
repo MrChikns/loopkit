@@ -32,8 +32,9 @@
 
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { loadAllEventsWithQuarantine, appendEvents } from '../ledger.js';
 import { alreadyShippedCommit } from '../reality-check.js';
 import { fold, FoldResult, ItemRecord , isClaimActive, isItemTerminal } from '../fold.js';
@@ -2677,6 +2678,40 @@ async function resolveTargetForBuild(
     };
   }
   const { reg, manifest } = resolution;
+  // WI-246: WI-208 burned 4 build attempts because a worktree got created against the WRONG
+  // repo — the registration's repoPath had drifted from the actual git root on disk (moved,
+  // reused, or otherwise no longer its own toplevel) and nothing crashed; the mismatch was
+  // only found on attempt 4. `target add` (cli.ts) pins repoPath to `git rev-parse
+  // --show-toplevel` at registration time, so re-deriving the SAME toplevel here and
+  // comparing it against the registered repoPath re-verifies that invariant still holds
+  // immediately before any worktree is created from it. A mismatch aborts loudly, up front,
+  // naming BOTH paths, instead of silently building/inspecting the wrong tree.
+  const toplevelCheck = spawnSync('git', ['-C', reg.repoPath, 'rev-parse', '--show-toplevel'], { stdio: 'pipe' });
+  const actualToplevel = toplevelCheck.status === 0 ? toplevelCheck.stdout?.toString().trim() : '';
+  if (toplevelCheck.status !== 0 || !actualToplevel) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' is not a git repository (git rev-parse --show-toplevel failed: ${toplevelCheck.stderr?.toString().trim() ?? 'no output'})`,
+    };
+  }
+  // Compare REAL (symlink-resolved) paths, not raw strings: `git rev-parse --show-toplevel`
+  // always resolves symlinks (e.g. macOS /tmp -> /private/tmp), so a registeredPath captured
+  // via plain `resolve()`/`realpath` at `target add` time can differ textually from a
+  // re-derived toplevel while still naming the exact same directory. realpathSync mirrors
+  // that resolution on our side so only a GENUINE mismatch (a different repo root entirely)
+  // trips the guard.
+  let realRegistered: string;
+  try {
+    realRegistered = realpathSync(reg.repoPath);
+  } catch (e) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' does not resolve on disk (${e instanceof Error ? e.message : e})`,
+    };
+  }
+  if (realpathSync(actualToplevel) !== realRegistered) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' does not match its actual git toplevel '${actualToplevel}'`,
+    };
+  }
   // Changed manifest → append target.manifest-updated (append-only, never mutate the
   // registration) and use the new one. Keyed on the stable content hash.
   if (resolution.manifestChanged && !opts.dryRun) {
@@ -2696,9 +2731,7 @@ async function resolveTargetForBuild(
  * `worktreePrefix`, and even a display name can never clobber each other's builds — the
  * name-based dir this replaces collided for same-named/default-prefix siblings. The
  * targetId already carries the `tgt-` marker, so the dir stays operator-recognizable.
- * Only the target lane namespaces: an untargeted (embedded single-repo) build keeps its
- * unnamespaced `<prefix>wi-NNN-aN` path byte-identical — namespacing activates strictly
- * when a targetId is in play. @internal exported for tests
+ * @internal exported for tests
  */
 export function targetWorktreeDirName(
   worktreePrefix: string,
@@ -2707,6 +2740,33 @@ export function targetWorktreeDirName(
   attempt: number,
 ): string {
   return `${worktreePrefix}${targetId}-wi-${wiNum}-a${attempt}`;
+}
+
+/**
+ * WI-238: sibling worktree dir name for the EMBEDDED (untargeted, single-repo) lane,
+ * namespaced by a short stable hash of `repoRoot` — the same collision-avoidance spirit as
+ * `targetWorktreeDirName`'s targetId namespacing, one directory up. Root cause: every test
+ * process creates its repoRoot flat under `os.tmpdir()`, so `join(repoRoot, '..')` collapses
+ * to the SAME parent (os.tmpdir() itself) for every concurrent `node --test` subprocess, and
+ * the near-universal WI-001/attempt-1 fixture gave every one of them the identical dirname —
+ * `node --test` runs test files as concurrent subprocesses, so ~19 files exercising real
+ * runDispatch raced `git worktree add`/`remove --force` on the literal same path (WI-238,
+ * confirmed root cause of the rare 'dispatch: mid-build auth failure…' flake in
+ * beats.test.ts). Any two DIFFERENT repos (real hosts, or two test processes) now get
+ * disjoint dirs even when their repoRoots happen to share a parent; two builds of the SAME
+ * repo still collide by design — attempt-uniqueness (`wi-NNN-aN`) is what serializes those,
+ * exactly as before. The suffix `wi-<n>-a<n>` is preserved byte-for-byte so
+ * `isManagedWorktreeName`/`extractWorktreeItemId` (worktree-reaper.ts), which only match on
+ * that suffix, keep classifying these dirs unchanged. @internal exported for tests
+ */
+export function embeddedWorktreeDirName(
+  worktreePrefix: string,
+  repoRoot: string,
+  wiNum: string,
+  attempt: number,
+): string {
+  const shortHash = createHash('sha256').update(repoRoot).digest('hex').slice(0, 8);
+  return `${worktreePrefix}${shortHash}-wi-${wiNum}-a${attempt}`;
 }
 
 /**
@@ -4234,7 +4294,12 @@ export async function runDispatch(opts: DispatchOptions): Promise<DispatchResult
       // the branch off the ledger keep working unchanged.
       const attemptNum = (rec.attempts ?? 0) + 1;
       const branch = `wi-${wiNum}-a${attemptNum}`;
-      const wtPath = join(opts.repoRoot, '..', `${cfg.worktreePrefix}wi-${wiNum}-a${attemptNum}`);
+      // WI-238: namespaced by a short hash of repoRoot (embeddedWorktreeDirName) — see its doc
+      // comment for the collision this fixes (concurrent test processes' repoRoots collapsing
+      // to the same os.tmpdir() parent). The BRANCH name above stays unnamespaced on purpose:
+      // branches live inside one repo (no cross-repo parent-dir collision to avoid), and the
+      // ledger's currentBuild.branch / reactor merge-approve paths key on this exact string.
+      const wtPath = join(opts.repoRoot, '..', embeddedWorktreeDirName(cfg.worktreePrefix, opts.repoRoot, wiNum, attemptNum));
       const errFile = join(runDir, `${rec.id}-agent.err`);
 
       // TRUST-HARDENING (defect c): resolve THIS group's builder provider against its most
