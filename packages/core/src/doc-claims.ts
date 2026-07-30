@@ -561,7 +561,7 @@ export const CITATION_CLAIMS: CitationClaim[] = [
   // elsewhere
   { id: 'requestDeployOnMerge', file: 'deploy', mustContain: 'export async function requestDeployOnMerge(' },
   { id: 'stalePendingDeployEvents', file: 'deploy', mustContain: 'export function stalePendingDeployEvents(' },
-  { id: 'fireDeployOnMerge', file: 'worktreeDeps', mustContain: 'export function fireDeployOnMerge(' },
+  { id: 'fireDeployOnMerge', file: 'worktreeDeps', mustContain: 'export async function fireDeployOnMerge(' },
   { id: 'deployProbe', file: 'slo', mustContain: 'export function makeDeployProbe(' },
   { id: 'foldDeploySucceeded', file: 'fold', mustContain: "case 'deploy.succeeded':" },
   { id: 'foldRespec', file: 'fold', mustContain: "case 'item.respec':" },

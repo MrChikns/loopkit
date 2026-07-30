@@ -722,6 +722,14 @@ export interface MergeTransientFailData { reason: string; transientCount: number
 
 // deploy domain
 export interface DeployRequestedData {}
+/**
+ * Durable attempt record appended immediately before each detached spawn call (the
+ * happy-path first launch and every reconciliation re-launch). Exists so the ledger's launch
+ * count is never inferred from `eventsWritten` (which is 0 on a reconciled re-launch, since no
+ * new deploy.requested is written) and so a timeout can tell "launched, went silent" apart
+ * from "never launched" (WI-219).
+ */
+export interface DeployLaunchedData { attempt: number }
 export interface DeploySucceededData { commit?: string }
 export interface DeployFailedData { reason: string; stderr?: string }
 export interface DeployTimedOutData { reason: string; requestedAt: string }
@@ -884,6 +892,7 @@ export type EventDataMap = {
   'target.registered': TargetRegisteredData;
   'target.manifest-updated': TargetManifestUpdatedData;
   'deploy.requested': DeployRequestedData;
+  'deploy.launched': DeployLaunchedData;
   'deploy.succeeded': DeploySucceededData;
   'deploy.failed': DeployFailedData;
   'deploy.timed-out': DeployTimedOutData;
@@ -947,7 +956,7 @@ const KNOWN_TYPES = new Set<string>([
   'build.cancel-requested', 'build.cancelled', 'build.superseded',
   'gate.passed', 'gate.failed', 'gate.parked',
   'merge.transient-fail',
-  'deploy.requested', 'deploy.succeeded', 'deploy.failed', 'deploy.timed-out',
+  'deploy.requested', 'deploy.launched', 'deploy.succeeded', 'deploy.failed', 'deploy.timed-out',
   'review.finding', 'review.verdict',
   'slo.breach', 'slo.recovered', 'cost.usage', 'loop.beat', 'quota.snapshot',
   'heal.proposed', 'heal.executed', 'heal.verified', 'heal.escalated', 'heal.graduated', 'heal.shadowed',

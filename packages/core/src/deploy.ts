@@ -72,6 +72,36 @@ async function persistPendingDeployFailureIfStillPending(
   }
 }
 
+/**
+ * Append the durable per-launch attempt record. Passed to fireDeployOnMerge as its
+ * onSpawnAttempt hook, so it only runs once configuration and the checkout preflight have both
+ * passed — a preflight rejection is not a launch attempt and must not be recorded as one — and
+ * it is awaited there BEFORE the detached process is actually spawned. This is the ledger's only
+ * source of truth for "did a spawn actually happen": deploy.requested fires once per pending
+ * cycle and eventsWritten is 0 on a reconciled re-launch, so neither can answer that question
+ * (WI-219). Best-effort: if the append itself fails, the spawn still proceeds (a missing attempt
+ * record undercounts but never blocks or duplicates a launch), and the fold's deployLaunchCount
+ * for this item simply lags by one.
+ */
+async function persistLaunchAttempt(
+  request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
+  wiIds: string[],
+): Promise<void> {
+  try {
+    await withLock(request.ledgerDir, async tx => {
+      const items = fold(await tx.loadAll()).items;
+      const events = wiIds
+        .filter(wi => items.get(wi)?.deployStatus === 'pending')
+        .map(wi => makeEvent(request.actor, wi, 'deploy.launched', {
+          attempt: (items.get(wi)?.deployLaunchCount ?? 0) + 1,
+        }));
+      if (events.length > 0) await tx.append(events);
+    });
+  } catch {
+    // Best-effort attempt accounting; never block or duplicate the spawn over a ledger write.
+  }
+}
+
 async function persistReconciliationFailureIfStillActionable(
   request: Pick<DeployRequest, 'actor' | 'ledgerDir'>,
   wiId: string,
@@ -175,6 +205,7 @@ export async function requestDeployOnMerge(request: DeployRequest): Promise<Depl
     launchIds,
     request.spawnDeploy,
     request.expectedCommit,
+    () => persistLaunchAttempt(request, launchIds),
   );
   if (spawnResult.started) {
     return { configured: true, started: true, eventsWritten: claim.claimed.length };
@@ -206,6 +237,7 @@ export async function resumePendingDeploy(request: DeployRequest): Promise<Deplo
     wiIds,
     request.spawnDeploy,
     request.expectedCommit,
+    () => persistLaunchAttempt(request, wiIds),
   );
   if (spawnResult.started) {
     return { configured: true, started: true, eventsWritten: 0 };
@@ -236,6 +268,14 @@ export interface DeployReconcileResult {
  *
  * The resolver deliberately runs at reconciliation time so target manifests and plane config
  * are current. Removed or unreadable configuration becomes a visible failed receipt.
+ *
+ * `minPendingAgeMs` (WI-219) guards only the already-pending branch: a request younger than one
+ * beat interval is still in flight from the beat that just requested it (stepApplyVerbs and
+ * stepDeployTimeouts can run in the same beat), so reconciling it here would be an immediate
+ * duplicate spawn, not crash recovery. A pending item older than the threshold has survived at
+ * least one full beat without a terminal receipt or a live in-beat requester, so it is a genuine
+ * restart-recovery candidate. Items with no request at all (`deployStatus === undefined`) are
+ * never gated — there is no prior spawn to duplicate.
  */
 export async function reconcileDeployIntents(args: {
   ledgerDir: string;
@@ -245,13 +285,26 @@ export async function reconcileDeployIntents(args: {
   dryRun?: boolean;
   spawnDeploy?: DeploySpawn;
   excludeItems?: ReadonlySet<string>;
+  /** Minimum age (ms) a pending request must have before it is eligible for re-launch. Default 0. */
+  minPendingAgeMs?: number;
+  nowMs?: number;
   /** Deterministic concurrency seam used to prove fresh-fold suppression. */
   beforeCandidate?: (item: ItemRecord) => Promise<void>;
 }): Promise<DeployReconcileResult> {
+  const minPendingAgeMs = args.minPendingAgeMs ?? 0;
+  const nowMs = args.nowMs ?? Date.now();
   const candidates = [...args.items]
     .filter(rec => rec.deployConfigured === true)
     .filter(rec => rec.deployStatus === undefined || rec.deployStatus === 'pending')
     .filter(rec => !args.excludeItems?.has(rec.id))
+    .filter(rec => {
+      if (rec.deployStatus !== 'pending' || minPendingAgeMs <= 0) return true;
+      const requestedMs = rec.deployRequestedAt ? Date.parse(rec.deployRequestedAt) : NaN;
+      // An unparsable/missing timestamp on a pending record can't prove freshness — treat it as
+      // eligible rather than silently stranding a pending deploy forever.
+      if (!Number.isFinite(requestedMs)) return true;
+      return nowMs - requestedMs >= minPendingAgeMs;
+    })
     .sort((a, b) => a.id.localeCompare(b.id));
   const result: DeployReconcileResult = { attempted: candidates.length, eventsWritten: 0, failures: [] };
   if (args.dryRun) return result;
@@ -289,6 +342,12 @@ export async function reconcileDeployIntents(args: {
  * Deterministically close stale pending receipts. Sorting makes event order stable even if
  * the fold's insertion order came from multiple ledger segments. A non-positive threshold
  * disables the transition rather than timing everything out immediately.
+ *
+ * The reason text distinguishes (WI-219) "launched at least once and went silent" — the
+ * command spawned (per the durable deploy.launched record) but never reported a terminal
+ * receipt — from "never launched", which means reconciliation could not recover it (missing
+ * configuration, an unresolvable target, or a checkout preflight failure already recorded as
+ * its own failed receipt via a different path) and this request simply expired unattempted.
  */
 export function stalePendingDeployEvents(
   items: Iterable<ItemRecord>,
@@ -305,10 +364,17 @@ export function stalePendingDeployEvents(
     .sort((a, b) => a.rec.id.localeCompare(b.rec.id));
 
   const ts = new Date(nowMs).toISOString();
-  return due.map(({ rec }) => makeEvent(actor, rec.id, 'deploy.timed-out', {
-    reason: `deploy request exceeded ${timeoutMs}ms without a terminal receipt`,
-    requestedAt: rec.deployRequestedAt!,
-  }, ts));
+  return due.map(({ rec }) => {
+    const launched = (rec.deployLaunchCount ?? 0) > 0;
+    const reason = launched
+      ? `deploy request exceeded ${timeoutMs}ms without a terminal receipt after ${
+        rec.deployLaunchCount} launch attempt(s); the command spawned but never reported success or failure`
+      : `deploy request exceeded ${timeoutMs}ms without ever being launched`;
+    return makeEvent(actor, rec.id, 'deploy.timed-out', {
+      reason,
+      requestedAt: rec.deployRequestedAt!,
+    }, ts);
+  });
 }
 
 /**

@@ -27,10 +27,12 @@ import { fold } from '../src/fold.js';
 import { appendEvents, loadAllEvents, withLock } from '../src/ledger.js';
 import { isKnownType, makeEvent } from '../src/schema.js';
 
-test('schema: deploy.requested and deploy.timed-out are known additive event types', () => {
+test('schema: deploy.requested, deploy.launched and deploy.timed-out are known additive event types', () => {
   assert.equal(isKnownType('deploy.requested'), true);
+  assert.equal(isKnownType('deploy.launched'), true);
   assert.equal(isKnownType('deploy.timed-out'), true);
   assert.equal(makeEvent('test', 'WI-001', 'deploy.requested', {}).type, 'deploy.requested');
+  assert.equal(makeEvent('test', 'WI-001', 'deploy.launched', { attempt: 1 }).type, 'deploy.launched');
   assert.equal(makeEvent('test', 'WI-001', 'deploy.timed-out', {
     reason: 'no receipt',
     requestedAt: '2026-01-01T00:00:00.000Z',
@@ -56,12 +58,19 @@ test('fold: deploy lifecycle is explicit while deployed remains compatibility tr
   assert.equal(rec.deployStatus, 'pending');
   assert.equal(rec.deployRequestedAt, requested.ts);
   assert.equal(rec.deployed, false);
+  assert.equal(rec.deployLaunchCount, 0, 'a bare request has not yet recorded a launch attempt');
+
+  const launched = makeEvent('dispatch', 'WI-001', 'deploy.launched', { attempt: 1 }, '2026-01-01T00:02:01.000Z');
+  rec = fold([...base, requested, launched]).items.get('WI-001')!;
+  assert.equal(rec.deployStatus, 'pending', 'a launch attempt is not itself a terminal receipt');
+  assert.equal(rec.deployLaunchCount, 1);
+  assert.equal(rec.deployLastLaunchedAt, launched.ts);
 
   const timedOut = makeEvent('reactor', 'WI-001', 'deploy.timed-out', {
     reason: 'stale pending receipt',
     requestedAt: requested.ts,
   }, '2026-01-01T01:02:00.000Z');
-  rec = fold([...base, requested, timedOut]).items.get('WI-001')!;
+  rec = fold([...base, requested, launched, timedOut]).items.get('WI-001')!;
   assert.equal(rec.state, 'merged', 'a timeout is data-only and never rolls back the merge');
   assert.equal(rec.deployStatus, 'timed-out');
   assert.equal(rec.deployFailureReason, 'stale pending receipt');
@@ -70,7 +79,7 @@ test('fold: deploy lifecycle is explicit while deployed remains compatibility tr
   const lateSuccess = makeEvent('deploy-hook', 'WI-001', 'deploy.succeeded', {
     commit: 'abc',
   }, '2026-01-01T01:03:00.000Z');
-  rec = fold([...base, requested, timedOut, lateSuccess]).items.get('WI-001')!;
+  rec = fold([...base, requested, launched, timedOut, lateSuccess]).items.get('WI-001')!;
   assert.equal(rec.deployStatus, 'succeeded', 'a late terminal receipt remains latest-event truth');
   assert.equal(rec.deployFailureReason, undefined);
   assert.equal(rec.deployed, true);
@@ -79,11 +88,37 @@ test('fold: deploy lifecycle is explicit while deployed remains compatibility tr
   const failed = makeEvent('dispatch', 'WI-001', 'deploy.failed', {
     reason: 'spawn failed',
   }, '2026-01-01T01:04:01.000Z');
-  rec = fold([...base, requested, timedOut, lateSuccess, retry, failed]).items.get('WI-001')!;
+  rec = fold([...base, requested, launched, timedOut, lateSuccess, retry, failed]).items.get('WI-001')!;
   assert.equal(rec.deployStatus, 'failed');
   assert.equal(rec.deployRequestedAt, retry.ts);
   assert.equal(rec.deployFailureReason, 'spawn failed');
   assert.equal(rec.deployed, false);
+  assert.equal(rec.deployLaunchCount, 0, 'the retry cycle resets the launch counter for its own attempts');
+});
+
+test('fold: deploy.launched count resets per request cycle and never regresses across a retry', () => {
+  const events = [
+    makeEvent('test', 'WI-005', 'item.merged', {
+      commit: 'a', deployed: false, deployConfigured: true,
+    }, '2026-01-01T00:00:00.000Z'),
+    makeEvent('dispatch', 'WI-005', 'deploy.requested', {}, '2026-01-01T00:01:00.000Z'),
+    makeEvent('dispatch', 'WI-005', 'deploy.launched', { attempt: 1 }, '2026-01-01T00:01:01.000Z'),
+    makeEvent('reactor', 'WI-005', 'deploy.launched', { attempt: 2 }, '2026-01-01T01:01:01.000Z'),
+  ];
+  let rec = fold(events).items.get('WI-005')!;
+  assert.equal(rec.deployLaunchCount, 2, 'two recorded attempts on the same pending cycle');
+  assert.equal(rec.deployLastLaunchedAt, '2026-01-01T01:01:01.000Z');
+
+  const retried = [
+    ...events,
+    makeEvent('reactor', 'WI-005', 'deploy.timed-out', {
+      reason: 'stale', requestedAt: '2026-01-01T00:01:00.000Z',
+    }, '2026-01-01T02:00:00.000Z'),
+    makeEvent('dispatch', 'WI-005', 'deploy.requested', {}, '2026-01-01T03:00:00.000Z'),
+  ];
+  rec = fold(retried).items.get('WI-005')!;
+  assert.equal(rec.deployLaunchCount, 0, 'a fresh request cycle starts its own attempt count at zero');
+  assert.equal(rec.deployLastLaunchedAt, undefined);
 });
 
 test('fold: legacy merge booleans remain compatibility history and lifecycle stays unknown', () => {
@@ -163,7 +198,9 @@ test('deploy: synchronous spawn failure appends failed after requested', async (
     assert.equal(result.eventsWritten, 2);
     assert.match(result.reason ?? '', /synthetic spawn failure/);
     const events = (await loadAllEvents(ledgerDir)).filter(e => e.item === 'WI-011');
-    assert.deepEqual(events.map(e => e.type), ['item.merged', 'deploy.requested', 'deploy.failed']);
+    assert.deepEqual(events.map(e => e.type),
+      ['item.merged', 'deploy.requested', 'deploy.launched', 'deploy.failed'],
+      'the launch-attempt record is durable even though the synchronous spawn call itself threw');
     const rec = fold(events).items.get('WI-011')!;
     assert.equal(rec.deployStatus, 'failed');
     assert.equal(rec.deployed, false);
@@ -233,7 +270,8 @@ test('deploy: requested count remains truthful when the later failure receipt ca
     assert.equal(result.eventsWritten, 1, 'the already-durable request is not erased from accounting');
     assert.match(result.reason ?? '', /receipt persistence failed.*synthetic receipt write failure/);
     const events = await loadAllEvents(ledgerDir);
-    assert.deepEqual(events.map(e => e.type), ['item.merged', 'deploy.requested']);
+    assert.deepEqual(events.map(e => e.type), ['item.merged', 'deploy.requested', 'deploy.launched'],
+      'the launch-attempt record is best-effort/independent of the later failure-receipt persistence failure');
     assert.equal(fold(events).items.get('WI-013')!.deployStatus, 'pending');
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
@@ -261,7 +299,8 @@ test('deploy: asynchronous ChildProcess launch error appends failed after reques
     assert.equal(result.eventsWritten, 2);
     assert.match(result.reason ?? '', /ENOENT|no such file or directory/i);
     const events = (await loadAllEvents(ledgerDir)).filter(e => e.item === 'WI-012');
-    assert.deepEqual(events.map(e => e.type), ['item.merged', 'deploy.requested', 'deploy.failed']);
+    assert.deepEqual(events.map(e => e.type),
+      ['item.merged', 'deploy.requested', 'deploy.launched', 'deploy.failed']);
     assert.equal(fold(events).items.get('WI-012')!.deployStatus, 'failed');
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
@@ -292,6 +331,35 @@ test('deploy: stale pending timeout selection is exact, sorted, and idempotent a
     [],
     'timed-out projection is terminal for this request, so later beats do not duplicate it',
   );
+});
+
+// WI-219 (D18): the timeout reason must distinguish "launched and went silent" (reconciliation
+// spawned it — per the durable deploy.launched record — but it never reported a terminal
+// receipt) from "never launched" (reconciliation could not recover it at all, e.g. missing
+// config/unresolvable target). Before this fix the reason text was identical for both, so a
+// receipt asserting "timed out" could describe a deploy that never actually started.
+test('deploy: timeout reason states whether the request was ever actually launched', () => {
+  const requestedAt = '2026-01-01T00:00:00.000Z';
+  const now = Date.parse('2026-01-01T01:00:00.000Z');
+
+  const launchedThenSilent = fold([
+    makeEvent('test', 'WI-070', 'item.merged', { commit: 'a', deployed: false }, '2025-12-31T23:59:00.000Z'),
+    makeEvent('dispatch', 'WI-070', 'deploy.requested', {}, requestedAt),
+    makeEvent('dispatch', 'WI-070', 'deploy.launched', { attempt: 1 }, '2026-01-01T00:00:01.000Z'),
+  ]).items.values();
+  const [launchedEvent] = stalePendingDeployEvents(launchedThenSilent, 'reactor', now, 3_600_000);
+  const launchedReason = (launchedEvent.data as { reason: string }).reason;
+  assert.match(launchedReason, /1 launch attempt/);
+  assert.match(launchedReason, /spawned but never reported/);
+
+  const neverLaunched = fold([
+    makeEvent('test', 'WI-071', 'item.merged', { commit: 'b', deployed: false }, '2025-12-31T23:59:00.000Z'),
+    makeEvent('dispatch', 'WI-071', 'deploy.requested', {}, requestedAt),
+  ]).items.values();
+  const [neverLaunchedEvent] = stalePendingDeployEvents(neverLaunched, 'reactor', now, 3_600_000);
+  const neverLaunchedReason = (neverLaunchedEvent.data as { reason: string }).reason;
+  assert.match(neverLaunchedReason, /without ever being launched/);
+  assert.doesNotMatch(neverLaunchedReason, /launch attempt/);
 });
 
 test('deploy: terminal receipt committed before timeout lock acquisition prevents timeout', async () => {
@@ -332,7 +400,7 @@ test('deploy: terminal receipt committed before timeout lock acquisition prevent
   }
 });
 
-test('deploy reconciliation: plane crash windows are at-least-once without duplicate request receipts', async () => {
+test('deploy reconciliation: a missing request is recovered and launched exactly once (no age gate applies)', async () => {
   const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-plane-'));
   try {
     await appendEvents(ledgerDir, [
@@ -348,7 +416,7 @@ test('deploy reconciliation: plane crash windows are at-least-once without dupli
       return spawn('sh', ['-c', 'true'], { cwd: ledgerDir, detached: true, stdio: 'ignore' });
     }) as unknown as DeploySpawn;
 
-    let items = fold(await loadAllEvents(ledgerDir)).items;
+    const items = fold(await loadAllEvents(ledgerDir)).items;
     const missingRequest = await reconcileDeployIntents({
       ledgerDir,
       actor: 'reactor',
@@ -359,22 +427,137 @@ test('deploy reconciliation: plane crash windows are at-least-once without dupli
       },
       spawnDeploy,
     });
+    // eventsWritten counts deploy.requested/deploy.failed only (the pre-existing accounting
+    // contract, deliberately unchanged — WI-219 explicitly forbids inflating this counter as a
+    // stand-in for real launch evidence). The durable deploy.launched record below is that
+    // evidence instead.
     assert.equal(missingRequest.eventsWritten, 1);
     assert.equal(launches, 1);
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-040' && e.type === 'deploy.requested').length, 1);
+    assert.equal(events.filter(e => e.item === 'WI-040' && e.type === 'deploy.launched').length, 1);
+    assert.equal(fold(events).items.get('WI-040')!.deployStatus, 'pending');
+    assert.equal(fold(events).items.get('WI-040')!.deployLaunchCount, 1);
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
 
-    items = fold(await loadAllEvents(ledgerDir)).items;
-    const pendingRequest = await reconcileDeployIntents({
+// WI-219 (D17): a pending request already-recovered-and-still-in-flight must not be relaunched
+// on every reconciliation pass — that was the bug (unbounded re-invocation, up to ~120
+// concurrent spawns into the same beat's target). minPendingAgeMs is the fix's gate: a pending
+// request younger than the threshold is presumed still in flight from the beat that requested
+// it; only once it outlives at least one full beat interval without a terminal receipt does it
+// become a genuine crash-recovery candidate.
+test('deploy reconciliation: a pending intent younger than minPendingAgeMs is never relaunched', async () => {
+  const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-fresh-pending-'));
+  try {
+    const requestedAt = '2026-01-01T00:00:00.000Z';
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-041', 'item.merged', {
+        commit: 'abc', deployed: false, deployConfigured: true,
+      }, '2025-12-31T23:59:00.000Z'),
+      makeEvent('dispatch', 'WI-041', 'deploy.requested', {}, requestedAt),
+    ]);
+    let launches = 0;
+    const spawnDeploy = (() => {
+      launches++;
+      return spawn('sh', ['-c', 'true'], { cwd: ledgerDir, detached: true, stdio: 'ignore' });
+    }) as unknown as DeploySpawn;
+
+    const items = fold(await loadAllEvents(ledgerDir)).items;
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: items.values(),
+      resolve: () => ({ ok: true, repoRoot: ledgerDir, deployCommand: 'true' }),
+      spawnDeploy,
+      minPendingAgeMs: 30_000,
+      nowMs: Date.parse(requestedAt) + 5_000,
+    });
+
+    assert.equal(result.attempted, 0, 'the fresh pending intent is not even a candidate this pass');
+    assert.equal(result.eventsWritten, 0);
+    assert.equal(launches, 0, 'a sub-interval-old pending request must never be relaunched');
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-041' && e.type === 'deploy.launched').length, 0);
+    assert.equal(fold(events).items.get('WI-041')!.deployStatus, 'pending');
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: a pending intent older than minPendingAgeMs is recovered exactly once', async () => {
+  const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-stale-pending-'));
+  try {
+    const requestedAt = '2026-01-01T00:00:00.000Z';
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-042', 'item.merged', {
+        commit: 'abc', deployed: false, deployConfigured: true,
+      }, '2025-12-31T23:59:00.000Z'),
+      makeEvent('dispatch', 'WI-042', 'deploy.requested', {}, requestedAt),
+    ]);
+    let launches = 0;
+    const spawnDeploy = (() => {
+      launches++;
+      return spawn('sh', ['-c', 'true'], { cwd: ledgerDir, detached: true, stdio: 'ignore' });
+    }) as unknown as DeploySpawn;
+
+    const items = fold(await loadAllEvents(ledgerDir)).items;
+    const result = await reconcileDeployIntents({
+      ledgerDir,
+      actor: 'reactor',
+      items: items.values(),
+      resolve: () => ({ ok: true, repoRoot: ledgerDir, deployCommand: 'true' }),
+      spawnDeploy,
+      minPendingAgeMs: 30_000,
+      nowMs: Date.parse(requestedAt) + 45_000,
+    });
+
+    assert.equal(result.attempted, 1, 'the now-stale pending intent is a genuine recovery candidate');
+    assert.equal(result.eventsWritten, 0, 'no NEW deploy.requested — the request was already durable');
+    assert.equal(launches, 1, 'exactly one recovery relaunch');
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-042' && e.type === 'deploy.requested').length, 1,
+      'still exactly one request receipt — no duplicate');
+    assert.equal(events.filter(e => e.item === 'WI-042' && e.type === 'deploy.launched').length, 1,
+      'the durable launch-attempt record is the ledger evidence of the recovery spawn');
+    assert.equal(fold(events).items.get('WI-042')!.deployStatus, 'pending');
+    assert.equal(fold(events).items.get('WI-042')!.deployLaunchCount, 1);
+  } finally {
+    rmSync(ledgerDir, { recursive: true, force: true });
+  }
+});
+
+test('deploy reconciliation: a pending intent with no minPendingAgeMs argument keeps legacy always-eligible behavior', async () => {
+  // Callers that don't pass minPendingAgeMs (e.g. a future direct caller outside the reactor
+  // beat) keep the pre-WI-219 unconditional-recovery behavior — the gate is opt-in via the
+  // argument, not a silent behavior change to every caller of reconcileDeployIntents.
+  const ledgerDir = mkdtempSync(join(tmpdir(), 'deploy-reconcile-default-age-'));
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('dispatch', 'WI-043', 'item.merged', {
+        commit: 'abc', deployed: false, deployConfigured: true,
+      }),
+      makeEvent('dispatch', 'WI-043', 'deploy.requested', {}),
+    ]);
+    let launches = 0;
+    const spawnDeploy = (() => {
+      launches++;
+      return spawn('sh', ['-c', 'true'], { cwd: ledgerDir, detached: true, stdio: 'ignore' });
+    }) as unknown as DeploySpawn;
+
+    const items = fold(await loadAllEvents(ledgerDir)).items;
+    const result = await reconcileDeployIntents({
       ledgerDir,
       actor: 'reactor',
       items: items.values(),
       resolve: () => ({ ok: true, repoRoot: ledgerDir, deployCommand: 'true' }),
       spawnDeploy,
     });
-    assert.equal(pendingRequest.eventsWritten, 0);
-    assert.equal(launches, 2, 'pending intent is safely re-invoked after restart');
-    const events = await loadAllEvents(ledgerDir);
-    assert.equal(events.filter(e => e.item === 'WI-040' && e.type === 'deploy.requested').length, 1);
-    assert.equal(fold(events).items.get('WI-040')!.deployStatus, 'pending');
+
+    assert.equal(result.attempted, 1);
+    assert.equal(launches, 1);
   } finally {
     rmSync(ledgerDir, { recursive: true, force: true });
   }

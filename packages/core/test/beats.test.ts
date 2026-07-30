@@ -3117,6 +3117,120 @@ test('reactor: merge-prefix accounting survives a later deploy-request persisten
 });
 
 // ---------------------------------------------------------------------------
+// WI-219: a pending deploy must not relaunch inside the same beat, and reconciliation must
+// still recover it once it is genuinely stale (spawn count is the only honest signal — a
+// receiptless target like `deployCommand: 'true'` never leaves the ledger's pending state, so
+// counting actual spawns end-to-end through a real runReactor beat is the only way this
+// regression is provable; a unit test on reconcileDeployIntents alone previously missed it).
+// ---------------------------------------------------------------------------
+
+test('reactor: a pending deploy with no receipt is not relaunched within the same beat interval, and reconciliation only fires once the request is stale', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'appr-deploy-spawn-count-'));
+  try {
+    const repoRoot = join(tmpDir, 'repo');
+    const originDir = join(tmpDir, 'origin.git');
+    const ledgerDir = join(tmpDir, 'ledger');
+    const spawnLog = join(tmpDir, 'spawns.log');
+    const g = (args: string[]) => spawnSync('git', args, { cwd: repoRoot, stdio: 'pipe' });
+
+    mkdirSync(originDir, { recursive: true });
+    spawnSync('git', ['init', '--bare', originDir], { cwd: tmpDir, stdio: 'pipe' });
+    mkdirSync(repoRoot, { recursive: true });
+    g(['init', '-b', 'master']);
+    g(['config', 'user.email', 't@t']);
+    g(['config', 'user.name', 't']);
+    g(['remote', 'add', 'origin', originDir]);
+    writeFileSync(join(repoRoot, 'base.txt'), 'base\n', 'utf8');
+    g(['add', 'base.txt']);
+    g(['commit', '-m', 'init']);
+    g(['push', '-u', 'origin', 'master']);
+    g(['checkout', '-b', 'wi-997']);
+    writeFileSync(join(repoRoot, 'feature.txt'), 'feature\n', 'utf8');
+    g(['add', 'feature.txt']);
+    g(['commit', '-m', 'feat: WI-997']);
+    g(['checkout', 'master']);
+
+    await seedLedger(ledgerDir, [
+      makeEvent('test', 'WI-997', 'item.captured', { source: 'cli', text: 'x' }),
+      makeEvent('test', 'WI-997', 'item.queued', { spec: 'x' }),
+      makeEvent('test', 'WI-997', 'build.dispatched', { attempt: 1, branch: 'wi-997', pid: 1 }),
+      makeEvent('test', 'WI-997', 'gate.parked', { reason: 'spine' }),
+      makeEvent('test', 'WI-997', 'item.parked', { reason: 'spine' }),
+      makeEvent('operator', 'WI-997', 'item.approved', { by: 'operator' }),
+    ]);
+
+    // A self-locking but receipt-less deploy command — the exact worst case named in WI-219
+    // (loopkit's own default `deployCommand` never writes deploy.succeeded/deploy.failed).
+    // Every real spawn appends one line to spawnLog so the test has an independent,
+    // process-level count to cross-check against the ledger's deploy.launched events.
+    // reactorIntervalSec is set tiny (1s) purely so the test doesn't need to wait 30 real
+    // seconds — claimDeployRequest/makeEvent stamp deploy.requested with the REAL wall clock
+    // (not the injected `now`), so `now` below must stay anchored to Date.now(), not a
+    // synthetic historic instant, or the age-diff math goes nonsensical.
+    const deployCommand = `printf 'spawn\\n' >> '${spawnLog}'`;
+    const config = makeTestConfig({
+      deployCommand,
+      loops: { ...CONFIG_DEFAULTS.loops, reactorIntervalSec: 1 },
+    });
+
+    const spawnCount = () => existsSync(spawnLog)
+      ? readFileSync(spawnLog, 'utf8').split('\n').filter(l => l.trim() === 'spawn').length
+      : 0;
+
+    // Beat 1: merges WI-997. stepApplyVerbs requests + spawns the deploy exactly once, then
+    // stepDeployTimeouts runs reconcileDeployIntents in the SAME beat — this is the D17
+    // scenario. Give the spawned shell command a moment to actually run and append to spawnLog.
+    const beat1Now = Date.now();
+    const first = await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config, now: beat1Now });
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    assert.equal(fold(await loadAllEvents(ledgerDir)).items.get('WI-997')?.state, 'merged',
+      `expected state=merged; apply-verbs detail: ${first.steps.find(s => s.step === 'apply-verbs')?.detail}`);
+    assert.equal(spawnCount(), 1, 'exactly one real process spawn after the merge beat');
+    let events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-997' && e.type === 'deploy.launched').length, 1,
+      'the ledger records exactly one durable launch attempt, matching the real spawn count');
+    assert.equal(fold(events).items.get('WI-997')?.deployStatus, 'pending',
+      'the receiptless command leaves the request pending, as loopkit\'s own deployCommand does');
+
+    // Beat 2: still well inside the same 1s reactor interval, and still no terminal receipt.
+    // Before WI-219, reconcileDeployIntents had no age filter and relaunched this on every
+    // beat; the fix must hold the spawn count at 1 until the request is genuinely stale.
+    const second = await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: null, config, now: Date.now(),
+    });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(spawnCount(), 1,
+      `a sub-interval-old pending deploy must not relaunch; deploy-timeouts detail: ${
+        second.steps.find(s => s.step === 'deploy-timeouts')?.detail}`);
+    events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-997' && e.type === 'deploy.launched').length, 1,
+      'no second launch attempt was recorded either');
+    assert.equal(events.filter(e => e.item === 'WI-997' && e.type === 'deploy.requested').length, 1,
+      'no duplicate deploy.requested from the pending re-claim path');
+
+    // Beat 3: wait past the 1s reactor interval — now the request is older than one reactor
+    // interval with still no receipt — genuine crash-recovery territory. Reconciliation must
+    // relaunch it exactly once more.
+    await new Promise(resolve => setTimeout(resolve, 1_200));
+    const third = await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: null, config, now: Date.now(),
+    });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(spawnCount(), 2,
+      `a genuinely stale pending deploy must still be recovered exactly once; deploy-timeouts detail: ${
+        third.steps.find(s => s.step === 'deploy-timeouts')?.detail}`);
+    events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-997' && e.type === 'deploy.launched').length, 2,
+      'the ledger now shows two durable launch attempts, matching the real spawn count');
+    assert.equal(fold(events).items.get('WI-997')?.deployStatus, 'pending',
+      'still no terminal receipt — the receiptless command never closes the loop on its own');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Pre-flight auth probe + truthful park reasons
 // ---------------------------------------------------------------------------
 
