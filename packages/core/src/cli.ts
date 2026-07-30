@@ -33,7 +33,7 @@ import { compact, formatCompactResult, loadQuarantine } from './hygiene.js';
 import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
 import { formatCriteriaLines } from './criteria.js';
-import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult } from './doctor.js';
+import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult, classifyProvenanceFinding } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
 import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
 import {
@@ -1438,10 +1438,19 @@ async function cmdDoctor(rest: string[]): Promise<void> {
     const ms = new Date(rec.mergedAt).getTime();
     if (!isNaN(ms) && (selfMergeMs === null || ms > selfMergeMs)) selfMergeMs = ms;
   }
-  let distDrift: (DistDriftResult & { healed: boolean; reason?: string }) | undefined;
+  let distDrift: (DistDriftResult & { healed: boolean; reason?: string; provenanceFinding?: ReturnType<typeof classifyProvenanceFinding> }) | undefined;
   if (selfMergeMs !== null) {
     const drift = detectDistDrift(selfMergeMs, distEntryMtimeMs(REPO_ROOT), Date.now());
     if (drift.drifted) {
+      // WI-240 — the drifted branch IS the local ungoverned-runtime-promotion path: dist is
+      // about to be rebuilt (below) from whatever HEAD holds right now, with no push and no
+      // pre-push gate in the loop at all (see AGENTS.md's "NOT COVERED in this slice" note on
+      // WI-232 — this closes that gap as a reported finding, per the follow-up shape that note
+      // names, without making the self-heal path itself fail-closed). Reuse the SAME
+      // beat-cadence report gathered above (both check the identical repoPath/targetId against
+      // HEAD) rather than re-probing, so this can never disagree with the beat-cadence finding
+      // about the same commits.
+      const provenanceFinding = classifyProvenanceFinding(beatCadenceReport, 'dist-drift-self-heal');
       const manifestPath = join(REPO_ROOT, 'loopkit.target.json');
       const manifest = existsSync(manifestPath) ? readTargetManifest(REPO_ROOT) : undefined;
       if (manifest?.deployCommand) {
@@ -1450,9 +1459,10 @@ async function cmdDoctor(rest: string[]): Promise<void> {
           ...drift,
           healed: r.status === 0,
           reason: r.status === 0 ? undefined : (r.stderr?.toString().slice(-400) || 'deployCommand exited non-zero'),
+          provenanceFinding,
         };
       } else {
-        distDrift = { ...drift, healed: false, reason: 'no deployCommand configured for this target' };
+        distDrift = { ...drift, healed: false, reason: 'no deployCommand configured for this target', provenanceFinding };
       }
     }
   }
@@ -1495,6 +1505,13 @@ async function cmdDoctor(rest: string[]): Promise<void> {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — rebuilt via deployCommand.`);
       } else {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — NOT healed: ${distDrift.reason}`);
+      }
+      // WI-240 — the dist-drift self-heal IS a local ungoverned-runtime-promotion path with no
+      // push and no pre-push gate; surface what provenance found for the exact commits about
+      // to become (or that just became) the running dist, non-blocking either way.
+      if (distDrift.provenanceFinding) {
+        console.log(`Provenance (dist-drift self-heal path): ${distDrift.provenanceFinding.status.toUpperCase()}`);
+        for (const line of distDrift.provenanceFinding.lines) console.log(`  ${line}`);
       }
     }
     // WI-239: printed regardless of drift/orphans — a clean beat should still say the check ran.
