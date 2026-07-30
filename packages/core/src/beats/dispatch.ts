@@ -32,7 +32,7 @@
 
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { loadAllEventsWithQuarantine, appendEvents } from '../ledger.js';
 import { alreadyShippedCommit } from '../reality-check.js';
@@ -2677,6 +2677,40 @@ async function resolveTargetForBuild(
     };
   }
   const { reg, manifest } = resolution;
+  // WI-246: WI-208 burned 4 build attempts because a worktree got created against the WRONG
+  // repo — the registration's repoPath had drifted from the actual git root on disk (moved,
+  // reused, or otherwise no longer its own toplevel) and nothing crashed; the mismatch was
+  // only found on attempt 4. `target add` (cli.ts) pins repoPath to `git rev-parse
+  // --show-toplevel` at registration time, so re-deriving the SAME toplevel here and
+  // comparing it against the registered repoPath re-verifies that invariant still holds
+  // immediately before any worktree is created from it. A mismatch aborts loudly, up front,
+  // naming BOTH paths, instead of silently building/inspecting the wrong tree.
+  const toplevelCheck = spawnSync('git', ['-C', reg.repoPath, 'rev-parse', '--show-toplevel'], { stdio: 'pipe' });
+  const actualToplevel = toplevelCheck.status === 0 ? toplevelCheck.stdout?.toString().trim() : '';
+  if (toplevelCheck.status !== 0 || !actualToplevel) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' is not a git repository (git rev-parse --show-toplevel failed: ${toplevelCheck.stderr?.toString().trim() ?? 'no output'})`,
+    };
+  }
+  // Compare REAL (symlink-resolved) paths, not raw strings: `git rev-parse --show-toplevel`
+  // always resolves symlinks (e.g. macOS /tmp -> /private/tmp), so a registeredPath captured
+  // via plain `resolve()`/`realpath` at `target add` time can differ textually from a
+  // re-derived toplevel while still naming the exact same directory. realpathSync mirrors
+  // that resolution on our side so only a GENUINE mismatch (a different repo root entirely)
+  // trips the guard.
+  let realRegistered: string;
+  try {
+    realRegistered = realpathSync(reg.repoPath);
+  } catch (e) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' does not resolve on disk (${e instanceof Error ? e.message : e})`,
+    };
+  }
+  if (realpathSync(actualToplevel) !== realRegistered) {
+    return {
+      error: `infra: target/repoRoot mismatch for item ${rec.id} — registered repoPath '${reg.repoPath}' does not match its actual git toplevel '${actualToplevel}'`,
+    };
+  }
   // Changed manifest → append target.manifest-updated (append-only, never mutate the
   // registration) and use the new one. Keyed on the stable content hash.
   if (resolution.manifestChanged && !opts.dryRun) {
