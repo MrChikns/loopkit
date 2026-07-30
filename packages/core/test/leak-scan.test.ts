@@ -203,6 +203,55 @@ test('leak-scan --range: the standard AI co-author identity (noreply email) is n
   }
 });
 
+// GitHub's own commit-identity placeholder — assembled from parts for the same
+// reason SYNTHETIC_PERSONAL_EMAIL is: it must appear as a literal in the actual
+// git identity under test, but a literal in THIS file's source would trip the
+// very detector these tests exercise.
+const GITHUB_NOREPLY_EMAIL = ['12345+SomeUser', 'users.noreply.github.com'].join('@');
+
+test('leak-scan --range: a GitHub noreply-placeholder author/committer email is not a leak', () => {
+  const { dir, cleanup } = makeIdentityFixtureRepo({
+    authorName: 'Some User',
+    authorEmail: GITHUB_NOREPLY_EMAIL,
+    committerName: 'Some User',
+    committerEmail: GITHUB_NOREPLY_EMAIL,
+  });
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 0, res.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: a personal-shaped gmail author email still blocks (regression guard on the GitHub exemption)', () => {
+  const { dir, shas, cleanup } = makeIdentityFixtureRepo({ authorEmail: SYNTHETIC_PERSONAL_EMAIL });
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
+test('leak-scan --range: the noreply-domain-as-PREFIX-of-a-longer-domain case still blocks (anchored exemption)', () => {
+  const evilEmail = ['foo', 'users.noreply.github.com.evil.com'].join('@');
+  const { dir, shas, cleanup } = makeIdentityFixtureRepo({
+    authorEmail: evilEmail,
+    committerEmail: evilEmail,
+  });
+  try {
+    const res = runLeakScanRange(dir, 'HEAD~1..HEAD');
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /BLOCKED/);
+    assert.match(res.stderr, new RegExp(shas[1]), 'the hit must name the offending commit');
+  } finally {
+    cleanup();
+  }
+});
+
 test('leak-scan --range: an agent session trailer in a commit MESSAGE blocks, and names the commit', () => {
   const { dir, shas, cleanup } = makeCommitFixtureRepo([
     'feat: first clean commit',

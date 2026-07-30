@@ -107,7 +107,20 @@ glpat-[0-9A-Za-z_-]{20,}
 # without this the commit-message corpus below flags every single one and the
 # tripwire gets routinely overridden. The lookbehind pins the match to the START of
 # a local part, so `no-reply@…` can't be re-matched from a later offset.
-EMAIL='(?<![A-Za-z0-9._%+-])(?!no-?reply@)[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}'
+# The trailing `(?<!users\.noreply\.github\.com)(?=[^A-Za-z0-9.]|$)` is the SAME
+# idea for one specific, narrow host: GitHub's own commit-identity placeholder
+# (`<id>+<username>@users.noreply.github.com`) contains no real identity beyond
+# a public GitHub username, and became reachable by this class the moment --range
+# started scanning AUTHOR/COMMITTER metadata (WI-243) — every commit an operator
+# makes with GitHub's privacy setting on now carries this domain, so without the
+# exemption --range self-wedges on the operator's own ordinary history. The
+# exclusion is anchored to the domain's exact end (lookbehind matches only when
+# `users.noreply.github.com` is immediately followed by a non-domain character or
+# end-of-line), so `users.noreply.github.com` as a mere PREFIX of a longer, hostile
+# domain (`…@users.noreply.github.com.evil.com`) still matches and blocks. This is
+# deliberately narrow to ONE host, not a general "widen the noreply list" — do not
+# add further hosts here without a fresh decision.
+EMAIL='(?<![A-Za-z0-9._%+-])(?!no-?reply@)[A-Za-z0-9._%+-]+@(?!example\.|test\.|your-|noreply)[A-Za-z0-9.-]+\.(?!local\b|invalid\b|example\b|test\b)[A-Za-z]{2,}(?<!users\.noreply\.github\.com)(?=[^A-Za-z0-9.]|$)'
 
 # Concrete private decision-log citation: `D-NNN` (optionally `D-NNN-SUFFIX`, e.g.
 # `D-042-H-CHAT`), word-bounded so `ADR-NNN` never matches, and not immediately
