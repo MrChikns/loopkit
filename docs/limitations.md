@@ -82,7 +82,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **Both integration terminals re-gate the exact combined destination state.** The engineering
   lane will not merge a branch whose base moved without rebasing and re-running the gate over the
   combined state, and recovers a push race the same way
-  (`packages/core/src/beats/dispatch.ts:5195`<!--cite:postIntegrationRegate-->). The target lane now
+  (`packages/core/src/beats/dispatch.ts:5226`<!--cite:postIntegrationRegate-->). The target lane now
   re-reads its declared default branch, replays onto a moved tip, constructs and gates the exact
   no-fast-forward candidate, then updates the local destination with an expected-old-SHA
   compare-and-swap (`packages/core/src/beats/dispatch.ts:2735`). A CAS loss repeats that bounded
@@ -94,7 +94,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **Build worktrees now branch from their merge destination, not ambient `HEAD`** (WI-183). Every
   lane passes an explicit base ref to `openBuildWorktree`
-  (`packages/core/src/beats/dispatch.ts:967`<!--cite:openBuildWorktreeHead-->), so the base the guards
+  (`packages/core/src/beats/dispatch.ts:968`<!--cite:openBuildWorktreeHead-->), so the base the guards
   measure against is the base the merge uses. Previously a non-default `HEAD` could carry stowaway
   commits into a merge while `Touches`-overstep and the judge inspected only changes made after that
   ambient base. The engineering lane keeps `'HEAD'` deliberately — it is already pinned by a Phase-2
@@ -103,7 +103,7 @@ says exist are checked the same way, against the symbol that backs them.
 
 - **A claim is a lease, so a lagging live owner can still be picked over.** Every picking lane now
   *reserves* what it takes: the shared pick list defers to an already-active claim
-  (`packages/core/src/beats/dispatch.ts:3884`<!--cite:queuedClaimDeference-->), which is a read, and all
+  (`packages/core/src/beats/dispatch.ts:3910`<!--cite:queuedClaimDeference-->), which is a read, and all
   three dispatch lanes — planning, engineering, and target — then re-fold under the ledger lock and append
   their own `item.claimed` for every survivor before admission. An attended coordinator reserves through
   the same session verbs under the same lock. What remains is ADR-007's *designed* trade, not a gap: a claim reads active only while its owning session's dead-man heartbeat
@@ -218,7 +218,7 @@ says exist are checked the same way, against the symbol that backs them.
 - **A declared deferral is captured, not queued (WI-177).** The remainder is no longer *silent*: when
   a worker fills the manifest's structured `deferred` field, dispatch auto-captures one child item
   per merged parent at merge time
-  (`packages/core/src/beats/dispatch.ts:1535`<!--cite:deferralCapture-->), stamped
+  (`packages/core/src/beats/dispatch.ts:1536`<!--cite:deferralCapture-->), stamped
   `deferral:<parent>` for idempotency and carrying the parent's target. That child is **`item.captured`
   and nothing else** — it enters exactly the intake an operator's own message enters, so a human or
   the reactor's routing decides whether it is real before anything builds. This is deliberately the
