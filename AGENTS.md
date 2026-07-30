@@ -78,9 +78,35 @@ A change is not done until both suites are green. Never skip or hide a failed ru
 8. TypeScript ESM throughout; tests via `node --test`; match the existing style of the file
    you touch.
 
-## Working on the framework vs. driving the plane
+## This repo is a registered target of its own plane
 
-Contributing code to this repo (above) is different from **using** the plane against a target.
-For how an agent inside a *target* repo should talk to the plane — capture intents, read the
+This checkout carries `loopkit.target.json` at its root: a loopkit plane may register loopkit
+itself as a target and build, gate, and merge framework changes exactly like any other target's
+work ([ADR-005](docs/decisions/ADR-005-self-hosting.md)). There is no special-cased "framework
+lane" exempt from the ledger — self-hosting rides the same ledger, the same beats, the same
+gates as every other target.
+
+**The canonical rule, provider-neutral:** if a checkout is registered as a loopkit target —
+including loopkit itself — every code-bearing change needs a work item and a delivery receipt
+(a `build.dispatched → gate.* → item.merged` trail from the beats, or the coordinator's
+evidence-carrying `item.merged`). Deciding to do the work *in an attended session* selects the
+attended coordinator path (`/drive`, `docs/agent-integration.md` §1); it does not bypass the
+ledger. There is no mode in which an agent edits this repo's source and commits it without one
+of those two paths producing a ledger event.
+
+**Break-glass.** The one narrow, load-bearing exception is `git commit --no-verify`/direct
+`git commit` outside any plane session — e.g. a human operator working locally with no agent
+involved, or recovering a wedged plane. It is not a second delivery mechanism for an agent to
+reach for when the ledger is inconvenient: an agent taking this path must state the reason in
+the commit message and the work needs a follow-up work item that records the change and carries
+it through gate + acceptance after the fact (certification, not silent absorption — see
+`docs/method.md` "Certify, don't brief"). The one *designed* boundary at this layer is narrower
+than that: self-hosting is not self-publishing — the plane merges to this repo's local default
+branch, but pushing the public remote stays an operator-gated act (ADR-005). That publish gate
+is not a general license to skip the ledger for merges to `main`.
+
+Contributing code to this repo is otherwise **using the plane against a target** — this repo is
+just one target among however many are registered. For the full contract of how an agent inside
+*any* target repo (including this one) should talk to the plane — capture intents, read the
 board, what never to do — see `docs/agent-integration.md`, including a snippet adopters paste
-into their own repo's `AGENTS.md`/`CLAUDE.md`.
+into their own repo's `AGENTS.md`/`CLAUDE.md` that covers the self-target case too.
