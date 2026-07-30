@@ -49,7 +49,7 @@ function commit(sha: string, committedAt: string, subject = 'a commit'): RangeCo
 }
 
 function receipt(over: Partial<MergeReceipt> & { item: string }): MergeReceipt {
-  return { ts: '2026-07-01T00:00:00Z', hasGate: false, ...over };
+  return { ts: '2026-07-01T00:00:00Z', hasGate: false, attestedByActor: 'reactor', ...over };
 }
 
 function grant(over: Partial<BreakGlassGrant> & { item: string; targetId: string }): BreakGlassGrant {
@@ -389,6 +389,85 @@ test('extractMergeReceipts: a merge with a commit but none of the three gate sha
   const receipts = extractMergeReceipts(events);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0]!.hasGate, false);
+});
+
+// ---------------------------------------------------------------------------
+// WI-241: gateAttestation + attestedByActor — the receipt-exists-vs-gate-ran gap
+// ---------------------------------------------------------------------------
+
+test('extractMergeReceipts: gate.passed evidence attests as gate-run', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('dispatch', 'WI-1', 'item.merged', { commit: SHORT_SHA_A }),
+    makeEvent('dispatch', 'WI-1', 'gate.passed', { tests: 'green' }),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, 'gate-run');
+  assert.equal(r!.attestedByActor, 'dispatch');
+});
+
+test('extractMergeReceipts: a gateCommand string attests as gate-run', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('dispatch', 'WI-2', 'item.merged', { commit: FULL_SHA_B, gateCommand: 'npm test' }),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, 'gate-run');
+});
+
+test('extractMergeReceipts: free-text gate/gateResult (no gate.passed, no gateCommand) attests as self-declared — the appending agent vouching for its own commit', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('coordinator', 'WI-3', 'item.merged', { commit: 'c3d4e5f', gate: 'tests green (attended)' } as any),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, 'self-declared');
+  assert.equal(r!.attestedByActor, 'coordinator');
+});
+
+test('extractMergeReceipts: gateResult (the other free-text field) also attests as self-declared', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-3b', 'item.merged', { commit: 'd4e5f6a', gateResult: 'manual verify ok' } as any),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, 'self-declared');
+});
+
+test('extractMergeReceipts: no gate evidence at all → gateAttestation is absent (nothing to attest to)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('coordinator', 'WI-9', 'item.merged', { commit: SHORT_SHA_A }),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, undefined);
+  assert.equal(r!.attestedByActor, 'coordinator');
+});
+
+test('extractMergeReceipts: gate.passed present ALONGSIDE free-text gate wins as gate-run, not self-declared (real evidence outranks a claim)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('coordinator', 'WI-10', 'item.merged', { commit: SHORT_SHA_A, gate: 'claimed clean too' } as any),
+    makeEvent('reactor', 'WI-10', 'gate.passed', { tests: 'green' }),
+  ];
+  const [r] = extractMergeReceipts(events);
+  assert.equal(r!.gateAttestation, 'gate-run');
+});
+
+test('verifyProvenance: a self-declared-only receipt still verifies (status unchanged) but the report NAMES the attestation gap', () => {
+  const input: ProvenanceInput = baseInput({
+    commits: [commit(SHORT_SHA_A, '2026-07-01T00:10:00Z')],
+    receipts: [receipt({ item: 'WI-3', commit: SHORT_SHA_A, hasGate: true, gateAttestation: 'self-declared', attestedByActor: 'coordinator', gateDetail: 'gate: tests green (attended)' })],
+  });
+  const report = verifyProvenance(input);
+  assert.equal(report.status, 'verified'); // WI-241 is attestation metadata, not a new blocking gate
+  assert.equal(report.commits[0]!.gateAttestation, 'self-declared');
+  assert.match(report.lines.join('\n'), /self-declared/i, 'attestation gap must be visible in the human report, not only the structured field');
+});
+
+test('verifyProvenance: a gate-run receipt reports no self-declared note', () => {
+  const input: ProvenanceInput = baseInput({
+    commits: [commit(SHORT_SHA_A, '2026-07-01T00:10:00Z')],
+    receipts: [receipt({ item: 'WI-1', commit: SHORT_SHA_A, hasGate: true, gateAttestation: 'gate-run', gateDetail: 'gate.passed event' })],
+  });
+  const report = verifyProvenance(input);
+  assert.equal(report.status, 'verified');
+  assert.equal(report.commits[0]!.gateAttestation, 'gate-run');
+  assert.doesNotMatch(report.lines.join('\n'), /self-declared/i);
 });
 
 // ---------------------------------------------------------------------------

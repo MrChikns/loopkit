@@ -8,7 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fold, FoldResult, ItemRecord, TargetsProjection } from '../src/fold.js';
-import { runDoctor, defaultPidProbe, PidProbe, ExitFileProbe, WorktreeProbe, detectStall, DEFAULT_COLLECTION_CYCLE_MS, DEFAULT_LIMBO_MAX_MS, detectLedgerRegression, detectDistDrift } from '../src/doctor.js';
+import { runDoctor, defaultPidProbe, PidProbe, ExitFileProbe, WorktreeProbe, detectStall, DEFAULT_COLLECTION_CYCLE_MS, DEFAULT_LIMBO_MAX_MS, detectLedgerRegression, detectDistDrift, classifyProvenanceFinding, defaultProvenanceProbe, ProvenanceProbe } from '../src/doctor.js';
+import type { ProvenanceReport } from '../src/provenance.js';
 import { makeEvent, LedgerEvent } from '../src/schema.js';
 
 // A probe that always considers the pid dead
@@ -693,4 +694,59 @@ test('detectDistDrift: merge and dist mtime exactly equal → not drifted (bound
   const r = detectDistDrift(1_000_000, 1_000_000, 2_000_000);
   assert.equal(r.drifted, false);
   assert.equal(r.behindMs, 0);
+});
+
+// ---------------------------------------------------------------------------
+// classifyProvenanceFinding / runDoctor's provenanceProbe wiring (WI-239/WI-240)
+// ---------------------------------------------------------------------------
+
+function fakeReport(status: ProvenanceReport['status']): ProvenanceReport {
+  return {
+    status,
+    commits: [],
+    counts: { verified: 0, 'receipt-without-gate': 0, 'break-glass': 0, uncovered: 0 },
+    exitCode: status === 'verified' ? 0 : status === 'uncovered' ? 1 : status === 'break-glass-open' ? 3 : 2,
+    lines: [`provenance: ${status.toUpperCase()} — 0 commit(s) checked`],
+  };
+}
+
+test('classifyProvenanceFinding: null report (probe declined) → no finding', () => {
+  assert.equal(classifyProvenanceFinding(null, 'beat-cadence'), null);
+});
+
+test('classifyProvenanceFinding: reports EVERY status, including verified — never omitted on a clean check', () => {
+  const f = classifyProvenanceFinding(fakeReport('verified'), 'beat-cadence');
+  assert.deepEqual(f, { status: 'verified', source: 'beat-cadence', lines: fakeReport('verified').lines });
+});
+
+test('classifyProvenanceFinding: uncovered report carries its source through unchanged', () => {
+  const f = classifyProvenanceFinding(fakeReport('uncovered'), 'dist-drift-self-heal');
+  assert.equal(f!.status, 'uncovered');
+  assert.equal(f!.source, 'dist-drift-self-heal');
+});
+
+test('defaultProvenanceProbe: returns null — runDoctor stays byte-identical for callers that omit it', () => {
+  assert.equal(defaultProvenanceProbe(), null);
+});
+
+test('runDoctor: omitting provenanceProbe leaves provenanceFinding undefined (back-compat with every pre-WI-239 caller)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-1', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
+  ];
+  const dr = runDoctor(fold(events), deadProbe);
+  assert.equal(dr.provenanceFinding, null);
+});
+
+test('runDoctor: a supplied provenanceProbe surfaces its finding on the result — report-only, never an action', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-1', 'item.captured', { source: 'cli', text: 'test' }, '2026-01-01T00:00:00Z'),
+  ];
+  const probe: ProvenanceProbe = () => fakeReport('uncovered');
+  const dr = runDoctor(fold(events), deadProbe, { breakerN: 3 }, 'doctor', undefined, undefined, undefined, probe);
+  assert.equal(dr.provenanceFinding?.status, 'uncovered');
+  assert.equal(dr.provenanceFinding?.source, 'beat-cadence');
+  // Report-only: an uncovered provenance finding must never itself produce a requeue/park
+  // action — the whole point (see AGENTS.md's "fail-closed check inside a repair path can
+  // wedge the plane permanently") is that this is surfaced, not enforced.
+  assert.equal(dr.actions.length, 0);
 });

@@ -80,6 +80,7 @@
 
 import { FoldResult, ItemRecord, SessionRecord, computeErrorFingerprint, isClaimActive } from './fold.js';
 import { makeEvent, LedgerEvent, DEFAULT_CLAIM_REAP_AGE_MS } from './schema.js';
+import type { ProvenanceReport } from './provenance.js';
 
 export interface DoctorConfig {
   breakerN: number;  // park after this many attempts; default 3
@@ -129,6 +130,80 @@ export interface DoctorResult {
   /** Items whose alive worker was reaped as stalled (the caller must kill their pid). */
   stalled: ItemRecord[];
   actions: DoctorAction[];
+  /**
+   * WI-239/WI-240 — report-only provenance finding for the self-hosting target (absent unless
+   * a `provenanceProbe` is supplied to {@link runDoctor}; see that param's doc comment for why
+   * this never becomes a requeue/park action). `null` when the probe ran but found nothing to
+   * report (e.g. verified, or not a self-hosting target at all).
+   */
+  provenanceFinding?: ProvenanceFinding | null;
+}
+
+/**
+ * WI-239/WI-240 — one beat-cadence provenance finding, reported never enforced. See
+ * {@link ProvenanceProbe}'s doc comment for the full rationale; this type only names the
+ * shape the caller (cmdDoctor today; the reactor once it wires a real probe) renders/logs.
+ */
+export interface ProvenanceFinding {
+  /** Mirrors ProvenanceReport['status'] — surfaced so a caller can render/alert on it without
+   *  re-deriving the classification. */
+  status: ProvenanceReport['status'];
+  /** Where this finding came from: 'beat-cadence' (WI-239 — checked on every doctor run, not
+   *  only at push) or 'dist-drift-self-heal' (WI-240 — checked specifically on the local
+   *  ungoverned-runtime-promotion path that a push-time gate never sees). */
+  source: 'beat-cadence' | 'dist-drift-self-heal';
+  /** Human-readable lines, taken verbatim from the underlying ProvenanceReport. */
+  lines: string[];
+}
+
+/**
+ * WI-239/WI-240 — provenance-health probe, injected for testability (same shape as PidProbe/
+ * ProgressProbe/ExitFileProbe/WorktreeProbe above: real git/ledger I/O is impure and lives
+ * with the caller — cli.ts's cmdDoctor gathers a real {@link ProvenanceReport} via
+ * provenance.ts's gatherProvenanceInput/verifyProvenance; this file only classifies it).
+ *
+ * WHY THIS LIVES HERE, NOT IN A NEW REACTOR STEP: `loopctl doctor` (cmdDoctor) already reports
+ * the OTHER unenforced promotion path — dist-drift self-heal — from right here in this same
+ * file (see detectDistDrift below); folding the provenance check into the same doctor surface
+ * means the reactor's existing `runDoctor(...)` call site picks it up for free the moment it
+ * passes a real probe, with no new beat step and no reactor.ts wiring of its own. Until that
+ * probe is wired, `runDoctor` remains byte-identical for every caller that omits it (default
+ * returns null — see {@link defaultProvenanceProbe}).
+ *
+ * WHY NON-BLOCKING: this mirrors AGENTS.md's "Mechanically enforced (WI-232)" note almost
+ * verbatim — a fail-closed check inside a repair/self-heal path can wedge the plane
+ * permanently (unreadable ledger -> cannot rebuild dist -> cannot run loopctl -> cannot repair
+ * the ledger). `runDoctor` therefore NEVER turns a provenance finding into a requeue or
+ * item.parked action; it is surfaced (stdout / JSON / a future health-widget) so an ungoverned
+ * commit on the default branch is seen within minutes, not discovered six days later at the
+ * next push — the incident `provenance.ts`'s header describes.
+ */
+export type ProvenanceProbe = () => ProvenanceReport | null;
+
+/** Default provenance probe: no signal ⇒ the finding is omitted (byte-identical to callers that
+ *  predate WI-239/WI-240 — never a false report). */
+export function defaultProvenanceProbe(): ProvenanceReport | null {
+  return null;
+}
+
+/**
+ * Classify an already-gathered {@link ProvenanceReport} into a report-only {@link
+ * ProvenanceFinding}. Pure — no fs/git/ledger I/O (that happens in the probe the caller
+ * supplies to {@link runDoctor}). `report === null` (probe declined to run, e.g. not a
+ * self-hosting target, or the caller predates this feature) ⇒ no finding.
+ *
+ * Deliberately reports EVERY status, including 'verified' — a caller that only ever sees this
+ * finding when something is wrong cannot distinguish "the check ran and found nothing" from
+ * "the check never ran at all", which is exactly the silent-pass failure class this whole
+ * feature exists to close (see provenance.ts's module header). The caller decides how loudly
+ * to render each status; this function only classifies.
+ */
+export function classifyProvenanceFinding(
+  report: ProvenanceReport | null,
+  source: ProvenanceFinding['source'],
+): ProvenanceFinding | null {
+  if (report === null) return null;
+  return { status: report.status, source, lines: report.lines };
 }
 
 // ---------------------------------------------------------------------------
@@ -310,10 +385,15 @@ export function runDoctor(
   progressProbe: ProgressProbe = defaultProgressProbe,
   exitFileProbe: ExitFileProbe = defaultExitFileProbe,
   worktreeProbe: WorktreeProbe = defaultWorktreeProbe,
+  provenanceProbe: ProvenanceProbe = defaultProvenanceProbe,
 ): DoctorResult {
   const orphans: ItemRecord[] = [];
   const stalled: ItemRecord[] = [];
   const actions: DoctorAction[] = [];
+  // WI-239: report-only, every doctor run (i.e. every reactor beat, once a caller wires a real
+  // probe — see ProvenanceProbe's doc comment) — never gated on any other condition below, so
+  // an ungoverned commit surfaces on the very next beat regardless of what else is happening.
+  const provenanceFinding = classifyProvenanceFinding(provenanceProbe(), 'beat-cadence');
 
   /**
    * Build the (build.* ended) + (requeue | park-breaker) action pair shared by the orphan
@@ -485,7 +565,7 @@ export function runDoctor(
     });
   }
 
-  return { orphans, stalled, actions };
+  return { orphans, stalled, actions, provenanceFinding };
 }
 
 // ---------------------------------------------------------------------------

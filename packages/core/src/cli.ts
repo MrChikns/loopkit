@@ -33,7 +33,7 @@ import { compact, formatCompactResult, loadQuarantine } from './hygiene.js';
 import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
 import { formatCriteriaLines } from './criteria.js';
-import { runDoctor, defaultPidProbe, detectDistDrift, DistDriftResult } from './doctor.js';
+import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult, classifyProvenanceFinding } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
 import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
 import {
@@ -47,7 +47,7 @@ import { runAudit } from './audit/index.js';
 import { makeRegistry, makeFileHealthFns } from './providers/registry.js';
 import { loadConfig, resolvePlaneHome, ensurePlaneHome } from './config.js';
 import { readTargetManifest, manifestHash, mintTargetId, resolveRegisteredTarget } from './target.js';
-import { gatherProvenanceInput, verifyProvenance, extractBreakGlassGrants, openGrants } from './provenance.js';
+import { gatherProvenanceInput, verifyProvenance, extractBreakGlassGrants, openGrants, ProvenanceReport } from './provenance.js';
 import { foldCosts, CostRow, formatQuotaWindowLabel } from './costs.js';
 import { collectInteractiveUsage } from './collectors/interactive-usage.js';
 import { collectCodexUsage } from './collectors/codex-usage.js';
@@ -151,9 +151,9 @@ Commands:
   execution-config [--json] [--days N] Execution-config-by-model: accept rate, first-pass gate rate, cost/accept, retries/accept
   compact [--dry-run]                  Archive old ops segments
   audit <target-path> [--json]         Target-readiness hygiene check + autonomy tier
-  verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>] [--ref <refname>] [--json]
+  verify-provenance [<target-path>] [--target <name-or-path>] [--from <sha>] [--to <ref>] [--ref <refname>] [--json]
                                         Verify a commit range against the operator's real ledger (WI-232)
-  provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+  provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]
                                         Time-boxed, ledgered exception to provenance verification (WI-232)
   route <item>                         [not yet implemented]
   park|accept <item>                   [not yet implemented]
@@ -1394,7 +1394,35 @@ async function cmdDoctor(rest: string[]): Promise<void> {
   const quarantine = loadQuarantine(quarantinePath);
   const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
   const result = fold(allEvents);
-  const doctorResult = runDoctor(result, defaultPidProbe);
+
+  // WI-239 — beat-cadence provenance check: gather (impure, this file) + classify (pure,
+  // doctor.ts) a real ProvenanceReport for THIS repo as a self-hosting target (ADR-005), so an
+  // ungoverned commit on the default branch surfaces on every `loopctl doctor` run — not only
+  // at the next `git push` (pre-push is the only other place verify-provenance runs today; see
+  // AGENTS.md "Mechanically enforced (WI-232)"). Report-only: runDoctor never turns this into a
+  // requeue/park action (see ProvenanceProbe's doc comment in doctor.ts for why).
+  const selfTargetReg = result.targets.byRepoPath(REPO_ROOT);
+  const gatherSelfProvenance = async (): Promise<ProvenanceReport | null> => {
+    if (!selfTargetReg) return null; // this repo isn't a registered target — nothing to check
+    const input = await gatherProvenanceInput({
+      repoPath: REPO_ROOT,
+      ledgerDir: LEDGER_DIR,
+      targetId: selfTargetReg.targetId,
+      targetName: selfTargetReg.name,
+    });
+    return verifyProvenance({ ...input, targetName: selfTargetReg.name });
+  };
+  const beatCadenceReport = await gatherSelfProvenance();
+  const doctorResult = runDoctor(
+    result,
+    defaultPidProbe,
+    { breakerN: 3 },
+    'doctor',
+    defaultProgressProbe,
+    defaultExitFileProbe,
+    defaultWorktreeProbe,
+    () => beatCadenceReport,
+  );
 
   // Dist-drift backstop (self-deploy — see loopkit.target.json deployCommand): the newest
   // merge that resolved to THIS repo (a self-hosting target, ADR-005) vs the newest
@@ -1410,10 +1438,19 @@ async function cmdDoctor(rest: string[]): Promise<void> {
     const ms = new Date(rec.mergedAt).getTime();
     if (!isNaN(ms) && (selfMergeMs === null || ms > selfMergeMs)) selfMergeMs = ms;
   }
-  let distDrift: (DistDriftResult & { healed: boolean; reason?: string }) | undefined;
+  let distDrift: (DistDriftResult & { healed: boolean; reason?: string; provenanceFinding?: ReturnType<typeof classifyProvenanceFinding> }) | undefined;
   if (selfMergeMs !== null) {
     const drift = detectDistDrift(selfMergeMs, distEntryMtimeMs(REPO_ROOT), Date.now());
     if (drift.drifted) {
+      // WI-240 — the drifted branch IS the local ungoverned-runtime-promotion path: dist is
+      // about to be rebuilt (below) from whatever HEAD holds right now, with no push and no
+      // pre-push gate in the loop at all (see AGENTS.md's "NOT COVERED in this slice" note on
+      // WI-232 — this closes that gap as a reported finding, per the follow-up shape that note
+      // names, without making the self-heal path itself fail-closed). Reuse the SAME
+      // beat-cadence report gathered above (both check the identical repoPath/targetId against
+      // HEAD) rather than re-probing, so this can never disagree with the beat-cadence finding
+      // about the same commits.
+      const provenanceFinding = classifyProvenanceFinding(beatCadenceReport, 'dist-drift-self-heal');
       const manifestPath = join(REPO_ROOT, 'loopkit.target.json');
       const manifest = existsSync(manifestPath) ? readTargetManifest(REPO_ROOT) : undefined;
       if (manifest?.deployCommand) {
@@ -1422,9 +1459,10 @@ async function cmdDoctor(rest: string[]): Promise<void> {
           ...drift,
           healed: r.status === 0,
           reason: r.status === 0 ? undefined : (r.stderr?.toString().slice(-400) || 'deployCommand exited non-zero'),
+          provenanceFinding,
         };
       } else {
-        distDrift = { ...drift, healed: false, reason: 'no deployCommand configured for this target' };
+        distDrift = { ...drift, healed: false, reason: 'no deployCommand configured for this target', provenanceFinding };
       }
     }
   }
@@ -1444,6 +1482,9 @@ async function cmdDoctor(rest: string[]): Promise<void> {
       quarantinedKnown,
       invalidUnknown,
       distDrift: distDrift ?? null,
+      // WI-239: report-only, every status included (see classifyProvenanceFinding's doc
+      // comment) — absent only when this repo isn't a registered target at all.
+      provenanceFinding: doctorResult.provenanceFinding ?? null,
     }, null, 2));
   } else {
     if (doctorResult.orphans.length === 0) {
@@ -1464,6 +1505,20 @@ async function cmdDoctor(rest: string[]): Promise<void> {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — rebuilt via deployCommand.`);
       } else {
         console.log(`Dist drift detected (last merge ${behindMin}m ahead of built dist) — NOT healed: ${distDrift.reason}`);
+      }
+      // WI-240 — the dist-drift self-heal IS a local ungoverned-runtime-promotion path with no
+      // push and no pre-push gate; surface what provenance found for the exact commits about
+      // to become (or that just became) the running dist, non-blocking either way.
+      if (distDrift.provenanceFinding) {
+        console.log(`Provenance (dist-drift self-heal path): ${distDrift.provenanceFinding.status.toUpperCase()}`);
+        for (const line of distDrift.provenanceFinding.lines) console.log(`  ${line}`);
+      }
+    }
+    // WI-239: printed regardless of drift/orphans — a clean beat should still say the check ran.
+    if (doctorResult.provenanceFinding) {
+      console.log(`Provenance (beat cadence): ${doctorResult.provenanceFinding.status.toUpperCase()}`);
+      if (doctorResult.provenanceFinding.status !== 'verified') {
+        for (const line of doctorResult.provenanceFinding.lines) console.log(`  ${line}`);
       }
     }
   }
@@ -1509,16 +1564,48 @@ async function cmdAudit(rest: string[]): Promise<void> {
  * names. Fails loudly on a nonexistent path (before any git/ledger I/O); returns targetId:null
  * for an unregistered target rather than throwing — verifyProvenance's 'target-not-registered'
  * cause is the correct, load-bearing outcome for that case (see provenance.ts).
+ *
+ * WI-242 — `--target` here used to accept ONLY a filesystem path, the one command in the whole
+ * CLI where `--target` didn't mean a registered NAME (every other command — `loopctl new
+ * --target <name>`, `loopctl target add`'s registration — resolves `--target` through
+ * `byName`). On a safety control, that mismatch surfaced as a confusing "Target path not found"
+ * for the ordinary case of naming a target the way the rest of the CLI teaches you to. Fixed by
+ * trying `byName` FIRST when `--target` is given: a registered name resolves to its manifest's
+ * repoPath exactly like every other target-resolving command. A value that is not a registered
+ * name falls through to the PATH form unchanged — this is a deliberate alias, not a breaking
+ * change: the pre-push hook invokes `verify-provenance --target "$ROOT"` (an absolute path) and
+ * existing tests pass a path via `--target` too, and neither can collide with a registered
+ * target's `name` in practice. The bare positional form (`verify-provenance <path>`, no `--target`
+ * at all) is untouched — it was always path-only and stays that way.
  */
 async function resolveProvenanceTarget(
   rest: string[],
 ): Promise<{ repoPath: string; targetId: string | null; targetName: string }> {
   const targetFlag = getFlag(rest, '--target');
   const positional = positionals(rest, ['--target', '--from', '--to', '--ref']).find(a => !a.startsWith('--'));
+
+  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const result = fold(allEvents);
+
+  // --target as a registered NAME (the convention everywhere else in loopctl) — tried first,
+  // before any path resolution, so a name match never falls through to a confusing
+  // "path not found" for what is in fact a valid, registered target.
+  if (targetFlag !== undefined) {
+    const byName = result.targets.byName(targetFlag);
+    if (byName) {
+      return { repoPath: byName.repoPath, targetId: byName.targetId, targetName: byName.name };
+    }
+  }
+
+  // Alias: --target (unmatched as a name) or the bare positional, as a PATH — the original
+  // (and, for the positional form, only ever) behaviour.
   const rawPath = targetFlag ?? positional ?? REPO_ROOT;
   let repoPath = resolve(rawPath);
   if (!existsSync(repoPath)) {
-    console.error(`Target path not found: ${repoPath}`);
+    const asNameHint = targetFlag !== undefined
+      ? ` ('${targetFlag}' is also not a registered target name — run 'loopctl target list' to see what is)`
+      : '';
+    console.error(`Target path not found: ${repoPath}${asNameHint}`);
     process.exit(1);
   }
   // Normalize through `git rev-parse --show-toplevel`, exactly like `cmdTarget`'s `add` — on
@@ -1529,19 +1616,22 @@ async function resolveProvenanceTarget(
   const toplevel = spawnSync('git', ['-C', repoPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
   if (toplevel.status === 0 && toplevel.stdout.trim()) repoPath = toplevel.stdout.trim();
 
-  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
-  const result = fold(allEvents);
   const reg = result.targets.byRepoPath(repoPath);
   return { repoPath, targetId: reg?.targetId ?? null, targetName: reg?.name ?? repoPath };
 }
 
 /**
- * verify-provenance [<target-path>] [--target <path>] [--from <sha>] [--to <ref>]
+ * verify-provenance [<target-path>] [--target <name-or-path>] [--from <sha>] [--to <ref>]
  *                    [--ref <refname>] [--json]
  *
  * Verify a commit range against the operator's real ledger (see provenance.ts's module header
  * for WHY this exists). Exit codes are the API — 0 verified, 1 uncovered, 2 indeterminate
  * (fail-closed), 3 break-glass-open — never remapped here.
+ *
+ * `--target` accepts a registered target NAME (WI-242 — the convention every other loopctl
+ * command uses) OR a path (the original, still-supported alias); see
+ * resolveProvenanceTarget's doc comment for why both forms coexist. The bare positional form
+ * (`verify-provenance <path>`, no `--target`) is path-only, unchanged.
  */
 async function cmdVerifyProvenance(rest: string[]): Promise<void> {
   const asJson = hasFlag(rest, '--json');
@@ -1595,15 +1685,19 @@ async function cmdVerifyProvenance(rest: string[]): Promise<void> {
 }
 
 /**
- * provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]
+ * provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]
  *
  * The audited exception to commit-provenance verification (schema.ts's ProvenanceBreakGlassData
  * doc comment: a ledger event, never a commit-message trailer — a trailer is a self-declared
  * assertion, a ledger event is an operator act recorded where the audit lives). Every refusal
  * below happens BEFORE any ledger write.
+ *
+ * `--target` accepts a registered NAME or a path — see resolveProvenanceTarget (WI-242), shared
+ * verbatim with verify-provenance so the two commands can never disagree about which target a
+ * value names.
  */
 async function cmdProvenanceBreakGlass(rest: string[]): Promise<void> {
-  const usageLine = 'Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]';
+  const usageLine = 'Usage: loopctl provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]';
   const reason = getFlag(rest, '--reason');
   const hoursStr = getFlag(rest, '--hours');
 
@@ -1664,7 +1758,7 @@ async function cmdProvenance(rest: string[]): Promise<void> {
   if (sub === 'break-glass') {
     await cmdProvenanceBreakGlass(rest.slice(1));
   } else {
-    console.error('Usage: loopctl provenance break-glass [--target <path>] --reason "<why>" [--hours <n>]');
+    console.error('Usage: loopctl provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]');
     process.exit(1);
   }
 }
