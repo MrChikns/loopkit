@@ -155,6 +155,12 @@ test('parse: sibling round-trip', () => {
   assert.equal(o.spec, 'build the new thing');
 });
 
+test('parse: unpark round-trip (no SPEC/VERDICT required, unlike steer/sibling/verdict)', () => {
+  const o = parseEngagementOutcome('OUTCOME: unpark\nREPLY: Yes, proceed with that decision.');
+  assert.equal(o.kind, 'unpark');
+  assert.equal(o.reply, 'Yes, proceed with that decision.');
+});
+
 test('parse: unknown/absent OUTCOME → unparseable', () => {
   assert.equal(parseEngagementOutcome('just some prose, no block').kind, 'unparseable');
   assert.equal(parseEngagementOutcome('OUTCOME: frobnicate\nREPLY: x').kind, 'unparseable');
@@ -309,6 +315,37 @@ test('reactor: verdict is a proposal — msg.out proposal:true, NO item.accepted
     assert.ok((proposals[0]!.data as { text: string }).text.includes('✅ accept WI-001'), 'names the exact confirm pattern');
     const verbs = all.filter(e => (e.type === 'item.accepted' || e.type === 'item.rejected') && e.item === 'WI-001');
     assert.equal(verbs.length, 0, 'the LLM never emits a destructive verb');
+  } finally {
+    cleanup();
+  }
+});
+
+test('reactor: unpark is a proposal on a decision-parked item — msg.out proposal:true, item STAYS parked', async () => {
+  const reply = makeEvent('operator', 'WI-001', 'msg.in', { text: 'yes, go ahead with option B' }, AFTER(5));
+  const seed: LedgerEvent[] = [
+    makeEvent('system', 'system', 'engagement.baseline', {}, BASELINE_TS),
+    makeEvent('operator', 'WI-001', 'item.captured', { source: 'x', text: 'do X' }, iso(NOW - 3000)),
+    makeEvent('reactor', 'WI-001', 'item.queued', { spec: 'do X', touches: 'packages/engine/' }, iso(NOW - 2500)),
+    makeEvent('reactor', 'WI-001', 'item.parked', { reason: 'decision: option A or B?', parkKind: 'decision' }, iso(NOW - 2000)),
+    reply,
+  ];
+  const { repoRoot, ledgerDir, cleanup } = await makeEnv(seed);
+  try {
+    const provider = makeEngageProvider('OUTCOME: unpark\nREPLY: Great, that answers the open decision.');
+    const all = await runBeat(repoRoot, ledgerDir, provider);
+    const proposals = all.filter(e => e.type === 'msg.out' && e.item === 'WI-001'
+      && (e.data as { proposal?: boolean }).proposal === true
+      && (e.data as { inReplyTo?: string }).inReplyTo === reply.id);
+    assert.equal(proposals.length, 1, 'one proposal msg.out');
+    assert.ok((proposals[0]!.data as { text: string }).text.includes('▶ parked WI-001: approve'), 'names the exact confirm pattern');
+    // Never a direct state mutation — the LLM proposes, it never re-queues/approves itself. The
+    // seed already carries one item.queued (the pre-park queue) and zero item.approved; the
+    // engagement step must add neither a second requeue nor an approval of its own.
+    assert.equal(all.filter(e => e.type === 'item.approved' && e.item === 'WI-001').length, 0,
+      'the LLM never approves the park on its own — only the operator confirm does');
+    assert.equal(all.filter(e => e.type === 'item.queued' && e.item === 'WI-001').length, 1,
+      'no second requeue was added — still just the original pre-park item.queued from the seed');
+    assert.equal(fold(all).items.get('WI-001')!.state, 'parked', 'item remains parked pending the operator confirm');
   } finally {
     cleanup();
   }
