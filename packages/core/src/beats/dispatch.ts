@@ -269,6 +269,14 @@ export interface DispatchOptions {
   /** Test seam at the final target deploy boundary, after checkout synchronization. */
   targetBeforeDeploy?: (context: { expectedCommit: string; repoRoot: string }) => void;
   /**
+   * WI-220: deterministic seam for the merge-evidence-durability window — fires immediately
+   * after `item.merged` is durably appended and before the worktree/branch cleanup that
+   * follows it. Lets a test observe (or the process crash at) exactly the point where the
+   * merge is already attributable but its build worktree/branch still exist, proving the
+   * ledger record does not depend on that cleanup having run.
+   */
+  targetAfterMergeAppend?: (context: { commit: string; repoRoot: string; worktree: string; branch: string }) => void;
+  /**
    * Injected judge results map for tests.
    * Keys are WI-NNN ids. When present, the real judge provider.run is skipped for that item.
    * Set to { ok: false, error: '...', code: 'unknown' } to simulate judge failure (fail-open).
@@ -2960,10 +2968,16 @@ async function finalizeTargetBuild(
   }
   const mergeCommit = closeResult.commit;
 
-  // Cleanup: drop the build worktree + branch (merge is in the target's default branch now).
-  removeWorktree(gitRoot, wtPath);
-  spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
-
+  // WI-220: record the merge BEFORE cleanup destroys the worktree/branch. The merge is already
+  // live on the target's default branch at this point (closeResult.ok), so the ledger append
+  // below is what makes it attributable. Reordered from the old cleanup-then-append sequence:
+  // if the process died between removeWorktree/branch -D and appendEvents, the refs needed to
+  // re-derive the evidence were already gone AND the ledger had no record — an unrecoverable,
+  // silent merge (the item parked as "no commit" while the code was live and unattributed).
+  // Appending first means a crash in the *cleanup* window instead leaves a durably-recorded,
+  // attributed merge with a leaked worktree/branch — a cheap, detectable, non-silent failure
+  // mode (the leaked branch/worktree is disk cleanup debt, not lost evidence).
+  //
   // TRUST-HARDENING: actual-diff evidence for the target-lane merge.
   const targetEvidence = mergeEvidence(integrationBase, mergeCommit, targetChangedFiles, manifest.gateCommand);
   const mergeEvents: ReturnType<typeof makeEvent>[] = [
@@ -2988,6 +3002,17 @@ async function finalizeTargetBuild(
     }));
   }
   await appendEvents(opts.ledgerDir, mergeEvents);
+  opts.targetAfterMergeAppend?.({ commit: mergeCommit, repoRoot: gitRoot, worktree: wtPath, branch });
+
+  // Cleanup: drop the build worktree + branch now that the merge is durably recorded above.
+  // A failure here (or a crash mid-cleanup) must NOT roll back or mask the merge that was just
+  // appended — removeWorktree is best-effort/never-throws by contract, and `git branch -D` is
+  // fire-and-forget (spawnSync, result unchecked) exactly as before this reorder, so neither can
+  // un-record `item.merged`. Worst case is a leaked worktree/branch, which is visible and cheap
+  // to clean up on the next pass — not a silent, unattributed merge.
+  removeWorktree(gitRoot, wtPath);
+  spawnSync('git', ['branch', '-D', branch], { cwd: gitRoot, stdio: 'pipe' });
+
   // WI-177: same board trace on this lane as on the engineering lane — the remainder is captured
   // (never queued) against the SAME target the partial slice shipped to.
   if (targetDeferred) {

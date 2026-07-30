@@ -186,6 +186,107 @@ test('E2E: a targeted item builds in a worktree of the target repo and merges in
   }
 });
 
+test('WI-220: a crash between merge-append and worktree/branch cleanup leaves a recoverable, attributed merge', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-crash-window-'));
+  try {
+    const planeRoot = join(base, 'plane');
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    makePlaneRepo(planeRoot);
+    makeNotesTargetRepo(targetRoot);
+
+    const manifest = readTargetManifest(targetRoot);
+    const hash = manifestHash(manifest);
+
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: hash, defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-220', 'item.captured', { source: 'cli', text: 'add marker', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      makeEvent('cli', 'WI-220', 'item.queued', { spec: 'add a marker helper', touches: 'src/' }, '2026-01-01T00:02:00Z'),
+    ]);
+
+    const provider = makeNonCommittingWorker({
+      name: 'fake',
+      files: [{ path: 'src/extra.js', contents: 'export const marker = 7;\n' }],
+      manifest: {
+        wi: 'WI-220',
+        filesTouched: ['src/extra.js'],
+        testsAdded: [],
+        confidence: 0.9,
+        notes: 'added marker',
+        subject: 'feat(WI-220): add marker',
+      },
+    });
+
+    // Simulate the process dying in the cleanup window: the merge is already durably appended
+    // (targetAfterMergeAppend fires AFTER appendEvents(mergeEvents), before removeWorktree /
+    // `git branch -D`) — throwing here aborts the run exactly like a crash would, before
+    // cleanup ever runs. runDispatch has no catch around the per-item work (only a `finally`
+    // that commits ledger residue), so the thrown error propagates as a rejection, same as an
+    // abrupt process death would leave the beat's next invocation to discover.
+    let hookFired = false;
+    let capturedWorktree = '';
+    let capturedBranch = '';
+    let capturedRepoRoot = '';
+    await assert.rejects(
+      () => runDispatch({
+        repoRoot: planeRoot,
+        ledgerDir,
+        autonomy: 'on',
+        provider,
+        config: testConfig(),
+        authProbeResult: { ok: true },
+        targetAfterMergeAppend: (ctx) => {
+          hookFired = true;
+          capturedWorktree = ctx.worktree;
+          capturedBranch = ctx.branch;
+          capturedRepoRoot = ctx.repoRoot;
+          throw new Error('simulated crash: process dies in the cleanup window');
+        },
+      }),
+      /simulated crash/,
+    );
+    assert.ok(hookFired, 'the merge-append hook must fire before this test can claim anything about the crash window');
+
+    // Evidence that the "crash" landed BEFORE cleanup ran: the build worktree and branch are
+    // still on disk / in git, exactly as a real crash would leave them.
+    assert.ok(existsSync(capturedWorktree), 'worktree must still exist — cleanup did not run past the simulated crash');
+    // The target lane's worktree + branch live in the TARGET repo (gitRoot), not the plane repo —
+    // capturedRepoRoot is what the hook observed dispatch pass as gitRoot for this exact cleanup.
+    assert.equal(capturedRepoRoot, targetRoot, 'sanity: the hook must observe the target repo as gitRoot, not the plane repo');
+    const branchStillExists = spawnSync('git', ['rev-parse', '--verify', capturedBranch], { cwd: capturedRepoRoot, stdio: 'pipe' });
+    assert.equal(branchStillExists.status, 0, 'build branch must still exist — cleanup did not run past the simulated crash');
+
+    // DECISIVE: despite the crash and the leftover worktree/branch, the merge itself is fully
+    // durable and attributed — a fresh fold of the ledger recovers it with no ambiguity, and the
+    // commit is real, on the target's main, independent of whether the leftover worktree/branch
+    // are ever cleaned up.
+    const events = await loadAllEvents(ledgerDir);
+    const folded = fold(events);
+    assert.equal(folded.items.get('WI-220')?.state, 'merged',
+      'the item must fold to merged even though the process "crashed" immediately after appending the merge events');
+    const merged = events.filter(e => e.type === 'item.merged' && e.item === 'WI-220');
+    assert.equal(merged.length, 1, 'exactly one item.merged, durably recorded before the simulated crash');
+    const mergeCommit = (merged[0].data as { commit: string; baseSha?: string; changedFiles?: string[] }).commit;
+    assert.ok(mergeCommit, 'the merge event must carry an attributable commit sha');
+
+    const commitInTarget = spawnSync('git', ['cat-file', '-t', mergeCommit], { cwd: targetRoot, stdio: 'pipe' });
+    assert.equal(commitInTarget.stdout.toString().trim(), 'commit',
+      'the attributed merge commit must actually exist in the target repo — recoverable evidence, not a dangling reference');
+    const targetLog = spawnSync('git', ['log', '--oneline', 'main'], { cwd: targetRoot, stdio: 'pipe' }).stdout.toString();
+    assert.match(targetLog, /WI-220 \(target notes\)/,
+      'the merge commit must already be live on the target main — the crash hit cleanup, not publication');
+
+    // Not silent: unlike the pre-fix ordering, there is no "target build produced no commit"
+    // park for this item — the record IS the merge, not an absence of one.
+    assert.equal(events.some(e => e.item === 'WI-220' && e.type === 'item.parked'), false,
+      'a crash in the cleanup window must not surface as a silent/parked no-commit outcome');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('ADR-010 stage-2 fix: a target-lane build records review.verdict + cost.usage (was stderr-only)', async () => {
   const base = mkdtempSync(join(tmpdir(), 'tgt-e2e-judge-'));
   try {
