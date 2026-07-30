@@ -402,15 +402,23 @@ export type DeploySpawnResult =
   | { started: false; reason: string };
 export type DeploySpawn = typeof spawn;
 
-export function fireDeployOnMerge(
+export async function fireDeployOnMerge(
   repoRoot: string,
   deployCommand: string,
   wiIds: string[],
   spawnDeploy: DeploySpawn = spawn,
   expectedCommit?: string,
+  /**
+   * Awaited immediately before the detached process is actually spawned — i.e. only once
+   * configuration and the checkout preflight have both passed. The deploy lifecycle owner
+   * (../deploy.ts, WI-219) uses this to durably persist a deploy.launched attempt record BEFORE
+   * the spawn, so the ledger's launch count is never inferred and never includes a
+   * rejected-before-spawn preflight failure.
+   */
+  onSpawnAttempt?: () => Promise<void> | void,
 ): Promise<DeploySpawnResult> {
   if (!deployCommand) {
-    return Promise.resolve({ started: false, reason: 'deploy command is not configured' });
+    return { started: false, reason: 'deploy command is not configured' };
   }
   if (expectedCommit) {
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
@@ -422,16 +430,17 @@ export function fireDeployOnMerge(
     const observed = head.status === 0 ? head.stdout.trim() : '';
     const residue = status.status === 0 ? status.stdout.trim() : 'git status failed';
     if (observed !== expectedCommit || residue) {
-      return Promise.resolve({
+      return {
         started: false,
         reason:
           `deploy checkout preflight failed: expected clean HEAD ${expectedCommit}, observed ${
             observed || '(unresolvable)'
           }${residue ? `; checkout changes: ${residue.split('\n').slice(0, 5).join('; ')}` : ''}`,
-      });
+      };
     }
   }
   try {
+    await onSpawnAttempt?.();
     const child = spawnDeploy('sh', ['-c', deployCommand], {
       cwd: repoRoot,
       detached: true,

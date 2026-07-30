@@ -349,6 +349,14 @@ export interface ItemRecord {
   deployFailureReason?: string;
   deployed?: boolean;
   /**
+   * Durable launch-attempt count for the current pending request (reset to 0 by
+   * deploy.requested, incremented by each deploy.launched). Lets a timeout distinguish
+   * "spawned at least once and went silent" from "never actually launched" (WI-219) without
+   * inferring launch history from eventsWritten, which is 0 on a reconciled re-launch.
+   */
+  deployLaunchCount?: number;
+  deployLastLaunchedAt?: string;
+  /**
    * TRUST-HARDENING: actual-diff evidence folded from item.merged (additive; absent on legacy
    * merges and no-code merges). The acceptance classifier prefers `mergeChangedFiles` over the
    * declared `touches` so a merge with real code changes can never be mis-classified 'auto' just
@@ -802,6 +810,12 @@ function foldDeployLifecycle(
       rec.deployCompletedAt = undefined;
       rec.deployFailureReason = undefined;
       rec.deployed = false;
+      rec.deployLaunchCount = 0;
+      rec.deployLastLaunchedAt = undefined;
+      break;
+    case 'deploy.launched':
+      rec.deployLaunchCount = (rec.deployLaunchCount ?? 0) + 1;
+      rec.deployLastLaunchedAt = ts;
       break;
     case 'deploy.succeeded':
       rec.deployStatus = 'succeeded';
@@ -1057,6 +1071,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           clearParkFields(rec);
           break;
         case 'deploy.requested':
+        case 'deploy.launched':
         case 'deploy.succeeded':
         case 'deploy.failed':
         case 'deploy.timed-out':
@@ -1463,6 +1478,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         break;
 
       case 'deploy.requested':
+      case 'deploy.launched':
       case 'deploy.succeeded':
       case 'deploy.failed':
       case 'deploy.timed-out':

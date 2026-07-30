@@ -3755,10 +3755,19 @@ async function stepDoctor(
 }
 
 /**
- * Reconcile durable deploy intent after process crashes, then close requests that never produce
- * a terminal receipt. These are data-only lifecycle transitions: the merged item remains
- * merged/accepted and no rollback is attempted. Reusing deployBehindHours gives the receipt
- * timeout and deploy-freshness SLO one clock.
+ * Reconcile durable deploy intent after process crashes, THEN close requests that still never
+ * produce a terminal receipt. These are data-only lifecycle transitions: the merged item
+ * remains merged/accepted and no rollback is attempted. Reusing deployBehindHours gives the
+ * receipt timeout and deploy-freshness SLO one clock.
+ *
+ * Reconciliation must run before the timeout close (WI-219 D18): the crash-recovery window this
+ * function exists for — the plane dies after deploy.requested is durable but before the spawn,
+ * and returns after the SLO threshold has elapsed — is exactly a request old enough to also
+ * qualify for closeStalePendingDeploys. Closing it first would exclude it from ever being
+ * launched and record a timeout for a deploy that never started. reconcileDeployIntents' own
+ * minPendingAgeMs (one reactor beat interval) is what keeps this step from re-spawning a
+ * request stepApplyVerbs just launched earlier in the SAME beat (D17) — that gate, not step
+ * ordering, is what makes an in-flight request safe to reconcile here.
  */
 async function stepDeployTimeouts(
   opts: ReactorOptions,
@@ -3766,23 +3775,19 @@ async function stepDeployTimeouts(
 ): Promise<StepResult> {
   const step = 'deploy-timeouts';
   try {
+    const nowMs = opts.now ?? Date.now();
     const timeoutHours = cfg.slo?.deployBehindHours ?? 1;
-    const events = await closeStalePendingDeploys({
-      ledgerDir: opts.ledgerDir,
-      actor: 'reactor',
-      nowMs: opts.now ?? Date.now(),
-      timeoutMs: timeoutHours * 3_600_000,
-      dryRun: opts.dryRun,
-    });
+    const beatIntervalMs = (cfg.loops.reactorIntervalSec ?? 30) * 1000;
+
     const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
     const foldResult = fold(allEvents);
-    const timedOutItems = new Set(events.map(event => event.item));
     const reconciliation = await reconcileDeployIntents({
       ledgerDir: opts.ledgerDir,
       actor: 'reactor',
       items: foldResult.items.values(),
       dryRun: opts.dryRun,
-      excludeItems: timedOutItems,
+      minPendingAgeMs: beatIntervalMs,
+      nowMs,
       resolve: rec => {
         // A targetId without a target name is attribution metadata, not permission to switch
         // execution away from the plane. This mirrors every other target-routing call site.
@@ -3817,6 +3822,19 @@ async function stepDeployTimeouts(
         };
       },
     });
+
+    // Re-fold: reconciliation above may have appended deploy.launched/deploy.requested/
+    // deploy.failed receipts under its own lock, and the timeout close must see that fresh
+    // state rather than the pre-reconciliation snapshot (a request reconciliation just
+    // relaunched is still 'pending' but now has a current deployRequestedAt/launch count).
+    const events = await closeStalePendingDeploys({
+      ledgerDir: opts.ledgerDir,
+      actor: 'reactor',
+      nowMs,
+      timeoutMs: timeoutHours * 3_600_000,
+      dryRun: opts.dryRun,
+    });
+
     const failureDetail = reconciliation.failures.length > 0
       ? `; ${reconciliation.failures.join('; ')}`
       : '';
@@ -3825,11 +3843,11 @@ async function stepDeployTimeouts(
       ok: true,
       eventsWritten: opts.dryRun ? 0 : events.length + reconciliation.eventsWritten,
       mdWritten: false,
-      detail: `${events.length === 0
-        ? 'no stale pending deploys'
-        : `${opts.dryRun ? 'would time out' : 'timed out'} ${events.length} stale deploy request(s)`}; ${
+      detail: `${
         reconciliation.attempted
-      } deploy intent(s) ${opts.dryRun ? 'would be reconciled' : 'reconciled'}${failureDetail}`,
+      } deploy intent(s) ${opts.dryRun ? 'would be reconciled' : 'reconciled'}${failureDetail}; ${events.length === 0
+        ? 'no stale pending deploys'
+        : `${opts.dryRun ? 'would time out' : 'timed out'} ${events.length} stale deploy request(s)`}`,
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };

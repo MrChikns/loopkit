@@ -162,7 +162,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1478`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1494`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -590,7 +590,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4211`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4229`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -607,7 +607,7 @@ inferred green. `must` remains manual regardless of deployment truth.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:3857`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:3875`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier
   bypasses this *plane-health* gate because there is nothing to test, but it still must satisfy the
   deployment prerequisite above.
@@ -665,10 +665,16 @@ flowchart TD
 
 - **The request is durable before process hand-off.** For every merged item whose deploy command is
   configured, the plane appends `deploy.requested`, awaits that write, and only then spawns
-  (`packages/core/src/deploy.ts:138`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
-  asynchronous process-launch errors append `deploy.failed`. A reactor reconciliation also repairs
-  both crash windows: a configured merge missing its request is requested and launched, while a
-  still-pending request safely re-invokes the configured self-locking command.
+  (`packages/core/src/deploy.ts:168`<!--cite:requestDeployOnMerge-->). Both synchronous throws and
+  asynchronous process-launch errors append `deploy.failed`, and each actual spawn attempt — first
+  launch or a later reconciled relaunch — appends its own durable `deploy.launched` record, so the
+  ledger's launch count is never inferred from event counts that stay flat on a re-invoked request.
+  A reactor reconciliation also repairs both crash windows, in this order: a configured merge
+  missing its request is requested and launched immediately (no prior spawn to duplicate), while a
+  still-pending request only becomes eligible for re-invocation once it has outlived at least one
+  full reactor-beat interval without a terminal receipt — younger than that, it is presumed still
+  in flight from the beat that requested it, so it is left alone rather than relaunched
+  every beat.
 - **The process remains fire-and-forget by construction.** It is detached, stdio ignored and
   unreferenced (`packages/core/src/beats/worktree-deps.ts:405`<!--cite:fireDeployOnMerge-->). The
   merged item ids arrive through `DEPLOY_WI_IDS`. For a target's immediate post-merge handoff,
@@ -681,22 +687,28 @@ flowchart TD
 - Current merges fold to five explicit states: `not-configured`, `pending`, `succeeded`, `failed`
   and `timed-out`; a legacy merge with no configuration evidence remains honestly **unknown**.
   Explicit lifecycle success sets compatibility `deployed` true
-  (`packages/core/src/fold.ts:806`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
+  (`packages/core/src/fold.ts:820`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
   none changes the item's merged/accepted state.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
   authority. It carried opposite meanings in two lanes until WI-176 — the target lane wrote
   `true` whenever a deploy command was merely *configured* — so a board read before that fix could
   not be trusted on this field.
-- **A silent script becomes an explicit timeout.** Each reactor beat closes a `pending` request
-  after **1**<!--pin:deployBehindHours--> hour
-  (`packages/core/src/deploy.ts:293`<!--cite:stalePendingDeployEvents-->), deterministically and once.
-  A late success can still supersede that timeout. The separate deploy-freshness SLO
+- **A silent script becomes an explicit timeout — after reconciliation has had its chance.** Each
+  reactor beat runs reconciliation first, then closes a request still `pending` after
+  **1**<!--pin:deployBehindHours--> hour
+  (`packages/core/src/deploy.ts:352`<!--cite:stalePendingDeployEvents-->), deterministically and
+  once. Ordering matters: a request old enough to time out is also old enough to be a crash-recovery
+  candidate, so reconciling before closing means a recoverable intent gets launched instead of
+  timed out unattempted. The timeout reason itself is honest about which happened — it names the
+  number of recorded `deploy.launched` attempts when the command spawned but stayed silent, and
+  says plainly "without ever being launched" when reconciliation could not recover it at all. A late
+  success can still supersede that timeout. The separate deploy-freshness SLO
   (`packages/core/src/slo.ts:1222`<!--cite:deployProbe-->) remains the checkout-level backstop,
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
   `unknown`.
 - ⚪ **There is no automatic rollback anywhere.** A merge's `certification.rollback` is a string the
-  worker wrote and you read (`packages/core/src/fold.ts:736`<!--cite:certificationRollback-->). Nothing
+  worker wrote and you read (`packages/core/src/fold.ts:744`<!--cite:certificationRollback-->). Nothing
   executes it.
 
 ---
