@@ -275,3 +275,83 @@ test('reactor: a same-named branch in the plane cwd does NOT satisfy the target 
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+// WI-223 (D13): deploy reconciliation must pin `expectedCommit` to the SHA that was actually
+// gated and merged (rec.mergeCommit), never to whatever the target checkout's default branch
+// happens to report at reconciliation time. Those two can diverge under a concurrent merge or a
+// drifted checkout — this is a real failure mode in this codebase, not a hypothetical.
+test('reactor: deploy reconciliation pins expectedCommit to the gated merge SHA, not a later target tip', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'tgt-deploy-reconcile-'));
+  try {
+    const targetRoot = join(base, 'notes');
+    const ledgerDir = join(base, 'ledger');
+    // deployCommand must be truthy for reconciliation to treat this item as a live candidate;
+    // 'true' is a harmless no-op shell command — the point under test is the PREFLIGHT check
+    // that runs before it would ever be spawned.
+    mkdirSync(targetRoot, { recursive: true });
+    writeFileSync(join(targetRoot, 'loopkit.target.json'), JSON.stringify({
+      name: 'notes', deployCommand: 'true',
+    }), 'utf8');
+    writeFileSync(join(targetRoot, 'notes.txt'), 'seed\n', 'utf8');
+    git(targetRoot, ['init', '-b', 'main']);
+    git(targetRoot, ['config', 'user.email', 't@t']);
+    git(targetRoot, ['config', 'user.name', 't']);
+    git(targetRoot, ['add', '-A']);
+    git(targetRoot, ['commit', '-m', 'init target']);
+    const gatedMergeSha = git(targetRoot, ['rev-parse', 'HEAD']).stdout.toString().trim();
+
+    // Advance the target's default branch PAST the gated merge — the exact divergence the
+    // defect collapses: reactor.ts used to re-derive expectedCommit from `git rev-parse` of
+    // this branch tip at reconciliation time, so it would silently pin to driftedTip instead
+    // of the commit the gate actually proved.
+    writeFileSync(join(targetRoot, 'later.txt'), 'later\n', 'utf8');
+    git(targetRoot, ['add', 'later.txt']);
+    git(targetRoot, ['commit', '-m', 'unrelated later commit']);
+    const driftedTip = git(targetRoot, ['rev-parse', 'HEAD']).stdout.toString().trim();
+    assert.notEqual(driftedTip, gatedMergeSha, 'test setup must actually create a divergence');
+
+    const manifest = readTargetManifest(targetRoot);
+    await appendEvents(ledgerDir, [
+      makeEvent('cli', 'notes', 'target.registered', {
+        name: 'notes', repoPath: targetRoot, manifestHash: manifestHash(manifest), defaultBranch: 'main',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('cli', 'WI-201', 'item.captured', { source: 'cli', text: 'ship notes', target: 'notes' }, '2026-01-01T00:01:00Z'),
+      // The gated-and-merged commit is recorded here — this is rec.mergeCommit after folding.
+      makeEvent('dispatch', 'WI-201', 'item.merged', {
+        commit: gatedMergeSha, deployed: false, deployConfigured: true,
+      }, '2026-01-01T00:02:00Z'),
+      // No prior deploy.requested: deployStatus is undefined, so this item is picked up as a
+      // live reconciliation candidate on the very next reactor beat (crash-recovery path).
+    ]);
+
+    const planeRoot = join(base, 'plane');
+    makePlaneRepo(planeRoot);
+
+    await runReactor({
+      repoRoot: planeRoot,
+      ledgerDir,
+      autonomy: 'on',
+      provider: null,
+      config: testConfig(),
+      gateRunner: () => ({ passed: true, timedOut: false, reason: 'green' }),
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    const rec = fold(events).items.get('WI-201')!;
+
+    // DECISIVE: the checkout is at driftedTip, not gatedMergeSha, so a correctly-pinned
+    // expectedCommit must fail the preflight (clean-HEAD check) rather than silently deploy
+    // against the wrong commit. A deploy.failed receipt naming gatedMergeSha as the expected
+    // commit is the observable proof the fix pinned to the gated SHA.
+    assert.equal(rec.deployStatus, 'failed',
+      `expected the preflight to reject the drifted checkout (got deployStatus=${rec.deployStatus})`);
+    assert.match(rec.deployFailureReason ?? '', /deploy checkout preflight failed/);
+    assert.match(rec.deployFailureReason ?? '', new RegExp(`expected clean HEAD ${gatedMergeSha}`),
+      'the preflight failure must cite the GATED MERGE SHA as the expected commit — proof ' +
+      'expectedCommit was pinned to rec.mergeCommit, not re-derived from the drifted branch tip');
+    assert.doesNotMatch(rec.deployFailureReason ?? '', new RegExp(`expected clean HEAD ${driftedTip}`),
+      'the preflight failure must NOT cite the drifted target tip as the expected commit');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

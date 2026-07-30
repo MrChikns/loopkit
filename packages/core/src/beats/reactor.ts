@@ -3801,24 +3801,23 @@ async function stepDeployTimeouts(
             reason: `deploy reconciliation failed: ${target.error}`,
           };
         }
-        const published = spawnSync(
-          'git',
-          ['rev-parse', target.manifest.defaultBranch],
-          { cwd: target.reg.repoPath, encoding: 'utf8' },
-        );
-        if (published.status !== 0 || !published.stdout.trim()) {
+        // WI-223 (D13): pin to the SHA the gate actually proved and merged (rec.mergeCommit,
+        // folded from this item's own item.merged `commit` field — the same value the primary
+        // target-lane merge path hands to requestDeployOnMerge as `expectedCommit`), never to
+        // whatever the target checkout's default branch happens to report right now. Ambient
+        // `git rev-parse` here can diverge from the gated commit under concurrent merges or a
+        // drifted checkout, silently pinning the deploy to the wrong tree.
+        if (!rec.mergeCommit) {
           return {
             ok: false,
-            reason: `deploy reconciliation failed: target default branch '${
-              target.manifest.defaultBranch
-            }' is unresolvable`,
+            reason: `deploy reconciliation failed: item '${rec.id}' has no recorded merge commit`,
           };
         }
         return {
           ok: true,
           repoRoot: target.reg.repoPath,
           deployCommand: target.manifest.deployCommand,
-          expectedCommit: published.stdout.trim(),
+          expectedCommit: rec.mergeCommit,
         };
       },
     });
