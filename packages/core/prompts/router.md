@@ -14,6 +14,17 @@ your console renders the reply from the fold. There are no markdown seam files t
 work item lives entirely in the loopkit ledger. Stay fast: classify from the TEXT; a repo read
 is allowed but rarely needed.
 
+## Related in-flight items
+
+When the item below carries a **RELATED IN-FLIGHT ITEMS** section, it lists other queued/
+building/gated/parked/approved items whose declared write footprint (`Touches`) overlaps this
+one's, or that share a dependency edge with it — assembled deterministically from the ledger, not
+guessed. Use it to avoid routing straight into a collision: prefer `park` with a
+`needs decision:`-prefixed `SPEC` naming the conflicting item when this item would clearly step on
+in-flight work, and prefer a dependency edge (rather than duplicating the other item's scope) when
+this item depends on one already listed. The section is omitted entirely when there is nothing
+related — its absence is not a signal that nothing is in flight, only that nothing overlaps.
+
 ## Attachments
 
 When the item below lists an **ATTACHMENTS** section, Read each file path (images included)
