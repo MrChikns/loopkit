@@ -879,6 +879,95 @@ export interface ProvenanceBreakGlassData {
   retroItem?: string;
 }
 
+// ---------------------------------------------------------------------------
+// knowledge domain (ADR-015 — verified knowledge promotion, Slice 1)
+//
+// DISAMBIGUATION: this `knowledge.*` event domain is the ledger-native, gate-proven-and-
+// human-ratified worker BASELINE (the playbook projection) — see
+// docs/decisions/ADR-015-verified-knowledge-promotion.md. It is UNRELATED to the console
+// Knowledge index (`LoopkitConfig.knowledge` in config.ts / docs/knowledge.md), which is an
+// operator-declared set of markdown sources rendered as cards on the /knowledge page.
+// ---------------------------------------------------------------------------
+
+/**
+ * knowledge.candidate — a distilled lesson extracted from ONE gate-proven merge by the
+ * strict-auditor harvest step (ADR-015 Slice 3). Carried on its OWN work item (WI-NNN,
+ * source-stamped `knowledge:<sourceWi>:<contentHash>` for once-per-(source, lesson) dedup,
+ * mirroring stepPortabilityPromotion's `portability:<id>:<targetId>` stamp). Parked as a
+ * decision the same beat — a candidate is never queued as build work; it is a question for
+ * the operator.
+ */
+export interface KnowledgeCandidateData {
+  /** The one-line lesson, in imperative playbook voice. Hard-capped (≤ playbook line budget). */
+  lesson: string;
+  /** Stable content hash of `lesson` (normalized) — the dedup + eviction key. */
+  contentHash: string;
+  /** Which merged item this was harvested from. Provenance, not decoration. */
+  sourceWi: string;
+  /** The command that PROVED sourceWi's build — copied from item.merged.gateCommand. */
+  gateCommand?: string;
+  /** Verbatim excerpt of the gate evidence the lesson is grounded in (capped). */
+  gateEvidenceExcerpt?: string;
+  /** How the lesson was produced. Only 'strict-auditor' in v1; extensible. */
+  method: 'strict-auditor';
+  /** Model that did the extraction (attributability, mirrors DiagnosisRecordedData.model). */
+  model: string;
+  /**
+   * A deterministic freshness anchor the materialize step re-checks at read time: a repo
+   * path and/or a command the lesson depends on. If the path no longer exists (or the
+   * command's tool is gone), the lesson is stale and evicted. Absent ⇒ TTL-only freshness.
+   */
+  verifyPath?: string;
+  verifyCommand?: string;
+}
+
+/**
+ * knowledge.ratified — the durable promotion fact. Appended by the reactor's apply-verbs
+ * step (ADR-015 Slice 2) WHEN an operator approves a knowledge candidate (item.approved on
+ * an item whose latest park was a knowledge candidate). This is the event the playbook
+ * projection folds over — NOT item.approved directly, so "approved a knowledge item" and
+ * "approved an ordinary build" stay distinct facts (ADR-014's discipline: don't conflate two
+ * truths onto one event).
+ */
+export interface KnowledgeRatifiedData {
+  contentHash: string;
+  lesson: string;
+  sourceWi: string;
+  /** Carried through so the projection can revalidate + rank without re-reading the candidate. */
+  verifyPath?: string;
+  verifyCommand?: string;
+  ratifiedBy: string;   // 'operator'
+}
+
+/**
+ * knowledge.expired — a previously-ratified lesson removed from the injected set. Producers:
+ * (1) the materialize step's read-time revalidation when verifyPath/Command no longer
+ * resolves (`reason: 'stale'`); (2) an explicit operator retraction (`reason: 'retracted'`,
+ * ADR-015 Slice 2); (3) the budget ranking (`reason: 'budget-evicted'`). EVICTED ≠ DELETED:
+ * the event is appended (the ledger never mutates); the lesson simply drops out of the
+ * projection's fold. A later re-ratification of the SAME contentHash resurrects it —
+ * last-writer-wins between ratified/expired, keyed on contentHash.
+ */
+export interface KnowledgeExpiredData {
+  contentHash: string;
+  reason: 'stale' | 'retracted' | 'budget-evicted';
+  /** For 'stale': which anchor failed. */
+  failedAnchor?: string;
+}
+
+/**
+ * playbook.materialized — the projection receipt. Appended by the materialize step ONLY when
+ * it actually rewrote the file (content changed), so the ledger records every baseline change
+ * with its provenance. Report/audit only; nothing folds behavior off it.
+ */
+export interface PlaybookMaterializedData {
+  path: string;
+  linesWritten: number;
+  contentHash: string;      // hash of the whole rendered file
+  ratifiedCount: number;    // total live ratified lessons
+  evictedForBudget: number; // ratified-but-not-injected (over maxLines)
+}
+
 /** All recognized data shapes by type string */
 export type EventDataMap = {
   'item.captured': ItemCapturedData;
@@ -944,6 +1033,10 @@ export type EventDataMap = {
   'heal.shadowed': HealShadowedData;
   'tier.recalibrated': TierRecalibratedData;
   'diagnosis.recorded': DiagnosisRecordedData;
+  'knowledge.candidate': KnowledgeCandidateData;
+  'knowledge.ratified': KnowledgeRatifiedData;
+  'knowledge.expired': KnowledgeExpiredData;
+  'playbook.materialized': PlaybookMaterializedData;
 };
 
 export type KnownEventType = keyof EventDataMap;
@@ -985,6 +1078,8 @@ const KNOWN_TYPES = new Set<string>([
   'conv.started', 'conv.promoted', 'conv.closed',
   'target.registered', 'target.manifest-updated',
   'provenance.break-glass',
+  'knowledge.candidate', 'knowledge.ratified', 'knowledge.expired',
+  'playbook.materialized',
 ]);
 
 export function isKnownType(t: string): t is KnownEventType {

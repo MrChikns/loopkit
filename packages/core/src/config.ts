@@ -580,8 +580,15 @@ export interface LoopkitConfig {
 
   /**
    * Playbook feedback loop.
-   * A curated file of recurring lessons injected into every build worker prompt.
-   * Manually maintained; a watcher appends `# candidate:` lines for ratification.
+   * A file of recurring lessons injected into every build worker prompt. As of ADR-015
+   * (docs/decisions/ADR-015-verified-knowledge-promotion.md), the file is a rebuildable
+   * PROJECTION, not a source: the reactor's `stepPlaybookMaterialize` step (Slice 1) renders
+   * it from the ledger's `knowledge.ratified`/`knowledge.expired` events (see the
+   * `knowledgePromotion` block below), gated end-to-end behind `knowledgePromotion.enabled`
+   * (default false — an unset flag leaves this file exactly as a human last committed it, the
+   * pre-ADR-015 legacy mode). There is no separate "watcher" process; harvesting a candidate
+   * lesson from a merge (Slice 3) and ratifying it (operator approve, Slice 2) are both
+   * reactor steps + ledger events, same as every other plane fact.
    */
   playbook?: {
     /**
@@ -728,6 +735,32 @@ export interface LoopkitConfig {
   portabilityPromotion?: {
     /** Enable cross-target pattern promotion + its advisory nudge. Default: false. */
     enabled?: boolean;
+  };
+
+  /**
+   * Verified knowledge promotion (ADR-015, Slice 1 — docs/decisions/ADR-015-verified-knowledge-
+   * promotion.md). NOT the console Knowledge index above (`knowledge?: KnowledgeConfig`) — that
+   * is an unrelated, pre-existing operator-declared markdown-source config for the /knowledge
+   * page. This block gates the ledger-native `knowledge.*` event domain: whether merged items'
+   * gate-proven lessons, once ratified by the operator, are folded and materialized into the
+   * playbook file (`playbook.path`, default `.ai/loops/playbook.md`). Same staged-flag
+   * discipline as `portabilityPromotion`: default `enabled: false` is byte-for-byte "the new
+   * steps never run, the playbook file is untouched" — the ADR's mandatory dormant-by-default
+   * rollout for every slice.
+   */
+  knowledgePromotion?: {
+    /**
+     * Enable the knowledge fold + `stepPlaybookMaterialize` (and, in later slices, harvest +
+     * ratification wiring). Default: false.
+     */
+    enabled?: boolean;
+    /**
+     * Fallback freshness window, in days, for a ratified lesson that carries NO `verifyPath`/
+     * `verifyCommand` anchor — measured from its `knowledge.ratified` timestamp. A lesson WITH
+     * an anchor is revalidated against the anchor instead (see ADR-015 "Read-time safety").
+     * Default: 60.
+     */
+    ttlDays?: number;
   };
 }
 
@@ -944,6 +977,10 @@ const DEFAULTS: LoopkitConfig = {
   portabilityPromotion: {
     enabled: false,
   },
+  knowledgePromotion: {
+    enabled: false,
+    ttlDays: 60,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1079,10 @@ export function loadConfig(repoRoot: string): LoopkitConfig {
     portabilityPromotion: mergePortabilityPromotion(
       (raw as Partial<LoopkitConfig>).portabilityPromotion,
       DEFAULTS.portabilityPromotion as Required<NonNullable<LoopkitConfig['portabilityPromotion']>>,
+    ),
+    knowledgePromotion: mergeKnowledgePromotion(
+      (raw as Partial<LoopkitConfig>).knowledgePromotion,
+      DEFAULTS.knowledgePromotion as Required<NonNullable<LoopkitConfig['knowledgePromotion']>>,
     ),
   };
 }
@@ -1770,6 +1811,32 @@ function mergePortabilityPromotion(
   }
   return {
     enabled: typeof r['enabled'] === 'boolean' ? r['enabled'] : defaults.enabled,
+  };
+}
+
+/**
+ * Resolve and validate the knowledgePromotion block (ADR-015 Slice 1). Same fail-fast-on-
+ * bad-type discipline as mergePortabilityPromotion/mergePlaybook; unknown fields silently
+ * dropped.
+ */
+function mergeKnowledgePromotion(
+  raw: LoopkitConfig['knowledgePromotion'] | undefined,
+  defaults: Required<NonNullable<LoopkitConfig['knowledgePromotion']>>,
+): LoopkitConfig['knowledgePromotion'] {
+  if (!raw) return { ...defaults };
+  const r = raw as Record<string, unknown>;
+  if ('enabled' in r && typeof r['enabled'] !== 'boolean') {
+    throw new Error(`loopkit.config.json: knowledgePromotion.enabled must be a boolean (got ${JSON.stringify(r['enabled'])})`);
+  }
+  if ('ttlDays' in r) {
+    const v = r['ttlDays'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 1 || !Number.isInteger(v)) {
+      throw new Error(`loopkit.config.json: knowledgePromotion.ttlDays must be a positive integer (got ${JSON.stringify(v)})`);
+    }
+  }
+  return {
+    enabled: typeof r['enabled'] === 'boolean' ? r['enabled'] : defaults.enabled,
+    ttlDays: typeof r['ttlDays'] === 'number' ? r['ttlDays'] : defaults.ttlDays,
   };
 }
 

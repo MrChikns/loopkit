@@ -528,6 +528,28 @@ export interface SessionRecord {
   source?: string;
 }
 
+/**
+ * knowledge.* projection (ADR-015 Slice 1) — one live fact per lesson `contentHash`,
+ * last-writer-wins between `knowledge.ratified` and `knowledge.expired` (by event ts, i.e.
+ * ledger order, mirroring SessionRecord's addressed-by-data-field pattern rather than the
+ * WI-scoped ItemRecord switch). `live` is true iff the most recent event for this hash was a
+ * ratification — a later re-ratification of a previously-expired hash resurrects it, and a
+ * later expiry of a live hash retracts it, per the ADR's "evicted ≠ deleted" contract.
+ */
+export interface KnowledgeFact {
+  contentHash: string;
+  lesson: string;
+  sourceWi: string;
+  verifyPath?: string;
+  verifyCommand?: string;
+  ratifiedBy: string;
+  ratifiedAt: string;
+  live: boolean;
+  /** Present only while !live — the most recent expiry's reason/anchor. */
+  expiredReason?: 'stale' | 'retracted' | 'budget-evicted';
+  expiredFailedAnchor?: string;
+}
+
 /** One fingerprint's tally in the failure catalog (see computeParkFingerprint). */
 export interface FailureCatalogEntry {
   count: number;
@@ -619,6 +641,12 @@ export interface FoldResult {
    * diagnosable fact instead of an item that silently stops advancing.
    */
   transitionDrops: Map<string, TransitionDropEntry>;
+  /**
+   * ADR-015 Slice 1: ratified-knowledge projection, keyed by lesson contentHash. Empty when
+   * `knowledge.ratified` has never been appended (the pre-ADR-015 legacy mode — every plane
+   * folded so far). See KnowledgeFact for the last-writer-wins/resurrection contract.
+   */
+  knowledge: Map<string, KnowledgeFact>;
 }
 
 function newItem(id: string): ItemRecord {
@@ -941,6 +969,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
   const failureCatalog = new Map<string, FailureCatalogEntry>();
   const transitionDrops = new Map<string, TransitionDropEntry>();
   const sessions = new Map<string, SessionRecord>();
+  const knowledge = new Map<string, KnowledgeFact>();
   const dependencyVersions = new Map<string, DependencyEdgeFact>();
   let maxWiNum = 0;
   let maxConvNum = 0;
@@ -1646,6 +1675,47 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
         break;
       }
 
+      // knowledge.ratified (ADR-015 Slice 1) — ADDITIVE, NON-transition (mirrors
+      // item.certification-amended/item.escalated): a knowledge candidate's own WI keeps its
+      // normal item state (approved/etc.); the durable promotion fact lives in the GLOBAL
+      // `knowledge` projection, keyed by contentHash, not on this item record. Last-writer-wins
+      // by ledger order (events are processed in ts-ascending order) — a later event for the
+      // same contentHash, ratified or expired, always overwrites the prior fact.
+      case 'knowledge.ratified': {
+        const contentHash = typeof d['contentHash'] === 'string' ? d['contentHash'] : undefined;
+        const lesson = typeof d['lesson'] === 'string' ? d['lesson'] : undefined;
+        const sourceWi = typeof d['sourceWi'] === 'string' ? d['sourceWi'] : undefined;
+        const ratifiedBy = typeof d['ratifiedBy'] === 'string' ? d['ratifiedBy'] : undefined;
+        if (!contentHash || !lesson || !sourceWi || !ratifiedBy) break;
+        knowledge.set(contentHash, {
+          contentHash,
+          lesson,
+          sourceWi,
+          verifyPath: typeof d['verifyPath'] === 'string' ? d['verifyPath'] : undefined,
+          verifyCommand: typeof d['verifyCommand'] === 'string' ? d['verifyCommand'] : undefined,
+          ratifiedBy,
+          ratifiedAt: ev.ts,
+          live: true,
+        });
+        break;
+      }
+
+      // knowledge.expired (ADR-015 Slice 1) — ADDITIVE, NON-transition, same global-map
+      // discipline as knowledge.ratified above. EVICTED ≠ DELETED: the fact stays in the map
+      // (so a resurrection re-ratification has its provenance to restore) but flips `live` to
+      // false, which is what the materialize step's fold-and-rank reads to exclude it.
+      case 'knowledge.expired': {
+        const contentHash = typeof d['contentHash'] === 'string' ? d['contentHash'] : undefined;
+        const reason = d['reason'];
+        if (!contentHash || (reason !== 'stale' && reason !== 'retracted' && reason !== 'budget-evicted')) break;
+        const existing = knowledge.get(contentHash);
+        if (!existing) break;   // expiry of a never-ratified hash is meaningless — ignore
+        existing.live = false;
+        existing.expiredReason = reason;
+        existing.expiredFailedAnchor = typeof d['failedAnchor'] === 'string' ? d['failedAnchor'] : undefined;
+        break;
+      }
+
       // ops events don't change item state
       case 'slo.breach':
       case 'cost.usage':
@@ -1680,7 +1750,7 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
     }
   }
 
-  return { items, conversations, targets, maxWiNum, maxConvNum, failureCatalog, sessions, transitionDrops };
+  return { items, conversations, targets, maxWiNum, maxConvNum, failureCatalog, sessions, transitionDrops, knowledge };
 }
 
 interface DependencyEdgeFact {

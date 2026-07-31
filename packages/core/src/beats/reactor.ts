@@ -34,6 +34,7 @@ import { reapLeakedWorktrees } from '../worktree-reaper.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
 import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets } from '../schema.js';
+import { revalidateKnowledge, rankKnowledge, renderPlaybookMarkdown, hashPlaybookContent } from '../render-playbook.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, isPlaneArmed, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, normalizeSensitivity } from '../providers/registry.js';
@@ -3375,6 +3376,87 @@ async function stepApplyVerbs(
 }
 
 // ---------------------------------------------------------------------------
+// Step (c1.5): ADR-015 Slice 1 — materialize the playbook projection
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-015 Slice 1's one new capability: fold `knowledge.ratified − knowledge.expired` into the
+ * live lesson set, revalidate each at read time (verifyPath/verifyCommand anchor, else TTL),
+ * rank the survivors by recency × usefulness, keep the top `playbook.maxLines`, and write
+ * `.ai/loops/playbook.md` idempotently (content-hash gated — no rewrite, no
+ * `playbook.materialized` event, on an unchanged render). Deterministic, zero-LLM — see the
+ * ADR's "Where each step runs" table.
+ *
+ * Staged flag (same discipline as stepPortabilityPromotion): `knowledgePromotion.enabled`
+ * defaults false, and this step returns before reading ANYTHING (no lock, no fold, no fs read)
+ * when it is off — an unset flag is byte-for-byte "this step never ran," leaving the playbook
+ * file exactly as a human last committed it.
+ */
+async function stepPlaybookMaterialize(
+  opts: ReactorOptions,
+  cfg: LoopkitConfig,
+): Promise<StepResult> {
+  const step = 'playbook-materialize';
+  if (!cfg.knowledgePromotion?.enabled) {
+    return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'disabled (knowledgePromotion.enabled=false)' };
+  }
+  try {
+    let written = 0;
+    let mdWritten = false;
+    let detail = '';
+    await withLock(opts.ledgerDir, async (tx) => {
+      const allEvents = await tx.loadAll();
+      const foldResult = fold(allEvents);
+      const ttlDays = cfg.knowledgePromotion?.ttlDays ?? 60;
+      const maxLines = cfg.playbook?.maxLines ?? 40;
+      const playbookPath = join(opts.repoRoot, cfg.playbook?.path ?? '.ai/loops/playbook.md');
+
+      const liveFacts = [...foldResult.knowledge.values()].filter(f => f.live);
+      const { fresh, expiredEvents: staleEvents } = revalidateKnowledge(liveFacts, opts.repoRoot, ttlDays, opts.now);
+
+      const allMergedItems = [...foldResult.items.values()].filter(rec => rec.state === 'merged' || rec.state === 'accepted');
+      const { kept, evictedEvents } = rankKnowledge(fresh, allMergedItems, maxLines);
+
+      const rendered = renderPlaybookMarkdown(kept);
+      const contentHash = hashPlaybookContent(rendered);
+
+      const existing = existsSync(playbookPath) ? readFileSync(playbookPath, 'utf8') : undefined;
+      const events: LedgerEvent[] = [...staleEvents, ...evictedEvents];
+
+      if (existing === undefined || hashPlaybookContent(existing) !== contentHash) {
+        if (!opts.dryRun) {
+          mkdirSync(dirname(playbookPath), { recursive: true });
+          writeFileSync(playbookPath, rendered, 'utf8');
+        }
+        mdWritten = true;
+        events.push(makeEvent('reactor', 'playbook', 'playbook.materialized', {
+          path: cfg.playbook?.path ?? '.ai/loops/playbook.md',
+          linesWritten: kept.length,
+          contentHash,
+          ratifiedCount: liveFacts.length,
+          evictedForBudget: evictedEvents.length,
+        }));
+      }
+
+      if (!opts.dryRun && events.length > 0) {
+        await tx.append(events);
+        written = events.length;
+      }
+
+      const bits: string[] = [];
+      if (mdWritten) bits.push(`wrote ${kept.length} line(s)`);
+      if (staleEvents.length > 0) bits.push(`${staleEvents.length} expired (stale)`);
+      if (evictedEvents.length > 0) bits.push(`${evictedEvents.length} evicted (budget)`);
+      detail = bits.length === 0 ? 'no change (idempotent)' : bits.join('; ');
+    });
+
+    return { step, ok: true, eventsWritten: written, mdWritten, detail };
+  } catch (e) {
+    return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Step (c2): notify once per needs-decision park (durable dedupe)
 // ---------------------------------------------------------------------------
 
@@ -5168,6 +5250,11 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
 
     // Step (c): apply operator verbs
     pushStep(await stepApplyVerbs(opts, cfg));
+
+    // Step (c1.5): ADR-015 Slice 1 — materialize the playbook projection (AFTER apply-verbs
+    // so a knowledge candidate ratified earlier THIS beat, once Slice 2 wires the apply-verbs
+    // clause, is already folded as knowledge.ratified by the time this step reads the ledger).
+    pushStep(await stepPlaybookMaterialize(opts, cfg));
 
     // Step (c2): notify once per needs-decision park (AFTER apply-verbs so
     // auto-approved-then-merged items are already in 'merged' state and never pushed)
