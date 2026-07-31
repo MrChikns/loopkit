@@ -256,6 +256,73 @@ test('verify-provenance --target <unresolvable-value>: clear error naming BOTH f
   }
 });
 
+// ---------------------------------------------------------------------------
+// WI-265: break-glass on a MULTI-TARGET plane. The retro-certification capture inside
+// cmdProvenanceBreakGlass used to call captureIntent without threading the already-resolved
+// target through — on a plane with 2+ registered targets, captureIntent's own "N targets
+// registered; pass a target to select one" VerbError fired and killed the whole command
+// BEFORE the provenance.break-glass event was ever appended, even though --target had been
+// given and resolved correctly. Fixed by passing the resolved targetId into captureIntent
+// (same field captureIntent already accepts for `loopctl new --target`, resolved via
+// byId ?? byName — see verbs.ts).
+// ---------------------------------------------------------------------------
+
+test('provenance break-glass on a multi-target plane: --target <name> succeeds, and both the grant and its retro item carry the resolved target', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-bg-multitarget-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const { root } = makeTargetRepo(join(base, 'repo'), { name: 'loopkit' });
+    const other = makeTargetRepo(join(base, 'other-repo'), { name: 'acme-web' });
+    await runLoopctl(ledgerDir, 'target', 'add', other.root);
+    await runLoopctl(ledgerDir, 'target', 'add', root);
+
+    const out = await runLoopctl(ledgerDir, 'provenance', 'break-glass', '--target', 'loopkit', '--reason', 'reactor wedged on the loopkit target, hand-recovering');
+    assert.equal(out.code, 0, `expected exit 0, got ${out.code}: ${out.stdout}\n${out.stderr}`);
+    assert.match(out.stdout, /Granted break-glass/);
+
+    const events = await loadAllEvents(ledgerDir);
+    const grants = events.filter(e => e.type === 'provenance.break-glass');
+    assert.equal(grants.length, 1, 'the grant event must be appended (not aborted by an unstamped capture)');
+
+    const grantData = grants[0]!.data as { targetId?: string; retroItem?: string };
+    assert.ok(grantData.targetId, 'grant must carry the resolved targetId');
+
+    const captures = events.filter(e => e.type === 'item.captured' && e.item === grantData.retroItem);
+    assert.equal(captures.length, 1, 'the retro-certification item.captured event must exist');
+    const captureData = captures[0]!.data as { targetId?: string; target?: string };
+    assert.equal(captureData.targetId, grantData.targetId, 'the retro item must be stamped with the SAME target the grant names');
+    assert.equal(captureData.target, 'loopkit');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('provenance break-glass on a SINGLE-target plane: behavior unchanged (regression)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'prov-bg-singletarget-'));
+  const ledgerDir = join(base, 'ledger');
+  try {
+    const { root } = makeTargetRepo(join(base, 'repo')); // manifest name: 'acme-web'
+    await runLoopctl(ledgerDir, 'target', 'add', root);
+
+    const out = await runLoopctl(ledgerDir, 'provenance', 'break-glass', '--target', root, '--reason', 'single-target plane, hand-recovering');
+    assert.equal(out.code, 0, `expected exit 0, got ${out.code}: ${out.stdout}\n${out.stderr}`);
+    assert.match(out.stdout, /Granted break-glass/);
+
+    const events = await loadAllEvents(ledgerDir);
+    const grants = events.filter(e => e.type === 'provenance.break-glass');
+    assert.equal(grants.length, 1);
+
+    const grantData = grants[0]!.data as { targetId?: string; retroItem?: string };
+    const captures = events.filter(e => e.type === 'item.captured' && e.item === grantData.retroItem);
+    assert.equal(captures.length, 1);
+    const captureData = captures[0]!.data as { targetId?: string; target?: string };
+    assert.equal(captureData.targetId, grantData.targetId);
+    assert.equal(captureData.target, 'acme-web');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('verify-provenance --ref refs/heads/some-topic-branch: not a promotion boundary, exit 0, and does NOT report verified', async () => {
   const base = mkdtempSync(join(tmpdir(), 'prov-topic-branch-'));
   const ledgerDir = join(base, 'ledger');

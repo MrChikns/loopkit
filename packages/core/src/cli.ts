@@ -1733,10 +1733,16 @@ async function cmdProvenanceBreakGlass(rest: string[]): Promise<void> {
   const fromSha = fromShaResult.status === 0 ? fromShaResult.stdout.trim() : '(unresolvable)';
 
   // Capture the retro-certification obligation FIRST, through the same captureIntent every
-  // other capture goes through (no second id-minting/capture path — see verbs.ts).
+  // other capture goes through (no second id-minting/capture path — see verbs.ts). `target`
+  // is stamped from the ALREADY-RESOLVED targetId (not re-derived from argv) so the retro item
+  // always names the same target this grant was opened for — on a plane with 2+ registered
+  // targets, an unstamped capture would otherwise throw ("N targets registered; pass a target
+  // to select one") and abort the whole command before any ledger write (WI-265). captureIntent
+  // accepts a targetId here exactly like it accepts a name (verbs.ts: `byId(...) ?? byName(...)`).
   const { wiId: retroItem } = await captureIntent(LEDGER_DIR, {
     text: `RETRO-CERTIFICATION (break-glass) — ${reason}. Commits made under this grant landed without a gate receipt and must be reviewed and certified after the fact.`,
     source: 'cli',
+    target: targetId,
   });
 
   const ev = makeEvent('cli', retroItem, 'provenance.break-glass', {
