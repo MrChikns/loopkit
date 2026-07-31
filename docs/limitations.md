@@ -260,6 +260,24 @@ says exist are checked the same way, against the symbol that backs them.
   the plane's own process was followed, checked against records the same identity that did the work
   also controls.
 
+## Knowledge promotion's read-time revalidation is accident-prevention, not proof (ADR-015)
+
+- **A `verifyPath`/`verifyCommand` anchor that still resolves does not prove the ratified lesson
+  is still *true* — only that its anchor did not obviously rot.** The playbook materialize step
+  (`stepPlaybookMaterialize`) revalidates every ratified lesson at read time (the anchor's path
+  still exists, or its command's binary still resolves; a lesson with neither falls back to a
+  TTL), the same discipline Copilot Memory uses. *Bounded:* this is deliberately cheap and
+  deterministic — it catches drift (a lesson about a file that got deleted or renamed), not
+  falsehood (a lesson whose file is still there but whose behavior changed underneath it, or one
+  that was never quite right despite passing the strict-auditor + operator gates). No amount of
+  anchor-checking substitutes for the human ratification step itself, which is why every lesson
+  still crosses `item.approved` before it can reach a worker prompt (no automatic promotion, ever
+  — see the ADR's negative-result citation). *Matters when:* you read a live (non-expired) line in
+  `.ai/loops/playbook.md` as a verified-forever fact rather than "this hasn't obviously rotted
+  yet" — retract it (`loopctl retract <contentHash>`) the moment it's found stale in practice,
+  rather than waiting for its anchor to eventually fail. See
+  [ADR-015](decisions/ADR-015-verified-knowledge-promotion.md).
+
 ## Deliberately deferred (not bugs — scope)
 
 These are out of scope for v0.1 by choice, not oversight:

@@ -144,7 +144,17 @@ export async function approveOrReject(
       return { wiId, label: 'no-op', message: `${wiId} is already merged — approve is a no-op (merged is terminal).` };
     }
 
-    const isParkedUnbuilt = verb === 'approve' && rec?.state === 'parked' && (rec?.builds.length ?? 0) === 0;
+    // ADR-015 Slice 2: a knowledge-candidate item (source-stamped `knowledge:<sourceWi>:
+    // <contentHash>` by the harvest step, Slice 3) is NEVER build work — it has zero builds
+    // by construction (see the ADR's "Park for ratification" row), so it would otherwise match
+    // the isParkedUnbuilt branch below and get unparked-and-requeued as if it were a stalled
+    // build item (there is no spec to build; the item would dead-end queued with nothing to
+    // dispatch). Approving it must take the plain item.approved path instead, so
+    // stepApplyVerbs's knowledge-ratify clause (reactor.ts) sees an item.approved to react to.
+    const isKnowledgeCandidate = Boolean(rec?.source?.startsWith('knowledge:'));
+
+    const isParkedUnbuilt = verb === 'approve' && rec?.state === 'parked'
+      && (rec?.builds.length ?? 0) === 0 && !isKnowledgeCandidate;
 
     const storedSpecResult = isParkedUnbuilt && rec ? resolveStoredSpecApproval(rec, result.items) : undefined;
     if (storedSpecResult?.kind === 'unresolved') {
@@ -685,5 +695,68 @@ export async function dismissItem(
   return approveOrReject(ledgerDir, rawId, 'reject', {
     by: opts.by ?? 'operator',
     trail: `🚫 dismiss ${rawId}`,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// retractKnowledge — `loopctl retract <contentHash>` (ADR-015 Slice 2)
+// ---------------------------------------------------------------------------
+
+export interface RetractKnowledgeOptions {
+  /** Actor to stamp on the retraction (default 'operator'). */
+  by?: string;
+  trail?: string;
+}
+
+export type RetractKnowledgeOutcome = 'retracted' | 'no-op';
+
+export interface RetractKnowledgeResult {
+  contentHash: string;
+  outcome: RetractKnowledgeOutcome;
+  message: string;
+}
+
+/**
+ * Append `knowledge.expired{reason:'retracted'}` for a previously-ratified lesson, keyed by
+ * `contentHash` (the knowledge fold's own key — see fold.ts's KnowledgeFact) rather than a
+ * WI-NNN: a ratified lesson is a global fact that can outlive/resurrect across multiple
+ * source items (fold.ts's last-writer-wins/resurrection contract), so retraction must name
+ * the fact directly, the same way the fold itself is keyed. Mirrors approveOrReject/
+ * acceptItem's shape (one verb, one precondition, one append) but is intentionally NOT gated
+ * on `knowledgePromotion.enabled` — Slice 1's gate protects new WRITES into the playbook
+ * projection; retract only ever REMOVES a live lesson, so an operator must always be able to
+ * pull a bad line even if the flag were later flipped off (the safe direction never needs a
+ * flag). A never-ratified or already-retracted contentHash is a no-op — no phantom expiry,
+ * matching fold.ts's "expiry of a never-ratified hash is meaningless" discipline.
+ */
+export async function retractKnowledge(
+  ledgerDir: string,
+  contentHash: string,
+  opts: RetractKnowledgeOptions = {},
+): Promise<RetractKnowledgeResult> {
+  if (!contentHash) throw new VerbError('contentHash is required');
+  const by = opts.by ?? 'operator';
+  const trailText = opts.trail ?? `🗑 retract knowledge ${contentHash}`;
+
+  return withLock(ledgerDir, async (tx) => {
+    const allEvents = await tx.loadAll();
+    const result = fold(allEvents);
+
+    const fact = result.knowledge.get(contentHash);
+    if (!fact || !fact.live) {
+      return {
+        contentHash,
+        outcome: 'no-op',
+        message: `${contentHash} is not a live ratified lesson (${fact ? `already ${fact.expiredReason}` : 'never ratified'}) — retract is a no-op.`,
+      };
+    }
+
+    const verbEv = makeEvent('cli', fact.sourceWi, 'knowledge.expired', {
+      contentHash,
+      reason: 'retracted',
+    });
+    const msgEv = makeEvent('cli', fact.sourceWi, 'msg.in', { text: `${trailText} (by ${by})` });
+    await tx.append([verbEv, msgEv]);
+    return { contentHash, outcome: 'retracted', message: `Retracted knowledge ${contentHash}: "${fact.lesson}"` };
   });
 }

@@ -535,7 +535,7 @@ and are promoted only by a manual config change after burn-in.
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every autonomy-enabled reactor beat: orphaned-build detection,
   crashed-worker reaping, stale session-claim reaping
-  (`packages/core/src/beats/reactor.ts:3826`<!--cite:staleClaimReap-->), and a leaked-worktree sweep.
+  (`packages/core/src/beats/reactor.ts:3885`<!--cite:staleClaimReap-->), and a leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
   anything you have claimed, and measures staleness from real activity.
@@ -590,7 +590,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4431`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4490`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -607,7 +607,7 @@ inferred green. `must` remains manual regardless of deployment truth.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:4077`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:4136`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier
   bypasses this *plane-health* gate because there is nothing to test, but it still must satisfy the
   deployment prerequisite above.

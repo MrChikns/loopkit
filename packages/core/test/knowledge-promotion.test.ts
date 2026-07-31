@@ -28,6 +28,7 @@ import { fold, KnowledgeFact } from '../src/fold.js';
 import { appendEvents, loadAllEvents } from '../src/ledger.js';
 import { runReactor } from '../src/beats/reactor.js';
 import { LoopkitConfig, CONFIG_DEFAULTS, loadConfig } from '../src/config.js';
+import { approveOrReject, retractKnowledge } from '../src/verbs.js';
 import {
   revalidateKnowledge,
   rankKnowledge,
@@ -410,5 +411,246 @@ test('reactor (ADR-015): idempotent — a second beat with no new knowledge even
     assert.equal(materializedAfterSecond, 1, 'no second playbook.materialized event — content was unchanged');
   } finally {
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ADR-015 Slice 2 — ratification wiring through the existing approve/reject verbs
+// ---------------------------------------------------------------------------
+
+/**
+ * A knowledge candidate as the harvest step (Slice 3, not yet implemented) would shape it:
+ * its own WI, source-stamped `knowledge:<sourceWi>:<contentHash>`, carrying a knowledge.candidate
+ * event, parked as a decision (never queued as build work — see the ADR's "Park for
+ * ratification" row). Mirrors stepPortabilityPromotion's product-shaped decision-park fixture
+ * shape used elsewhere in this suite's sibling tests.
+ */
+function knowledgeCandidateFixture(
+  wiId: string,
+  overrides: Partial<{ contentHash: string; lesson: string; sourceWi: string; verifyPath: string; verifyCommand: string }> = {},
+): LedgerEvent[] {
+  const contentHash = overrides.contentHash ?? 'h1';
+  const sourceWi = overrides.sourceWi ?? 'WI-700';
+  const lesson = overrides.lesson ?? 'Always run the gate before merging.';
+  return [
+    makeEvent('reactor', wiId, 'item.captured', {
+      source: `knowledge:${sourceWi}:${contentHash}`,
+      text: `Promote lesson from ${sourceWi}: ${lesson}`,
+    }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', wiId, 'knowledge.candidate', {
+      lesson,
+      contentHash,
+      sourceWi,
+      method: 'strict-auditor',
+      model: 'test-model',
+      ...(overrides.verifyPath ? { verifyPath: overrides.verifyPath } : {}),
+      ...(overrides.verifyCommand ? { verifyCommand: overrides.verifyCommand } : {}),
+    }, '2026-01-01T00:00:01Z'),
+    makeEvent('reactor', wiId, 'item.parked', {
+      reason: `Promote a distilled lesson from ${sourceWi} — ratify before it reaches the playbook.`,
+      parkKind: 'decision',
+    }, '2026-01-01T00:00:02Z'),
+  ];
+}
+
+test('approveOrReject: approving a knowledge-candidate item appends item.approved (never unpark-and-requeue)', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-s2-'));
+  const ledgerDir = join(base, 'ledger');
+  mkdirSync(ledgerDir, { recursive: true });
+  try {
+    await appendEvents(ledgerDir, knowledgeCandidateFixture('WI-900'));
+
+    const result = await approveOrReject(ledgerDir, 'WI-900', 'approve', { repoRoot: base });
+    assert.equal(result.label, 'Approved');
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-900' && e.type === 'item.approved').length, 1,
+      'knowledge candidate approval must append item.approved, not item.unparked-and-requeue');
+    assert.equal(events.filter(e => e.item === 'WI-900' && e.type === 'item.unparked').length, 0,
+      'a knowledge candidate has zero builds by design — it must never take the unbuilt-unpark path');
+    assert.equal(fold(events).items.get('WI-900')!.state, 'approved');
+  } finally {
+    cleanup(base);
+  }
+});
+
+function cleanup(base: string): void {
+  rmSync(base, { recursive: true, force: true });
+}
+
+test('reactor stepApplyVerbs: approving a knowledge candidate ratifies it (exactly one knowledge.ratified, matching contentHash) in the same locked append', async () => {
+  const { repoRoot, ledgerDir, cleanup: done } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, knowledgeCandidateFixture('WI-900', { contentHash: 'hash-abc', lesson: 'Run the gate first.', sourceWi: 'WI-700' }));
+    await approveOrReject(ledgerDir, 'WI-900', 'approve', { repoRoot });
+
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+
+    const events = await loadAllEvents(ledgerDir);
+    const ratified = events.filter(e => e.type === 'knowledge.ratified' && e.item === 'WI-900');
+    assert.equal(ratified.length, 1, 'exactly one knowledge.ratified for the approved candidate');
+    const data = ratified[0]!.data as { contentHash: string; lesson: string; sourceWi: string; ratifiedBy: string };
+    assert.equal(data.contentHash, 'hash-abc');
+    assert.equal(data.lesson, 'Run the gate first.');
+    assert.equal(data.sourceWi, 'WI-700');
+    assert.equal(data.ratifiedBy, 'operator');
+
+    // Idempotency: a second beat with no new approvals must not re-ratify.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+    const afterSecond = await loadAllEvents(ledgerDir);
+    assert.equal(afterSecond.filter(e => e.type === 'knowledge.ratified' && e.item === 'WI-900').length, 1,
+      'no second knowledge.ratified — the item stays approved forever but ratifies exactly once');
+  } finally {
+    done();
+  }
+});
+
+test('reactor stepApplyVerbs: flag-off — approving a knowledge candidate appends NO knowledge.ratified', async () => {
+  const { repoRoot, ledgerDir, cleanup: done } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, knowledgeCandidateFixture('WI-900'));
+    await approveOrReject(ledgerDir, 'WI-900', 'approve', { repoRoot });
+
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: null,
+      config: makeTestConfig({ knowledgePromotion: { enabled: false } }),
+    });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'knowledge.ratified').length, 0,
+      'knowledgePromotion.enabled=false must suppress the ratify-on-approve clause exactly like materialize');
+    assert.equal(fold(events).items.get('WI-900')!.state, 'approved', 'the item record itself is unaffected by the flag');
+  } finally {
+    done();
+  }
+});
+
+test('approveOrReject: rejecting a knowledge candidate is terminal — no knowledge.ratified, and re-harvest of the same source-stamp is blocked', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-s2-'));
+  const ledgerDir = join(base, 'ledger');
+  mkdirSync(ledgerDir, { recursive: true });
+  try {
+    await appendEvents(ledgerDir, knowledgeCandidateFixture('WI-900', { contentHash: 'hash-rej', sourceWi: 'WI-700' }));
+
+    const result = await approveOrReject(ledgerDir, 'WI-900', 'reject', { repoRoot: base });
+    assert.equal(result.label, 'Rejected');
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-900' && e.type === 'item.rejected').length, 1);
+    assert.equal(events.filter(e => e.type === 'knowledge.ratified').length, 0, 'reject must never ratify');
+    assert.equal(fold(events).items.get('WI-900')!.state, 'rejected');
+
+    // The dedup discipline the ADR promises ("terminal; candidate dies, never re-harvested —
+    // dedup stamp"): the source stamp `knowledge:WI-700:hash-rej` is still visible on the
+    // rejected item's own capture, so a future harvest pass (Slice 3) scanning prior sources
+    // sees it and skips re-harvesting the same (source, lesson) pair. Pinning the stamp
+    // survives rejection (fold.ts never clears `source` on any transition, including terminal
+    // ones) is exactly what makes that dedup possible.
+    const rec = fold(events).items.get('WI-900')!;
+    assert.equal(rec.source, 'knowledge:WI-700:hash-rej');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('auto-approve guard: stepAutoApprove never fires on a knowledge candidate park (parkKind:decision)', async () => {
+  const { repoRoot, ledgerDir, cleanup: done } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, knowledgeCandidateFixture('WI-900'));
+
+    // Default config ships autoApprove.enabled:true — if the guard were missing, a decision
+    // park could slip through some delegated-class rule; this asserts it never does regardless.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.item === 'WI-900' && e.type === 'item.approved' && e.actor === 'reactor').length, 0,
+      'a knowledge candidate (parkKind:decision) must never be auto-approved by the reactor');
+    assert.equal(fold(events).items.get('WI-900')!.state, 'parked', 'stays parked awaiting the operator');
+  } finally {
+    done();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// retractKnowledge — `loopctl retract <contentHash>`
+// ---------------------------------------------------------------------------
+
+test('retractKnowledge: appends knowledge.expired{reason:retracted} for a live ratified lesson', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-s2-'));
+  const ledgerDir = join(base, 'ledger');
+  mkdirSync(ledgerDir, { recursive: true });
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('operator', 'WI-700', 'knowledge.ratified', {
+        contentHash: 'h1', lesson: 'Run the gate first.', sourceWi: 'WI-700', ratifiedBy: 'operator',
+      }, '2026-01-01T00:00:00Z'),
+    ]);
+
+    const result = await retractKnowledge(ledgerDir, 'h1');
+    assert.equal(result.outcome, 'retracted');
+
+    const events = await loadAllEvents(ledgerDir);
+    const expired = events.filter(e => e.type === 'knowledge.expired');
+    assert.equal(expired.length, 1);
+    const data = expired[0]!.data as { contentHash: string; reason: string };
+    assert.equal(data.contentHash, 'h1');
+    assert.equal(data.reason, 'retracted');
+
+    const fact = fold(events).knowledge.get('h1')!;
+    assert.equal(fact.live, false);
+    assert.equal(fact.expiredReason, 'retracted');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('retractKnowledge: a retracted lesson drops from the next materialize (playbook no longer includes it)', async () => {
+  const { repoRoot, ledgerDir, cleanup: done } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, [
+      makeEvent('operator', 'WI-700', 'knowledge.ratified', {
+        contentHash: 'h1', lesson: 'Run the gate first.', sourceWi: 'WI-700', ratifiedBy: 'operator',
+      }, new Date().toISOString()),
+    ]);
+
+    // Materialize once — the lesson is in the playbook.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+    const playbookPath = join(repoRoot, '.ai', 'loops', 'playbook.md');
+    assert.ok(readFileSync(playbookPath, 'utf8').includes('Run the gate first.'));
+
+    await retractKnowledge(ledgerDir, 'h1');
+
+    // Next beat's materialize must drop it.
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: makeTestConfig() });
+    const contentAfter = readFileSync(playbookPath, 'utf8');
+    assert.ok(!contentAfter.includes('Run the gate first.'), 'retracted lesson must not survive the next materialize');
+  } finally {
+    done();
+  }
+});
+
+test('retractKnowledge: a never-ratified or already-retracted contentHash is a no-op', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-s2-'));
+  const ledgerDir = join(base, 'ledger');
+  mkdirSync(ledgerDir, { recursive: true });
+  try {
+    const neverRatified = await retractKnowledge(ledgerDir, 'ghost');
+    assert.equal(neverRatified.outcome, 'no-op');
+
+    await appendEvents(ledgerDir, [
+      makeEvent('operator', 'WI-700', 'knowledge.ratified', {
+        contentHash: 'h1', lesson: 'x', sourceWi: 'WI-700', ratifiedBy: 'operator',
+      }, '2026-01-01T00:00:00Z'),
+    ]);
+    const first = await retractKnowledge(ledgerDir, 'h1');
+    assert.equal(first.outcome, 'retracted');
+
+    const second = await retractKnowledge(ledgerDir, 'h1');
+    assert.equal(second.outcome, 'no-op');
+
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'knowledge.expired').length, 1, 'a second retract must not double-append');
+  } finally {
+    cleanup(base);
   }
 });

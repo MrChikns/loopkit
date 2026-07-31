@@ -35,7 +35,7 @@ import { renderBoard } from './board.js';
 import { formatCriteriaLines } from './criteria.js';
 import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult, classifyProvenanceFinding } from './doctor.js';
 import { makeEvent, validateEvent } from './schema.js';
-import { captureIntent, approveOrReject, acceptItem, amendPortability, VerbError } from './verbs.js';
+import { captureIntent, approveOrReject, acceptItem, amendPortability, retractKnowledge, VerbError } from './verbs.js';
 import {
   startSession, heartbeatSession, endSession, claimItems, releaseItems,
   readCurrentSession, writeCurrentSession, clearCurrentSession,
@@ -143,6 +143,7 @@ Commands:
   brief [--json]                       Deterministic daily ops brief
   approve|reject <item> [--trail "<text>"]  Operator approve/reject a parked spine item
   portability <item> "<reply>" [--by <actor>] [--trail "<text>"]  Confirm a portability-nudge reply ("applies to: <targets> | none")
+  retract <contentHash> [--by <actor>] [--trail "<text>"]  Retract a ratified knowledge lesson (ADR-015 Slice 2)
   costs [--by loop|provider|day] [--json]   Per-loop/provider/day spend (cost.usage)
   quota [--json]                       Unified subscription-quota view: utilization + capacity/runway
   verdicts [--json]                    Judge calibration: verdict rows + agreement stats
@@ -712,6 +713,34 @@ async function cmdAccept(rest: string[]): Promise<void> {
   } catch (e) {
     if (e instanceof VerbError) {
       console.error(e.message);
+      process.exit(1);
+    }
+    throw e;
+  }
+}
+
+async function cmdRetract(rest: string[]): Promise<void> {
+  const rawHash = rest[0];
+  if (!rawHash) {
+    console.error('Usage: loopctl retract <contentHash> [--by <actor>] [--trail "<text>"]');
+    process.exit(1);
+  }
+  const by = getFlag(rest, '--by');
+  const trailText = getFlag(rest, '--trail');
+
+  try {
+    const { outcome, message } = await retractKnowledge(LEDGER_DIR, rawHash, {
+      ...(by !== undefined ? { by } : {}),
+      ...(trailText !== undefined ? { trail: trailText } : {}),
+    });
+    if (outcome === 'no-op') {
+      console.error(message);
+      process.exit(1);
+    }
+    console.log(message);
+  } catch (e) {
+    if (e instanceof VerbError) {
+      console.error(`Error: ${e.message}`);
       process.exit(1);
     }
     throw e;
@@ -2039,6 +2068,10 @@ async function main(): Promise<void> {
 
     case 'portability':
       await cmdPortability(rest);
+      break;
+
+    case 'retract':
+      await cmdRetract(rest);
       break;
 
     case 'compact':

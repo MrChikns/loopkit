@@ -33,7 +33,7 @@ import { gatherProvenanceInput, verifyProvenance, ProvenanceReport } from '../pr
 import { reapLeakedWorktrees } from '../worktree-reaper.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
-import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets } from '../schema.js';
+import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets, KnowledgeRatifiedData } from '../schema.js';
 import { revalidateKnowledge, rankKnowledge, renderPlaybookMarkdown, hashPlaybookContent } from '../render-playbook.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, isPlaneArmed, resolveAutonomyDecision } from '../autonomy.js';
@@ -2974,8 +2974,65 @@ async function stepApplyVerbs(
       }
     }
 
+    // ADR-015 Slice 2: ratify approved knowledge candidates. A knowledge-candidate item
+    // (source-stamped `knowledge:<sourceWi>:<contentHash>` by the harvest step, Slice 3) is
+    // NEVER build work — it never has a branch, so it never enters `approved` above and would
+    // otherwise sit in state 'approved' forever with nothing acting on it. Gated on
+    // knowledgePromotion.enabled (mirrors stepPlaybookMaterialize's own gate — no knowledge.*
+    // write happens with the flag off, matching Slice 1's posture). Idempotency: guarded on
+    // there being no existing knowledge.ratified event for this item yet — an item that stays
+    // 'approved' forever (see above) must ratify exactly once, not every beat.
+    const knowledgeEvents: ReturnType<typeof makeEvent>[] = [];
+    let knowledgeRatifiedCount = 0;
+    if (cfg.knowledgePromotion?.enabled) {
+      // Keyed by the CANDIDATE item's own id (the event's `.item`, i.e. rec.id) — NOT the
+      // candidate data's `sourceWi` field, which names the merged item the lesson was
+      // harvested FROM, a different WI entirely. A knowledge candidate stays 'approved'
+      // forever (see above), so this guard is what keeps this loop from re-ratifying the
+      // same candidate on every subsequent beat.
+      const alreadyRatifiedItems = new Set(
+        allEvents.filter(ev => ev.type === 'knowledge.ratified').map(ev => ev.item),
+      );
+      for (const rec of foldResult.items.values()) {
+        if (rec.state !== 'approved') continue;
+        if (!rec.source?.startsWith('knowledge:')) continue;
+        if (alreadyRatifiedItems.has(rec.id)) continue;
+        const candidateEv = allEvents.find(
+          ev => ev.item === rec.id && ev.type === 'knowledge.candidate',
+        );
+        if (!candidateEv) continue;
+        const cand = candidateEv.data as unknown as Record<string, unknown>;
+        const contentHash = typeof cand['contentHash'] === 'string' ? cand['contentHash'] : undefined;
+        const lesson = typeof cand['lesson'] === 'string' ? cand['lesson'] : undefined;
+        const sourceWi = typeof cand['sourceWi'] === 'string' ? cand['sourceWi'] : undefined;
+        if (!contentHash || !lesson || !sourceWi) continue;   // malformed candidate — never ratify garbage
+        const verifyPath = typeof cand['verifyPath'] === 'string' ? cand['verifyPath'] : undefined;
+        const verifyCommand = typeof cand['verifyCommand'] === 'string' ? cand['verifyCommand'] : undefined;
+        knowledgeEvents.push(makeEvent('reactor', rec.id, 'knowledge.ratified', {
+          contentHash,
+          lesson,
+          sourceWi,
+          ...(verifyPath ? { verifyPath } : {}),
+          ...(verifyCommand ? { verifyCommand } : {}),
+          ratifiedBy: 'operator',
+        } as KnowledgeRatifiedData));
+        knowledgeRatifiedCount++;
+      }
+      if (knowledgeEvents.length > 0 && !opts.dryRun) {
+        await appendEvents(opts.ledgerDir, knowledgeEvents);
+      }
+    }
+
     if (approved.length === 0) {
-      return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'no approved items' };
+      return {
+        step,
+        ok: true,
+        eventsWritten: opts.dryRun ? 0 : knowledgeEvents.length,
+        mdWritten: false,
+        detail: knowledgeRatifiedCount > 0
+          ? `no approved build items; ratified ${knowledgeRatifiedCount} knowledge candidate(s)`
+          : 'no approved items',
+      };
     }
 
     const events: ReturnType<typeof makeEvent>[] = [];
@@ -3364,9 +3421,11 @@ async function stepApplyVerbs(
     return {
       step,
       ok: deployFailures.length === 0,
-      eventsWritten: opts.dryRun ? 0 : events.length + deployEventsWritten,
+      eventsWritten: opts.dryRun ? 0 : events.length + deployEventsWritten + knowledgeEvents.length,
       mdWritten: false,
       detail: `processed ${processed} approved merges${
+        knowledgeRatifiedCount > 0 ? `; ratified ${knowledgeRatifiedCount} knowledge candidate(s)` : ''
+      }${
         deployFailures.length > 0 ? `; deploy request persistence failed: ${deployFailures.join('; ')}` : ''
       }`,
     };

@@ -185,6 +185,37 @@ name multiple blockers, and never park or rewrite queued work.
   behind `portabilityPromotion.enabled` and defaults **off**. Only an explicitly enabled plane
   captures the sibling on a subsequent beat.
 
+### Ratify or retract a knowledge candidate (ADR-015 Slice 2)
+- A knowledge-candidate item (source-stamped `knowledge:<sourceWi>:<contentHash>` by the harvest
+  step, Slice 3) is parked `parkKind:'decision'` like the portability flow above, but is never
+  build work — it carries no spec and is dispatched no branch. `approveOrReject` (`verbs.ts`)
+  detects this via the item's `source` stamp and takes the plain `item.approved`/`item.rejected`
+  path rather than the ordinary parked-with-zero-builds unpark-and-requeue branch (which would
+  otherwise send it back to the dispatch queue with nothing to build).
+- **Command** `loopctl approve|reject <WI-NNN>` — the same verb as any other parked item; no new
+  CLI surface for approval itself.
+- **Event on approve** `stepApplyVerbs` (reactor) additionally appends `knowledge.ratified
+  { contentHash, lesson, sourceWi, verifyPath?, verifyCommand?, ratifiedBy:'operator' }`, reading
+  the item's own `knowledge.candidate` event for the payload — in the **same locked append** as
+  the beat that processed the approval. Gated on `knowledgePromotion.enabled` (default off,
+  mirroring `stepPlaybookMaterialize`'s own gate): with the flag off, approval still transitions
+  the item to `approved` but no `knowledge.ratified` is written. Idempotent per item (a knowledge
+  item stays `approved` forever — nothing else acts on it — so the clause ratifies it exactly
+  once, guarded on there being no prior `knowledge.ratified` for that item id).
+- **Event on reject** — nothing new. `item.rejected` is already the ledger's one "close this for
+  good" event (ADR-009's rejection of a second parser); the candidate's source stamp
+  (`knowledge:<sourceWi>:<contentHash>`) survives on the rejected item's own capture, which is
+  what lets a future harvest pass (Slice 3) recognize the same (source, lesson) pair was already
+  offered and decline to re-harvest it.
+- **Command** `loopctl retract <contentHash> [--by <actor>] [--trail "<text>"]` — an operator
+  retraction of a previously-ratified lesson, keyed by `contentHash` (the knowledge fold's own
+  key) rather than a `WI-NNN`, since a ratified fact can outlive/resurrect across more than one
+  source item. **Event** `knowledge.expired { contentHash, reason:'retracted' }`, stamped on the
+  fact's current `sourceWi`. A never-ratified or already-retracted hash is a no-op — no phantom
+  expiry. Unlike the ratify clause above, `retractKnowledge` is **not** gated on
+  `knowledgePromotion.enabled`: the flag protects new writes into the playbook projection; retract
+  only ever removes a live lesson, so the safe direction is always available.
+
 ### Knowledge fold (ADR-015) — a contentHash-keyed projection, not an item state
 
 The `knowledge.*` domain (`knowledge.candidate`, `knowledge.ratified`, `knowledge.expired`) is
