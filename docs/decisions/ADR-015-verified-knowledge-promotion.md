@@ -1,6 +1,6 @@
 # ADR-015 — Verified knowledge promotion: the playbook becomes a projection of ratified, gate-proven knowledge events
 
-**Status:** proposed
+**Status:** active
 
 ## Context
 
@@ -66,10 +66,12 @@ promotion/dedup pattern, the ADR-007 approve/reject verbs, and the calibration s
 ledger-only discipline — plus exactly one genuinely new capability: a reactor step that
 materializes a file.
 
-Everything below specifies **proposed** behavior: none of the new steps, events,
-configuration, or guarantees is implemented yet. Slices land dormant behind a default-off
-`knowledge.enabled` flag; the present tense is the ADR describing the design, not the
-running system.
+**Implemented as of 2026-07-31.** All four slices below (event contract + fold + materialize,
+ratification wiring, the strict-auditor harvest step, and the `loopctl knowledge import`
+migration) have shipped and merged. Every new step, event, and config key described below
+exists in the running system today. The one thing that has not changed is the human gate:
+the whole mechanism still lands dormant behind a default-off `knowledgePromotion.enabled`
+flag (config key note below), so an unset flag remains byte-for-byte prior behaviour.
 
 > **Note (this "knowledge" is NOT the console Knowledge index).** Everywhere this ADR says
 > "knowledge," it means the distilled worker playbook baseline described here — the
