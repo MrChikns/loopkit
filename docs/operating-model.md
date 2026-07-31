@@ -126,9 +126,12 @@ reviewable change looks like. That layer is to ship as a **versioned method pack
 projections from one canonical source — neither projection is built:
 
 - ⚪ headless workers would get the relevant method text folded into their generated prompts. The
-  nearest thing today is narrower and unrelated in origin: a repo playbook file, when configured,
-  is injected verbatim into a worker prompt as recurring lessons — a lessons file, not a versioned
-  method pack.
+  nearest thing today is narrower in scope: a repo playbook file, when configured, is injected
+  verbatim into a worker prompt as recurring lessons. As of ADR-015 (Slice 1) it is no longer a
+  hand-typed source file but a rebuildable **projection** of ledger `knowledge.ratified`/
+  `knowledge.expired` events — every lesson is gate-proven and operator-ratified before it ever
+  reaches a prompt (docs/decisions/ADR-015-verified-knowledge-promotion.md) — but it is still a
+  lessons file, not a versioned method pack.
 - ⚪ attended sessions would get repo-visible skill files installed by `loopctl init --skills`.
   There is no `init` verb; ✅ the three commands in [`.claude/commands/`](../.claude/commands/)
   exist because they were written by hand, not installed by the plane.

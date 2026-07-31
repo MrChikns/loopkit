@@ -71,6 +71,16 @@ configuration, or guarantees is implemented yet. Slices land dormant behind a de
 `knowledge.enabled` flag; the present tense is the ADR describing the design, not the
 running system.
 
+> **Note (this "knowledge" is NOT the console Knowledge index).** Everywhere this ADR says
+> "knowledge," it means the distilled worker playbook baseline described here — the
+> `knowledge.*` ledger event domain and its fold/projection. It is unrelated to the console's
+> pre-existing Knowledge index (`LoopkitConfig.knowledge`, `docs/knowledge.md`, the `/company`
+> page's operator-declared markdown sources). **Slice 1 implementation note:** because that
+> config key name was already taken, the shipped config block is `knowledgePromotion` (mirroring
+> `portabilityPromotion`'s naming), not the bare `knowledge` this ADR's prose uses — see
+> config.ts's `knowledgePromotion` doc comment. Text below describing `knowledge.enabled` refers
+> to the same flag, now named `knowledgePromotion.enabled`.
+
 ### The event-model, left to right
 
 ```
@@ -308,6 +318,33 @@ a one-time `loopctl knowledge import` reads current non-comment lines and append
 by the act of running it), after which the file is never hand-edited again.
 - *Tests:* import is idempotent (re-run appends nothing new by hash); post-import materialize
   reproduces the operator's curated set.
+
+### Docs & doc-claims obligations
+
+`docs/plane-flows.md`, `docs/limitations.md`, `docs/method.md`, and `docs/operating-model.md` are
+covered by `packages/core/src/doc-claims.ts` (blocking CI); `docs/event-model.md` and
+`docs/knowledge.md` are not claim-checked but still need to stay accurate. Per slice:
+
+- **Slice 1 (shipped):** fix the phantom-watcher doc-comment at `config.ts`'s `playbook` block
+  (the one this ADR's Context quotes as "a watcher appends `# candidate:` lines"); add the
+  playbook-is-now-a-projection sentence to `method.md`'s "Append-only ledger" section with a
+  `<!--exists:stepPlaybookMaterialize-->` marker (registered in `doc-claims.ts`'s
+  `EXISTENCE_CLAIMS`); restate `operating-model.md`'s "skills pack" bullet, which called the
+  playbook "narrower and unrelated in origin," to reflect its new projection status; add a short
+  `event-model.md` subsection distinguishing the `knowledge.*` fold (a second, contentHash-keyed
+  projection) from the item lifecycle state machine; add the one-line disambiguation banner to
+  `docs/knowledge.md` (the console Knowledge index is unrelated to this domain).
+- **Slice 2:** `event-model.md` gains the ratify-verb wiring (mirror the existing "Confirm a
+  portability-nudge reply (ADR-009)" subsection's shape: command, event, fold effect); `retract`
+  needs a `limitations.md` entry if it ships with any known gap (e.g. no bulk retract in v1).
+- **Slice 3:** `method.md`'s cap/threshold pins (if the harvest step's per-beat cap or any other
+  new numeric constant is bolded there, it must be pinned per the unpinned-bold sweep); a
+  `trust-boundaries.md` note that the harvest step's provider call reads a merged item's diff/spec
+  under the SAME sensitivity-scoped provider resolution as `stepMergeJudge`/`stepPathology` (no new
+  egress path); a `plane-flows.md` plate/row for the harvest→park→ratify pipeline if the existing
+  plates are extended to cover it.
+- **Slice 4:** a one-line CLI mention (wherever the console/README enumerates `loopctl` verbs) for
+  `loopctl knowledge import`.
 
 ### Risks & mitigations
 

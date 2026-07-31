@@ -1300,6 +1300,26 @@ export const EXISTENCE_CLAIMS: ExistenceClaim[] = [
       },
     ],
   },
+
+  // ── ADR-015 Slice 1: the playbook stops being hand-curated and becomes a rebuildable
+  //    projection of ledger knowledge.ratified/knowledge.expired events. Declaration alone
+  //    proves the step exists; the reference site proves it is actually wired into the beat
+  //    (a declared-but-never-called step would leave this claim true of dead code).
+  {
+    id: 'stepPlaybookMaterialize',
+    doc: 'method',
+    symbol: 'stepPlaybookMaterialize()',
+    what: 'the playbook file is a deterministic projection materialized by a reactor step from ratified knowledge events, not a hand-edited source file',
+    file: 'reactor',
+    declaration: /^async function stepPlaybookMaterialize\($/,
+    referencedBy: [
+      {
+        file: 'reactor',
+        pattern: /pushStep\(await stepPlaybookMaterialize\(opts, cfg\)\);/,
+        proves: 'the step actually runs every reactor beat (after apply-verbs), not just declared',
+      },
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
