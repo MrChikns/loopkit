@@ -14,6 +14,7 @@
  *   audit <target-path> [--json]      Target-readiness hygiene check + autonomy tier
  *   verify-provenance [<target-path>] [--json]  Verify a commit range against the ledger (WI-232)
  *   provenance break-glass --reason "<why>"     Time-boxed, ledgered exception to provenance (WI-232)
+ *   knowledge import [--target <name-or-path>]  Operator-run playbook migration into the ledger (ADR-015 Slice 4)
  *
  *   beat reactor|dispatch             implemented
  *   approve|reject <item> [--trail]   deterministic operator verb (implemented)
@@ -34,7 +35,8 @@ import { fold, nextConvId } from './fold.js';
 import { renderBoard } from './board.js';
 import { formatCriteriaLines } from './criteria.js';
 import { runDoctor, defaultPidProbe, defaultProgressProbe, defaultExitFileProbe, defaultWorktreeProbe, detectDistDrift, DistDriftResult, classifyProvenanceFinding } from './doctor.js';
-import { makeEvent, validateEvent } from './schema.js';
+import { makeEvent, validateEvent, KnowledgeRatifiedData } from './schema.js';
+import { hashPlaybookContent, PLAYBOOK_GENERATED_BANNER } from './render-playbook.js';
 import { captureIntent, approveOrReject, acceptItem, amendPortability, retractKnowledge, VerbError } from './verbs.js';
 import {
   startSession, heartbeatSession, endSession, claimItems, releaseItems,
@@ -156,6 +158,8 @@ Commands:
                                         Verify a commit range against the operator's real ledger (WI-232)
   provenance break-glass [--target <name-or-path>] --reason "<why>" [--hours <n>]
                                         Time-boxed, ledgered exception to provenance verification (WI-232)
+  knowledge import [--target <name-or-path>] [--dry-run]
+                                        One-time operator-run migration of a hand-curated playbook into the ledger (ADR-015 Slice 4)
   route <item>                         [not yet implemented]
   park|accept <item>                   [not yet implemented]
 
@@ -744,6 +748,145 @@ async function cmdRetract(rest: string[]): Promise<void> {
       process.exit(1);
     }
     throw e;
+  }
+}
+
+/**
+ * knowledge import [--target <name-or-path>]  (ADR-015 Slice 4 — optional)
+ *
+ * One-time, operator-run migration of a hand-curated playbook into the ledger. This is NOT a
+ * beat/reactor step and carries no `knowledgePromotion.enabled` gate check of its own — the
+ * human gate is honored by the act of an operator typing this command, exactly as the ADR's
+ * Slice 4 note describes. Every non-comment, non-empty line in the target's playbook file
+ * becomes one `knowledge.ratified` event, deduped by the SAME `hashPlaybookContent` helper
+ * Slice 1/3 use (imported, not reimplemented) so a re-run appends nothing new.
+ *
+ * `--target` resolves through `resolveProvenanceTarget` — the one shared resolution
+ * `provenance break-glass`/`verify-provenance` already use, so this command can never disagree
+ * with them about which target a name or path selects. The playbook path itself comes from that
+ * target's OWN `loopkit.config.json` (`playbook.path`, default `.ai/loops/playbook.md`) via
+ * `loadConfig(repoPath)` — the same config lookup `stepPlaybookMaterialize` uses for `opts.repoRoot`.
+ *
+ * KnowledgeRatifiedData (schema.ts) carries no `method` field (unlike KnowledgeCandidateData,
+ * which does) — extending nothing here, per the task's instruction to check the shape first.
+ * Provenance is instead stamped through fields the type already has: `ratifiedBy:
+ * 'operator-import'` marks these as distinct from an operator's ordinary approve-a-candidate
+ * ratification, and `sourceWi` names the ONE import work item captured for this run (rather than
+ * a per-line item — an import is one operator act, not N).
+ */
+async function cmdKnowledgeImport(rest: string[]): Promise<void> {
+  const dryRun = hasFlag(rest, '--dry-run');
+  const { repoPath, targetId } = await resolveProvenanceTarget(rest);
+
+  const cfg = loadConfig(repoPath);
+  const playbookRelPath = cfg.playbook?.path ?? '.ai/loops/playbook.md';
+  const playbookPath = join(repoPath, playbookRelPath);
+
+  if (!existsSync(playbookPath)) {
+    console.log(`Nothing to import — no playbook file at ${playbookPath}.`);
+    return;
+  }
+
+  const content = readFileSync(playbookPath, 'utf8');
+
+  // Slice 1 makes the file a rebuildable PROJECTION once knowledgePromotion is enabled; importing
+  // a GENERATED file would fold its own rendered lessons back in as "new" ratifications —
+  // circular. Refuse before reading a single line.
+  if (content.includes(PLAYBOOK_GENERATED_BANNER)) {
+    console.error(
+      `Refused — ${playbookPath} already carries the GENERATED banner (it is a projection of the ` +
+      `ledger, not a source). Importing it would circularly re-ratify its own rendered lessons. ` +
+      `Nothing to migrate — this file is already produced by stepPlaybookMaterialize.`,
+    );
+    process.exit(1);
+  }
+
+  // One non-comment, non-empty line == one lesson. Comment lines start with '#' (the format
+  // .ai/loops/playbook.md has used since WI-241); an optional leading '- ' bullet marker is
+  // stripped for symmetry with renderPlaybookMarkdown's own rendered form, though the
+  // hand-curated source predating ADR-015 does not use one.
+  const lessons: string[] = [];
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const lesson = line.startsWith('- ') ? line.slice(2).trim() : line;
+    if (lesson) lessons.push(lesson);
+  }
+
+  if (lessons.length === 0) {
+    console.log(`Nothing to import — ${playbookPath} has no non-comment lesson lines.`);
+    return;
+  }
+
+  const allEvents = await loadAllEventsWithQuarantine(LEDGER_DIR);
+  const foldResult = fold(allEvents);
+
+  // Dedup key set: every contentHash already seen as knowledge.candidate OR knowledge.ratified
+  // (mirrors stepKnowledgeHarvest's own knownHashes set) — a re-run of this exact command is
+  // idempotent, and an already-harvested/ratified lesson from the live pipeline is not
+  // re-imported as a duplicate fact.
+  const knownHashes = new Set<string>();
+  for (const ev of allEvents) {
+    if (ev.type === 'knowledge.candidate' || ev.type === 'knowledge.ratified') {
+      const h = (ev.data as { contentHash?: string }).contentHash;
+      if (h) knownHashes.add(h);
+    }
+  }
+
+  const toRatify: Array<{ lesson: string; contentHash: string }> = [];
+  let skipped = 0;
+  for (const lesson of lessons) {
+    const contentHash = hashPlaybookContent(lesson.trim().toLowerCase());
+    if (knownHashes.has(contentHash)) {
+      skipped++;
+      continue;
+    }
+    knownHashes.add(contentHash); // guard within-run duplicate lines too
+    toRatify.push({ lesson, contentHash });
+  }
+
+  if (toRatify.length === 0) {
+    console.log(`Imported 0, skipped ${skipped} (already ratified) — nothing new from ${playbookPath}.`);
+    return;
+  }
+
+  if (dryRun) {
+    console.log(`[dry-run] would import ${toRatify.length}, skip ${skipped} (already ratified) from ${playbookPath}.`);
+    return;
+  }
+
+  // ONE work item for the whole import run, source-stamped so a re-run of this command dedupes
+  // at the capture layer too (mirrors provenance break-glass's retro-certification item and
+  // stepPortabilityPromotion's `promotedPairs`-style source stamp) — an import is one operator
+  // act, not N per-line items.
+  const importStamp = `knowledge-import:${targetId ?? repoPath}:${playbookRelPath}`;
+  const alreadyCaptured = [...foldResult.items.values()].some(rec => rec.source === importStamp);
+
+  const { wiId } = await captureIntent(LEDGER_DIR, {
+    text: `Operator-run playbook import from ${playbookRelPath} (${toRatify.length} lesson(s)).`,
+    source: alreadyCaptured ? `${importStamp}:${Date.now()}` : importStamp,
+    ...(targetId !== null ? { target: targetId } : {}),
+  });
+
+  const events = toRatify.map(({ lesson, contentHash }) => makeEvent('cli', wiId, 'knowledge.ratified', {
+    contentHash,
+    lesson,
+    sourceWi: wiId,
+    ratifiedBy: 'operator-import',
+  } as KnowledgeRatifiedData));
+
+  await appendEvents(LEDGER_DIR, events);
+
+  console.log(`Imported ${toRatify.length}, skipped ${skipped} (already ratified) from ${playbookPath} on ${wiId}.`);
+}
+
+async function cmdKnowledge(rest: string[]): Promise<void> {
+  const sub = rest[0];
+  if (sub === 'import') {
+    await cmdKnowledgeImport(rest.slice(1));
+  } else {
+    console.error('Usage: loopctl knowledge import [--target <name-or-path>] [--dry-run]');
+    process.exit(1);
   }
 }
 
@@ -2072,6 +2215,10 @@ async function main(): Promise<void> {
 
     case 'retract':
       await cmdRetract(rest);
+      break;
+
+    case 'knowledge':
+      await cmdKnowledge(rest);
       break;
 
     case 'compact':
