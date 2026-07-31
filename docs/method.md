@@ -51,7 +51,10 @@ untraceable<!--exists:stepPlaybookMaterialize--> (docs/decisions/ADR-015-verifie
 The lessons that projection folds are themselves harvested, not hand-authored: a strict-auditor
 reactor step reads each gate-proven merge and defaults to emitting nothing, capped at 5 merges
 harvested per beat, so the rare surviving candidate still crosses the human approve/reject gate
-before it ever reaches the playbook.
+before it ever reaches the playbook. A repo that already carried a hand-curated playbook before
+adopting this projection migrates it once, operator-run, via `loopctl knowledge import` — the
+human gate is honored by the act of running the command rather than by a separate approval, and a
+file already carrying the GENERATED banner is refused rather than circularly re-ratified.
 
 This is the single discipline that kills the failure class the tool was built against: mutable
 coordination state — queues in markdown, status files, chat threads — silently loses or
