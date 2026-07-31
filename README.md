@@ -137,6 +137,14 @@ its own and what needs your eyes.**
   separate model settings, but independent provider-per-stage assignment is not built yet.
   Full boundary semantics:
   [docs/trust-boundaries.md](docs/trust-boundaries.md).
+- **Verified knowledge promotion.** The worker's `REPO PLAYBOOK` baseline is a rebuildable
+  projection, not a hand-typed file: a strict, default-reject auditor harvests candidate lessons
+  only from merges that already passed the gate, the operator ratifies each one through the
+  same approve/reject verbs used everywhere else on the plane, and a deterministic read-time
+  check expires a lesson once its cited file or command no longer exists. No lesson reaches a
+  prompt without a gate-proven source and a human sign-off. It's off by default
+  (`knowledgePromotion.enabled`); see
+  [ADR-015](docs/decisions/ADR-015-verified-knowledge-promotion.md).
 
 ## Get pinged when it needs you
 
@@ -282,7 +290,8 @@ applied: a 10-class incident catalog run proactively against the framework.
 More: [the method](docs/method.md) · [the vision](docs/vision.md) ·
 [operating model](docs/operating-model.md) · [event model](docs/event-model.md) ·
 [trust boundaries](docs/trust-boundaries.md) · [hardening audit](docs/hardening-audit.md) ·
-[agent integration](docs/agent-integration.md) · [knowledge index](docs/knowledge.md).
+[agent integration](docs/agent-integration.md) · [knowledge index](docs/knowledge.md) ·
+[verified knowledge promotion (ADR-015)](docs/decisions/ADR-015-verified-knowledge-promotion.md).
 
 For attended agent sessions the repo includes optional repo-local helpers. Claude Code gets three
 handwritten commands
