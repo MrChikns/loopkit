@@ -9,14 +9,16 @@
  *   1. `revalidateKnowledge` — read-time freshness check (anchor, else TTL) over the fold's live
  *      `KnowledgeFact`s, producing `knowledge.expired{reason:'stale'}` events for the ones that
  *      no longer hold.
- *   2. `rankKnowledge` — recency × usefulness ranking of what survives revalidation, producing
- *      `knowledge.expired{reason:'budget-evicted'}` events for whatever falls past the line
- *      budget (evicted ≠ deleted — see KnowledgeFact's doc comment in fold.ts).
+ *   2. `rankKnowledge` — recency × usefulness ranking of what survives revalidation, returning
+ *      whatever falls past the line budget as a plain `evicted` list — PROJECTION-ONLY (no
+ *      `knowledge.expired` event; see rankKnowledge's own doc comment for why appending one
+ *      there used to make the eviction permanent, contradicting the ADR's "rises back next
+ *      beat" promise — WI-270 defect 2).
  *   3. `renderPlaybookMarkdown` — the GENERATED file body for the surviving, budgeted set.
  */
 import { existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, isAbsolute, delimiter } from 'node:path';
+import { join, isAbsolute, delimiter, relative } from 'node:path';
 import { KnowledgeFact, ItemRecord } from './fold.js';
 import { makeEvent, LedgerEvent, KnowledgeExpiredData } from './schema.js';
 
@@ -46,9 +48,28 @@ export function resolveCommandBinary(command: string, env: NodeJS.ProcessEnv = p
   return false;
 }
 
-/** Resolve a lesson's `verifyPath` against the target repo root (absolute paths pass through). */
-function resolveVerifyPath(verifyPath: string, repoRoot: string): string {
-  return isAbsolute(verifyPath) ? verifyPath : join(repoRoot, verifyPath);
+/**
+ * Resolve a lesson's `verifyPath` against the target repo root, or reject it as invalid
+ * (WI-270 defect 4 fix). A `verifyPath` is operator/auditor-sourced free text carried through
+ * the ledger, so it must be treated as untrusted input, not a pre-validated repo-relative path:
+ *   - an ABSOLUTE path is rejected outright — the anchor's entire point is "does this repo-
+ *     relative path still exist in THIS repo," and an absolute path bypasses that scoping
+ *     (it could point anywhere on the host running the beat).
+ *   - a path that resolves OUTSIDE `repoRoot` (e.g. `../../etc/passwd`) is rejected the same
+ *     way — `relative(repoRoot, resolved)` starting with `..` or being itself absolute is the
+ *     standard node:path containment check.
+ * Fail-safe posture: an invalid path returns `undefined`, and the caller treats that exactly
+ * like a failed anchor (the lesson is stale/anchor-failed) rather than silently falling through
+ * to the no-anchor TTL path — a malformed anchor must never make a lesson MORE trusted (TTL-only)
+ * than a well-formed one that failed its check.
+ */
+function resolveVerifyPath(verifyPath: string, repoRoot: string): string | undefined {
+  if (isAbsolute(verifyPath)) return undefined;
+  const resolved = join(repoRoot, verifyPath);
+  const rel = relative(repoRoot, resolved);
+  if (rel === '') return resolved; // repoRoot itself — degenerate but not a traversal
+  if (rel.startsWith('..') || isAbsolute(rel)) return undefined;
+  return resolved;
 }
 
 export interface RevalidationResult {
@@ -80,7 +101,9 @@ export function revalidateKnowledge(
 
     if (fact.verifyPath) {
       const abs = resolveVerifyPath(fact.verifyPath, repoRoot);
-      if (!existsSync(abs)) failedAnchor = fact.verifyPath;
+      // An absolute path or one that escapes repoRoot is an INVALID anchor (WI-270 defect 4) —
+      // treated as failed exactly like a missing file, never silently ignored/passed through.
+      if (abs === undefined || !existsSync(abs)) failedAnchor = fact.verifyPath;
     }
     if (!failedAnchor && fact.verifyCommand) {
       if (!resolveCommandBinary(fact.verifyCommand)) failedAnchor = fact.verifyCommand;
@@ -107,8 +130,13 @@ export function revalidateKnowledge(
 export interface RankingResult {
   /** Facts kept within the line budget, ordered highest-ranked first. */
   kept: KnowledgeFact[];
-  /** knowledge.expired{reason:'budget-evicted'} events for facts past the budget. */
-  evictedEvents: LedgerEvent[];
+  /**
+   * Facts past the budget cutoff, in rank order. WI-270 defect 2 fix: the budget cutoff is
+   * PROJECTION-ONLY — no `knowledge.expired` is ever appended for these (see rankKnowledge's
+   * doc comment). This list exists only so the caller can report `evictedForBudget` on
+   * `playbook.materialized`; nothing folds behavior off it.
+   */
+  evicted: KnowledgeFact[];
 }
 
 /**
@@ -132,11 +160,16 @@ function computeUsefulness(fact: KnowledgeFact, laterMerges: ItemRecord[]): numb
 }
 
 /**
- * Rank fresh facts by recency × usefulness and keep only the top `maxLines`. Ranking is a
- * PROJECTION cutoff, not a ledger deletion — facts past the cutoff get a
- * `knowledge.expired{reason:'budget-evicted'}` event (evicted ≠ deleted: a higher-ranked lesson
- * expiring later lets a budget-evicted one rise back into the file next beat, since revalidation
- * always folds the WHOLE live set before this cutoff runs again).
+ * Rank fresh facts by recency × usefulness and keep only the top `maxLines`. WI-270 defect 2
+ * fix: the budget cutoff is a PROJECTION-ONLY cut — it never appends `knowledge.expired` for
+ * whatever falls past `maxLines`. The old code appended `knowledge.expired{reason:'budget-
+ * evicted'}` here, which flips the fact's `live` flag to `false` FOREVER (fold.ts's LWW never
+ * un-expires a fact without a fresh `knowledge.ratified`) — so a budget-evicted lesson could
+ * never "rise back next beat" the way the ADR promises, because by the NEXT beat it would no
+ * longer even be in the `fresh` (live) set this function is ranking. Instead, a lesson past the
+ * cutoff simply isn't rendered this beat; it stays fully live in the ledger and re-enters
+ * ranking (and may place inside the budget) on every subsequent materialize — which is what
+ * actually delivers "rises back next beat" when a higher-ranked lesson later expires stale.
  */
 export function rankKnowledge(
   fresh: KnowledgeFact[],
@@ -159,13 +192,9 @@ export function rankKnowledge(
   scored.sort((a, b) => b.score - a.score);
 
   const kept = scored.slice(0, maxLines).map(s => s.fact);
-  const evicted = scored.slice(maxLines);
-  const evictedEvents = evicted.map(({ fact }) => makeEvent('reactor', fact.sourceWi, 'knowledge.expired', {
-    contentHash: fact.contentHash,
-    reason: 'budget-evicted',
-  } satisfies KnowledgeExpiredData));
+  const evicted = scored.slice(maxLines).map(s => s.fact);
 
-  return { kept, evictedEvents };
+  return { kept, evicted };
 }
 
 /**

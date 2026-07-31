@@ -129,12 +129,14 @@ projections from one canonical source — neither projection is built:
   nearest thing today is narrower in scope: a repo playbook file, when configured, is injected
   verbatim into a worker prompt as recurring lessons. As of ADR-015 (Slice 1) it is no longer a
   hand-typed source file but a rebuildable **projection** of ledger `knowledge.ratified`/
-  `knowledge.expired` events — every lesson is gate-proven and operator-ratified before it ever
-  reaches a prompt (docs/decisions/ADR-015-verified-knowledge-promotion.md) — but it is still a
-  lessons file, not a versioned method pack. ✅ A repo adopting this projection with an existing
-  hand-curated playbook migrates it once via `loopctl knowledge import [--target <name-or-path>]`
-  (ADR-015 Slice 4) — an operator-run, idempotent import that refuses a file already carrying the
-  projection's own GENERATED banner rather than circularly re-ratifying it.
+  `knowledge.expired` events — a harvested lesson is gate-proven, audited, and operator-ratified
+  before it ever reaches a prompt (docs/decisions/ADR-015-verified-knowledge-promotion.md) — but
+  it is still a lessons file, not a versioned method pack. ✅ A repo adopting this projection with
+  an existing hand-curated playbook migrates it once via `loopctl knowledge import [--target
+  <name-or-path>]` (ADR-015 Slice 4) — an operator-run, idempotent import whose lines are
+  explicitly operator-ratified only (never gate-derived or audited; the human gate is honored by
+  the act of running the command), and that refuses a file already carrying the projection's own
+  GENERATED banner rather than circularly re-ratifying it.
 - ⚪ attended sessions would get repo-visible skill files installed by `loopctl init --skills`.
   There is no `init` verb; ✅ the three commands in [`.claude/commands/`](../.claude/commands/)
   exist because they were written by hand, not installed by the plane.

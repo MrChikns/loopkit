@@ -1117,22 +1117,18 @@ async function stepKnowledgeHarvest(
     const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
     const foldResult = fold(allEvents);
 
-    // Once-per-source dedup: a merge already harvested (successfully or not — the source stamp
-    // is written the moment a candidate item is captured) is never re-harvested. Mirrors
-    // stepPortabilityPromotion's promotedPairs pattern, keyed on sourceWi rather than
-    // (sourceWi, target).
-    const harvestedSources = new Set<string>();
-    for (const rec of foldResult.items.values()) {
-      if (rec.source && rec.source.startsWith('knowledge:')) {
-        const parts = rec.source.split(':');
-        if (parts.length >= 2) harvestedSources.add(parts[1]!);
-      }
-    }
-
+    // Once-per-source eligibility (WI-270 defect 1 fix): a merge is "already harvested" iff its
+    // OWN item carries a durable `knowledgeHarvestedAt` fact (folded from `knowledge.harvested`,
+    // appended below for EVERY successfully parsed audit — including a `[]` zero-candidate
+    // result). This replaces the old "source stamp on a captured candidate item" dedup, which
+    // only existed when the audit actually produced ≥1 candidate: a successfully-parsed-but-empty
+    // audit recorded nothing, so that merge stayed eligible and re-audited every beat forever,
+    // starving newer merges under the per-beat cap. A provider failure (unparseable/unavailable)
+    // never sets `knowledgeHarvestedAt`, so it correctly retries next beat.
     const eligible = [...foldResult.items.values()].filter(rec =>
       rec.state === 'merged'
       && !!rec.mergeGateCommand
-      && !harvestedSources.has(rec.id),
+      && !rec.knowledgeHarvestedAt,
     );
     if (eligible.length === 0) {
       return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'no unharvested gate-proven merges' };
@@ -1153,15 +1149,28 @@ async function stepKnowledgeHarvest(
     const model = KNOWLEDGE_HARVEST_MODEL;
     const timeoutMs = KNOWLEDGE_HARVEST_TIMEOUT_MS;
 
-    // Deterministic dedup key set: every contentHash already seen as a knowledge.candidate OR
-    // knowledge.ratified — a candidate whose normalized hash collides with either is dropped
-    // (the ADR's "Dedup / contradiction" row). Normalization + hashing reuse render-playbook's
-    // hashPlaybookContent so there is exactly one lesson-content hashing implementation.
+    // Deterministic dedup key set (WI-270 defect 3 fix): a candidate is re-harvestable unless
+    // its hash is either (a) a currently-LIVE ratified fact, or (b) still an open question — a
+    // candidate item that is pending (parked, undecided) or was REJECTED (rejection is terminal
+    // per the ADR: "candidate dies, never re-harvested"). A hash whose ONLY history is
+    // ratified-then-stale-expired is deliberately NOT in this set — the ADR promises "a stale
+    // lesson is re-surfaceable," and the old code's blanket "every knowledge.candidate OR
+    // knowledge.ratified ever seen" set blocked exactly that resurrection path forever.
     const knownHashes = new Set<string>();
+    // (a) live ratified facts.
+    for (const fact of foldResult.knowledge.values()) {
+      if (fact.live) knownHashes.add(fact.contentHash);
+    }
+    // (b) pending or rejected candidates — read each candidate item's own state via the fold,
+    // not the raw event's presence, so an approved-then-later-expired candidate's hash is NOT
+    // held here (that case is covered by (a) going false, which is exactly what should free it).
     for (const ev of allEvents) {
-      if (ev.type === 'knowledge.candidate' || ev.type === 'knowledge.ratified') {
-        const h = (ev.data as { contentHash?: string }).contentHash;
-        if (h) knownHashes.add(h);
+      if (ev.type !== 'knowledge.candidate') continue;
+      const h = (ev.data as { contentHash?: string }).contentHash;
+      if (!h) continue;
+      const candRec = foldResult.items.get(ev.item);
+      if (candRec && (candRec.state === 'parked' || candRec.state === 'rejected')) {
+        knownHashes.add(h);
       }
     }
     // Live ratified lessons, for the (best-effort) negation flag — a candidate that shares a
@@ -1206,13 +1215,23 @@ async function stepKnowledgeHarvest(
 
       // Provider unavailable → visible skip, never a fabricated candidate (mirror the judge's
       // unavailable posture). No diagnosis.recorded-style event exists for this lane; the
-      // cost.usage-less skip plus this msg.out is the visible trail.
+      // cost.usage-less skip plus this msg.out is the visible trail. Crucially, this merge does
+      // NOT get `knowledge.harvested` — a provider failure must retry next beat, never be
+      // mistaken for "audited, found nothing" (WI-270 defect 1).
       if (!runResult.parsed) {
         events.push(makeEvent('reactor', rec.id, 'msg.out', {
           text: `knowledge-harvest: skipped ${rec.id} — provider unavailable (${(runResult.providerError ?? 'unknown').slice(0, 200)}); no candidate produced.`,
         }));
         continue;
       }
+
+      // A successfully parsed response — whether it yields candidates or not — is a completed
+      // audit of this merge. Record the durable per-source fact NOW (WI-270 defect 1) so this
+      // merge's eligibility (`!rec.knowledgeHarvestedAt`) is permanently satisfied even in the
+      // common default-reject (`[]`) case, instead of relying on a candidate item existing.
+      events.push(makeEvent('reactor', rec.id, 'knowledge.harvested', {
+        candidateCount: runResult.parsed.candidates.length,
+      }));
 
       // Default-reject is the expected common case: an empty (or unparseable-degraded-to-empty)
       // result means zero candidates from this merge — not logged per-item beyond the summary,
@@ -3705,13 +3724,16 @@ async function stepPlaybookMaterialize(
       const { fresh, expiredEvents: staleEvents } = revalidateKnowledge(liveFacts, opts.repoRoot, ttlDays, opts.now);
 
       const allMergedItems = [...foldResult.items.values()].filter(rec => rec.state === 'merged' || rec.state === 'accepted');
-      const { kept, evictedEvents } = rankKnowledge(fresh, allMergedItems, maxLines);
+      // WI-270 defect 2 fix: `evicted` is a PROJECTION-ONLY cut (no knowledge.expired appended
+      // for it — see rankKnowledge's doc comment) — only `staleEvents` (real revalidation
+      // expiries) are ledger events here.
+      const { kept, evicted } = rankKnowledge(fresh, allMergedItems, maxLines);
 
       const rendered = renderPlaybookMarkdown(kept);
       const contentHash = hashPlaybookContent(rendered);
 
       const existing = existsSync(playbookPath) ? readFileSync(playbookPath, 'utf8') : undefined;
-      const events: LedgerEvent[] = [...staleEvents, ...evictedEvents];
+      const events: LedgerEvent[] = [...staleEvents];
 
       if (existing === undefined || hashPlaybookContent(existing) !== contentHash) {
         if (!opts.dryRun) {
@@ -3724,7 +3746,7 @@ async function stepPlaybookMaterialize(
           linesWritten: kept.length,
           contentHash,
           ratifiedCount: liveFacts.length,
-          evictedForBudget: evictedEvents.length,
+          evictedForBudget: evicted.length,
         }));
       }
 
@@ -3736,7 +3758,7 @@ async function stepPlaybookMaterialize(
       const bits: string[] = [];
       if (mdWritten) bits.push(`wrote ${kept.length} line(s)`);
       if (staleEvents.length > 0) bits.push(`${staleEvents.length} expired (stale)`);
-      if (evictedEvents.length > 0) bits.push(`${evictedEvents.length} evicted (budget)`);
+      if (evicted.length > 0) bits.push(`${evicted.length} evicted (budget)`);
       detail = bits.length === 0 ? 'no change (idempotent)' : bits.join('; ');
     });
 

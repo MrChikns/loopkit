@@ -17,11 +17,15 @@ the outbound credential tripwire cover part of that boundary; they are not a ful
 guarantee.
 
 With `knowledgePromotion.enabled`, the injected playbook stops being a hand-typed, arbitrary-trust
-input: every line is gate-proven (harvested only from a merge whose gate passed) and
-human-ratified (crossed the operator approve/reject gate) before it ever reaches a worker prompt —
-a strictly higher trust class than "a file someone happened to edit." The harvest step itself reads
-a merged item's spec and gate evidence under the SAME sensitivity-scoped provider resolution as the
-merge judge and the pathologist (fail-closed: no allowed+healthy provider for that item's
+input: a harvested line is gate-proven (extracted only from a merge whose gate passed), audited
+(the strict-auditor's default-reject pass), and human-ratified (crossed the operator
+approve/reject gate) before it ever reaches a worker prompt — a strictly higher trust class than
+"a file someone happened to edit." An imported line (`loopctl knowledge import`, migrating a
+pre-existing hand-curated playbook) carries a narrower guarantee: explicitly operator-ratified
+only, by the act of running the command — never gate-derived or audited. With the flag off, the
+playbook file is whatever a human last committed, untouched by the plane. The harvest step itself
+reads a merged item's spec and gate evidence under the SAME sensitivity-scoped provider resolution
+as the merge judge and the pathologist (fail-closed: no allowed+healthy provider for that item's
 sensitivity tier means the merge is skipped this beat, never routed to a disallowed provider) — see
 docs/decisions/ADR-015-verified-knowledge-promotion.md.
 
