@@ -33,8 +33,9 @@ import { gatherProvenanceInput, verifyProvenance, ProvenanceReport } from '../pr
 import { reapLeakedWorktrees } from '../worktree-reaper.js';
 import { enrichCrashOrStallEvent } from '../doctor-enrich.js';
 import { exitFilePresent } from '../exitfile.js';
-import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets, KnowledgeRatifiedData } from '../schema.js';
+import { makeEvent, LedgerEvent, ItemQueuedData, ItemRejectedData, ItemCapturedData, resolveAttachmentPaths, DEFAULT_LANE, isPortabilityRequired, parsePortabilityTargets, KnowledgeRatifiedData, KnowledgeCandidateData } from '../schema.js';
 import { revalidateKnowledge, rankKnowledge, renderPlaybookMarkdown, hashPlaybookContent } from '../render-playbook.js';
+import { buildKnowledgeAuditPrompt, runKnowledgeHarvest } from '../knowledge-harvest.js';
 import { loadConfig, LoopkitConfig } from '../config.js';
 import { AUTONOMY_ENV_VAR, AUTONOMY_OFF, autonomyWarning, isPlaneArmed, resolveAutonomyDecision } from '../autonomy.js';
 import { makeRegistry, makeFileHealthFns, normalizeSensitivity } from '../providers/registry.js';
@@ -1047,6 +1048,236 @@ async function stepPortabilityPromotion(
       eventsWritten: written,
       mdWritten: false,
       detail: bits.length === 0 ? 'no portability notes to promote' : bits.join('; '),
+    };
+  } catch (e) {
+    return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Step (a2.5): ADR-015 Slice 3 — the strict-auditor knowledge harvest
+// ---------------------------------------------------------------------------
+
+/** Cost bound: harvest at most this many unharvested merges per beat; the rest drain next beat. */
+const KNOWLEDGE_HARVEST_PER_BEAT_CAP = 5;
+
+/**
+ * Model + timeout for the harvest auditor call. No `knowledgePromotion.model`/`timeoutMs` config
+ * exists yet (v1 keeps this step's cost surface fixed rather than adding more tunables ahead of
+ * real usage) — a dedicated constant, not a reuse of an unrelated step's config (e.g. pathology's
+ * model), so changing THAT step's model can never silently change this one's.
+ */
+const KNOWLEDGE_HARVEST_MODEL = 'opus';
+const KNOWLEDGE_HARVEST_TIMEOUT_MS = 180_000;
+
+/**
+ * Build a compact, deterministic gate-evidence excerpt for the harvest prompt from what a merge
+ * ACTUALLY recorded (there is no raw gate stdout retained post-merge — only the proving command,
+ * the changed-files list, and an advisory judge verdict when one exists). This is never the
+ * builder's own manifest/transcript (the self-confirmation trap the ADR calls out); it is the
+ * same objective, third-party-visible evidence stepMergeJudge already treats as authoritative.
+ */
+function buildGateEvidenceExcerpt(rec: ItemRecord): string {
+  const lines: string[] = [];
+  if (rec.mergeGateCommand) lines.push(`Gate command: ${rec.mergeGateCommand}`);
+  if (rec.mergeChangedFiles && rec.mergeChangedFiles.length > 0) {
+    const files = rec.mergeChangedFiles.slice(0, 20);
+    lines.push(`Changed files (${rec.mergeChangedFiles.length}): ${files.join(', ')}${rec.mergeChangedFiles.length > files.length ? ' ...' : ''}`);
+  }
+  if (rec.judgeVerdict) {
+    lines.push(`Judge verdict: ${rec.judgeVerdict.verdict} (specSatisfied=${rec.judgeVerdict.specSatisfied ?? 'unknown'})`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * ADR-015 Slice 3: the ONE LLM stage in the knowledge-promotion pipeline. Clones
+ * stepMergeJudge's skeleton (eligibility filter → sensitivity-scoped provider, fail-closed →
+ * per-beat cap → append) but instead of an advisory verdict, produces PARKED DECISION candidates
+ * for the operator — never a build, never an auto-approved fact (GovMem's negative result: no
+ * automatic promotion). Runs after stepPortabilityPromotion (both harvest from merged items) and
+ * before stepRoute, so a freshly-captured candidate this beat is a routable item this same beat
+ * — though as a knowledge candidate it is parked immediately below, never routed as build work.
+ *
+ * Staged flag (same discipline as stepPortabilityPromotion / stepPlaybookMaterialize):
+ * `knowledgePromotion.enabled` defaults false — an unset flag means this step returns before
+ * reading ANYTHING.
+ */
+async function stepKnowledgeHarvest(
+  opts: ReactorOptions,
+  cfg: LoopkitConfig,
+  provider: LlmProvider | null,
+  providerRegistry: ReturnType<typeof makeRegistry> | null,
+): Promise<StepResult> {
+  const step = 'knowledge-harvest';
+  if (!cfg.knowledgePromotion?.enabled) {
+    return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'disabled (knowledgePromotion.enabled=false)' };
+  }
+  try {
+    const allEvents = await loadAllEventsWithQuarantine(opts.ledgerDir);
+    const foldResult = fold(allEvents);
+
+    // Once-per-source dedup: a merge already harvested (successfully or not — the source stamp
+    // is written the moment a candidate item is captured) is never re-harvested. Mirrors
+    // stepPortabilityPromotion's promotedPairs pattern, keyed on sourceWi rather than
+    // (sourceWi, target).
+    const harvestedSources = new Set<string>();
+    for (const rec of foldResult.items.values()) {
+      if (rec.source && rec.source.startsWith('knowledge:')) {
+        const parts = rec.source.split(':');
+        if (parts.length >= 2) harvestedSources.add(parts[1]!);
+      }
+    }
+
+    const eligible = [...foldResult.items.values()].filter(rec =>
+      rec.state === 'merged'
+      && !!rec.mergeGateCommand
+      && !harvestedSources.has(rec.id),
+    );
+    if (eligible.length === 0) {
+      return { step, ok: true, eventsWritten: 0, mdWritten: false, detail: 'no unharvested gate-proven merges' };
+    }
+
+    // Oldest-first so a backlog drains deterministically (mirrors stepMergeJudge).
+    eligible.sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? ''));
+    const batch = eligible.slice(0, KNOWLEDGE_HARVEST_PER_BEAT_CAP);
+    const deferred = eligible.length - batch.length;
+
+    if (opts.dryRun) {
+      return {
+        step, ok: true, eventsWritten: 0, mdWritten: false,
+        detail: `[dry-run] would harvest ${batch.length} unharvested merge(s)${deferred > 0 ? ` (+${deferred} deferred)` : ''}`,
+      };
+    }
+
+    const model = KNOWLEDGE_HARVEST_MODEL;
+    const timeoutMs = KNOWLEDGE_HARVEST_TIMEOUT_MS;
+
+    // Deterministic dedup key set: every contentHash already seen as a knowledge.candidate OR
+    // knowledge.ratified — a candidate whose normalized hash collides with either is dropped
+    // (the ADR's "Dedup / contradiction" row). Normalization + hashing reuse render-playbook's
+    // hashPlaybookContent so there is exactly one lesson-content hashing implementation.
+    const knownHashes = new Set<string>();
+    for (const ev of allEvents) {
+      if (ev.type === 'knowledge.candidate' || ev.type === 'knowledge.ratified') {
+        const h = (ev.data as { contentHash?: string }).contentHash;
+        if (h) knownHashes.add(h);
+      }
+    }
+    // Live ratified lessons, for the (best-effort) negation flag — a candidate that shares a
+    // verifyPath with a LIVE ratified lesson is flagged in the park reason for the operator; the
+    // dedup step never auto-resolves a contradiction (ADR "What is explicitly NOT in v1").
+    const liveRatifiedByPath = new Map<string, string>(); // verifyPath -> lesson text
+    for (const fact of foldResult.knowledge.values()) {
+      if (fact.live && fact.verifyPath) liveRatifiedByPath.set(fact.verifyPath, fact.lesson);
+    }
+
+    let nextNum = foldResult.maxWiNum;
+    const events: LedgerEvent[] = [];
+    let harvestedMerges = 0;
+    let candidatesParked = 0;
+    let skippedNoProvider = 0;
+
+    for (const rec of batch) {
+      const itemProvider = resolveProviderForSensitivity(
+        providerRegistry ?? null, provider, itemSensitivity(rec), { requireTools: false },
+      );
+      if (!itemProvider) {
+        skippedNoProvider++;
+        continue;
+      }
+
+      const gateEvidence = buildGateEvidenceExcerpt(rec);
+      const prompt = buildKnowledgeAuditPrompt({ id: rec.id, spec: rec.spec ?? rec.sourceText }, gateEvidence);
+      const runResult = await runKnowledgeHarvest(itemProvider, model, prompt, timeoutMs);
+      harvestedMerges++;
+
+      if (runResult.usage) {
+        events.push(makeEvent('reactor', rec.id, 'cost.usage', {
+          provider: itemProvider.name,
+          loop: 'knowledge-harvest',
+          tokens: (runResult.usage.in ?? 0) + (runResult.usage.out ?? 0),
+          usd: runResult.usage.usd,
+          wi: rec.id,
+          ...(runResult.usage.turns !== undefined ? { turns: runResult.usage.turns } : {}),
+          ...(runResult.usage.durationMs !== undefined ? { durationMs: runResult.usage.durationMs } : {}),
+        }));
+      }
+
+      // Provider unavailable → visible skip, never a fabricated candidate (mirror the judge's
+      // unavailable posture). No diagnosis.recorded-style event exists for this lane; the
+      // cost.usage-less skip plus this msg.out is the visible trail.
+      if (!runResult.parsed) {
+        events.push(makeEvent('reactor', rec.id, 'msg.out', {
+          text: `knowledge-harvest: skipped ${rec.id} — provider unavailable (${(runResult.providerError ?? 'unknown').slice(0, 200)}); no candidate produced.`,
+        }));
+        continue;
+      }
+
+      // Default-reject is the expected common case: an empty (or unparseable-degraded-to-empty)
+      // result means zero candidates from this merge — not logged per-item beyond the summary,
+      // exactly as most merges are expected to yield nothing (ADR "Curate (default-reject)").
+      for (const cand of runResult.parsed.candidates) {
+        const contentHash = hashPlaybookContent(cand.lesson.trim().toLowerCase());
+        if (knownHashes.has(contentHash)) continue; // exact-dup of a prior candidate/ratified lesson
+        knownHashes.add(contentHash); // guard within-beat duplicates across merges too
+
+        nextNum += 1;
+        const childId = `WI-${String(nextNum).padStart(3, '0')}`;
+        const sourceStamp = `knowledge:${rec.id}:${contentHash}`;
+
+        const negatesLive = cand.verifyPath && liveRatifiedByPath.has(cand.verifyPath)
+          ? liveRatifiedByPath.get(cand.verifyPath)
+          : undefined;
+
+        events.push(makeEvent('reactor', childId, 'item.captured', {
+          source: sourceStamp,
+          text: `Promote lesson from ${rec.id}: ${cand.lesson}`,
+        } as ItemCapturedData));
+
+        events.push(makeEvent('reactor', childId, 'knowledge.candidate', {
+          lesson: cand.lesson,
+          contentHash,
+          sourceWi: rec.id,
+          ...(rec.mergeGateCommand ? { gateCommand: rec.mergeGateCommand } : {}),
+          ...(gateEvidence ? { gateEvidenceExcerpt: gateEvidence.slice(0, 2_000) } : {}),
+          method: 'strict-auditor',
+          model,
+          ...(cand.verifyPath ? { verifyPath: cand.verifyPath } : {}),
+          ...(cand.verifyCommand ? { verifyCommand: cand.verifyCommand } : {}),
+        } as KnowledgeCandidateData));
+
+        const reasonBits = [
+          `Promote a distilled lesson from ${rec.id} — ratify before it reaches the playbook.`,
+          `Lesson: "${cand.lesson}"`,
+        ];
+        if (negatesLive) {
+          reasonBits.push(`CONTRADICTION FLAG: this candidate shares a verifyPath with a live ratified lesson ("${negatesLive}") — review whether it negates it before approving. Never auto-resolved.`);
+        }
+        events.push(makeEvent('reactor', childId, 'item.parked', {
+          reason: reasonBits.join(' '),
+          parkKind: 'decision',
+        }));
+
+        candidatesParked++;
+      }
+    }
+
+    if (!opts.dryRun && events.length > 0) {
+      await appendEvents(opts.ledgerDir, events);
+    }
+
+    const bits: string[] = [];
+    if (harvestedMerges > 0) bits.push(`harvested ${harvestedMerges}/${batch.length} merge(s)`);
+    if (candidatesParked > 0) bits.push(`parked ${candidatesParked} candidate(s)`);
+    if (skippedNoProvider > 0) bits.push(`skipped ${skippedNoProvider} (no provider)`);
+    if (deferred > 0) bits.push(`+${deferred} deferred`);
+    return {
+      step,
+      ok: true,
+      eventsWritten: events.length,
+      mdWritten: false,
+      detail: bits.length === 0 ? 'no candidates surfaced (default-reject)' : bits.join('; '),
     };
   } catch (e) {
     return { step, ok: false, eventsWritten: 0, mdWritten: false, detail: String(e) };
@@ -5283,6 +5514,12 @@ export async function runReactor(opts: ReactorOptions): Promise<ReactorResult> {
     // per-target work. Advisory-nudges an ADR/incident merge that owed a portability note but
     // shipped without one. Idempotent per (source, target).
     pushStep(await stepPortabilityPromotion(opts, cfg));
+
+    // Step (a2.5): ADR-015 Slice 3 — the strict-auditor knowledge harvest. Runs after
+    // stepPortabilityPromotion (both harvest from merged items) and before stepRoute, so a
+    // freshly-captured knowledge candidate is routable this same beat — though as a decision
+    // park it never enters build routing regardless.
+    pushStep(await stepKnowledgeHarvest(opts, cfg, provider, providerRegistry));
 
     // Step (b): route new captured items (degraded = tool-less fallback active). TRUST-HARDENING
     // (defect c): pass the registry so routing resolves EACH item's own sensitivity fail-closed,
