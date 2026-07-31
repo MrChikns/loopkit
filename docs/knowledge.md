@@ -1,5 +1,11 @@
 # Knowledge index
 
+> **Disambiguation:** this page is the console's **Knowledge index** (operator-declared markdown
+> sources, `LoopkitConfig.knowledge`) — unrelated to the ledger-native `knowledge.*` event domain
+> (`knowledge.candidate`/`knowledge.ratified`/`knowledge.expired`) that materializes the worker
+> playbook baseline. See
+> [ADR-015](decisions/ADR-015-verified-knowledge-promotion.md) for that mechanism.
+
 The console's **Knowledge** destination (`/company` — the old `/knowledge` URL 301s here) is an
 operator-declared index of the reference docs your work depends on — decision logs, gate/stage
 registries, active plan docs, architecture notes — rendered as cards alongside the knowledge picture

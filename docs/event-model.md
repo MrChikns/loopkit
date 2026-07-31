@@ -185,6 +185,23 @@ name multiple blockers, and never park or rewrite queued work.
   behind `portabilityPromotion.enabled` and defaults **off**. Only an explicitly enabled plane
   captures the sibling on a subsequent beat.
 
+### Knowledge fold (ADR-015) — a contentHash-keyed projection, not an item state
+
+The `knowledge.*` domain (`knowledge.candidate`, `knowledge.ratified`, `knowledge.expired`) is
+**not a new item state** in the lifecycle state machine above. A knowledge candidate is carried
+on its own `WI-NNN` and moves through the ordinary `captured → parked(decision) → approved` (or
+`rejected`) states like any decision park; `stepApplyVerbs` additionally appends `knowledge.ratified`
+when that approval is for a knowledge candidate (Slice 2). The durable promotion fact lives in a
+**second, SEPARATE fold** keyed by the lesson's `contentHash` (`FoldResult.knowledge`, a
+`Map<contentHash, KnowledgeFact>`), last-writer-wins between `knowledge.ratified`/`knowledge.expired`
+by ledger order — a later re-ratification of a previously-expired hash resurrects it. This mirrors
+how `session.*`/`target.*` events are addressed by a global handle rather than folded into
+`ItemRecord` state, not the dependency-DAG or park-kind machinery above. The reactor's
+`stepPlaybookMaterialize` (Slice 1) reads only this second fold — never `ItemRecord.state` — to
+render `.ai/loops/playbook.md`. See
+[ADR-015](decisions/ADR-015-verified-knowledge-promotion.md) for the full event contract and the
+harvest/ratify/materialize pipeline.
+
 ## Plane topology — one default plane; detached planes; never federation
 
 The plane is **machine-level infrastructure, not project tooling**: one plane-home, one

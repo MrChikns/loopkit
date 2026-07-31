@@ -43,7 +43,11 @@ state you keep in sync. They are **ledger-first projections**, derived from the 
 demand, so they cannot drift from the truth because they *are* the truth, re-read. Most are pure
 folds over events; a few (the ops-console summary's parked-branch liveness check, the daily
 brief's usage-ledger append) also run a small, explicit diagnostic alongside the read — never
-silent, and never a mutation of the ledger's own event log.
+silent, and never a mutation of the ledger's own event log. The worker-prompt playbook file is the
+same discipline applied to distilled knowledge, not just status: a reactor step folds ratified
+minus expired `knowledge.*` events and rewrites the file only on change, so a lesson injected into
+a build prompt is rebuildable from the ledger rather than hand-typed and
+untraceable<!--exists:stepPlaybookMaterialize--> (docs/decisions/ADR-015-verified-knowledge-promotion.md).
 
 This is the single discipline that kills the failure class the tool was built against: mutable
 coordination state — queues in markdown, status files, chat threads — silently loses or
