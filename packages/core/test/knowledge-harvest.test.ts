@@ -237,6 +237,90 @@ test('reactor: a contentHash collision with a prior ratified lesson is dropped',
   } finally { cleanup(); }
 });
 
+// ---------------------------------------------------------------------------
+// WI-270 defect 3: dedup set = live-ratified + pending/rejected candidates — a
+// stale-EXPIRED-then-nothing-else lesson must be re-harvestable (ADR: "a stale lesson is
+// re-surfaceable"), while a still-PENDING or REJECTED candidate stays blocked.
+// ---------------------------------------------------------------------------
+
+test('reactor: WI-270 defect 3 — a candidate still PENDING (parked, undecided) blocks re-harvest of the same content', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    const lesson = 'always run the gate before merging.';
+    const contentHash = (await import('../src/render-playbook.js')).hashPlaybookContent(lesson);
+    // Seed an existing PARKED (undecided) candidate for the same content, from a different source.
+    await appendEvents(ledgerDir, [
+      makeEvent('reactor', 'WI-550', 'item.captured', { source: `knowledge:WI-549:${contentHash}`, text: 'x' }, '2026-01-01T00:00:00Z'),
+      makeEvent('reactor', 'WI-550', 'knowledge.candidate', {
+        lesson: 'Always run the gate before merging.', contentHash, sourceWi: 'WI-549', method: 'strict-auditor', model: 'm',
+      }, '2026-01-01T00:00:01Z'),
+      makeEvent('reactor', 'WI-550', 'item.parked', { reason: 'ratify', parkKind: 'decision' }, '2026-01-01T00:00:02Z'),
+    ]);
+    await appendEvents(ledgerDir, mergedItem('WI-651', new Date().toISOString()));
+    const response = '[{"lesson": "Always run the gate before merging."}]';
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider(response), config: cfg(),
+    });
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'knowledge.candidate').length, 1,
+      'the still-pending candidate blocks a same-content re-harvest — only the original exists');
+  } finally { cleanup(); }
+});
+
+test('reactor: WI-270 defect 3 — a REJECTED candidate is terminal and blocks re-harvest of the same content', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    const lesson = 'always run the gate before merging.';
+    const contentHash = (await import('../src/render-playbook.js')).hashPlaybookContent(lesson);
+    await appendEvents(ledgerDir, [
+      makeEvent('reactor', 'WI-560', 'item.captured', { source: `knowledge:WI-559:${contentHash}`, text: 'x' }, '2026-01-01T00:00:00Z'),
+      makeEvent('reactor', 'WI-560', 'knowledge.candidate', {
+        lesson: 'Always run the gate before merging.', contentHash, sourceWi: 'WI-559', method: 'strict-auditor', model: 'm',
+      }, '2026-01-01T00:00:01Z'),
+      makeEvent('reactor', 'WI-560', 'item.parked', { reason: 'ratify', parkKind: 'decision' }, '2026-01-01T00:00:02Z'),
+    ]);
+    await approveOrReject(ledgerDir, 'WI-560', 'reject', { repoRoot });
+
+    await appendEvents(ledgerDir, mergedItem('WI-652', new Date().toISOString()));
+    const response = '[{"lesson": "Always run the gate before merging."}]';
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider(response), config: cfg(),
+    });
+    const events = await loadAllEvents(ledgerDir);
+    // The ORIGINAL (rejected) candidate's own knowledge.candidate event is still in the ledger
+    // (append-only — rejection never retracts it); what must NOT happen is a SECOND one from
+    // this new merge re-harvesting the same content.
+    const candidateEvents = events.filter(e => e.type === 'knowledge.candidate');
+    assert.equal(candidateEvents.length, 1,
+      'a rejected candidate is terminal — the same content must never be re-harvested (ADR: rejection stays terminal)');
+    assert.equal(candidateEvents[0]!.item, 'WI-560', 'the only candidate event is still the original, rejected one');
+  } finally { cleanup(); }
+});
+
+test('reactor: WI-270 defect 3 — a lesson whose ONLY history is ratified-then-STALE-EXPIRED IS re-harvestable', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    const lesson = 'always run the gate before merging.';
+    const contentHash = (await import('../src/render-playbook.js')).hashPlaybookContent(lesson);
+    // A prior ratification for the same content, now expired (stale) — no live fact, no pending
+    // or rejected candidate anywhere. The ADR promises this is re-surfaceable.
+    await appendEvents(ledgerDir, [
+      makeEvent('operator', 'WI-570', 'knowledge.ratified', {
+        contentHash, lesson: 'Always run the gate before merging.', sourceWi: 'WI-569', ratifiedBy: 'operator',
+      }, '2026-01-01T00:00:00Z'),
+      makeEvent('reactor', 'WI-570', 'knowledge.expired', { contentHash, reason: 'stale', failedAnchor: 'gone.ts' }, '2026-01-02T00:00:00Z'),
+    ]);
+    await appendEvents(ledgerDir, mergedItem('WI-653', new Date().toISOString()));
+    const response = '[{"lesson": "Always run the gate before merging."}]';
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider(response), config: cfg(),
+    });
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'knowledge.candidate').length, 1,
+      'a stale-expired (never live, never pending/rejected elsewhere) lesson must be re-harvestable, not blocked forever');
+  } finally { cleanup(); }
+});
+
 test('reactor: provider-unavailable yields a visible skip, never a fabricated candidate', async () => {
   const { repoRoot, ledgerDir, cleanup } = makeEnv();
   try {
@@ -286,6 +370,64 @@ test('reactor: per-beat cap is respected — excess eligible merges are deferred
     const after = await loadAllEvents(ledgerDir);
     const usageEvents = after.filter(e => e.type === 'cost.usage' && (e.data as { loop?: string }).loop === 'knowledge-harvest');
     assert.equal(usageEvents.length, 5, 'only 5 merges are harvested this beat (per-beat cap)');
+  } finally { cleanup(); }
+});
+
+test('reactor: WI-270 defect 1 — a successfully-parsed empty-array audit is durably recorded, so beat 2 harvests exactly the remaining eligible merges (no starvation)', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    // 7 eligible merges > the 5-per-beat cap, oldest-first so eligibility ordering is deterministic.
+    const events: LedgerEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      events.push(...mergedItem(`WI-71${i}`, new Date(Date.now() - (7 - i) * 60_000).toISOString()));
+    }
+    await appendEvents(ledgerDir, events);
+
+    // Beat 1: every response is the empty-array default-reject — the common case this defect
+    // was about (a non-fabricated, successfully-parsed, zero-candidate result).
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider('[]'), config: cfg(),
+    });
+    let all = await loadAllEvents(ledgerDir);
+    const harvestedAfterBeat1 = all.filter(e => e.type === 'knowledge.harvested');
+    assert.equal(harvestedAfterBeat1.length, 5, 'beat 1 durably records exactly the 5 it processed, even though every result was empty');
+
+    // Beat 2: the OLD bug re-harvested the same oldest-5 forever (nothing was ever recorded for
+    // an empty result), starving the 2 newest merges permanently. The fix must process exactly
+    // the 2 remaining unharvested merges this beat.
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider('[]'), config: cfg(),
+    });
+    all = await loadAllEvents(ledgerDir);
+    const usageEventsBeat2 = all.filter(e =>
+      e.type === 'cost.usage' && (e.data as { loop?: string }).loop === 'knowledge-harvest'
+      && !harvestedAfterBeat1.some(h => h.item === e.item),
+    );
+    const harvestedAfterBeat2 = all.filter(e => e.type === 'knowledge.harvested');
+    assert.equal(harvestedAfterBeat2.length, 7, 'all 7 merges are now durably harvested — nothing left unrecorded');
+    assert.equal(usageEventsBeat2.length, 2, 'beat 2 processes exactly the 2 merges beat 1 never got to — not a re-harvest of the first 5');
+
+    // Beat 3: everything is now harvested — must be a total no-op (proves the fact is durable,
+    // not just "this beat happens not to re-pick them").
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeHarvestProvider('[]'), config: cfg(),
+    });
+    const afterBeat3 = await loadAllEvents(ledgerDir);
+    const usageEventsBeat3 = afterBeat3.filter(e => e.type === 'cost.usage' && (e.data as { loop?: string }).loop === 'knowledge-harvest');
+    assert.equal(usageEventsBeat3.length, 7, 'no NEW usage events on beat 3 — all 7 merges stay durably harvested');
+  } finally { cleanup(); }
+});
+
+test('reactor: WI-270 defect 1 — a provider failure does NOT record knowledge.harvested (retries next beat)', async () => {
+  const { repoRoot, ledgerDir, cleanup } = makeEnv();
+  try {
+    await appendEvents(ledgerDir, mergedItem('WI-720', new Date().toISOString()));
+    await runReactor({
+      repoRoot, ledgerDir, autonomy: 'on', provider: makeFailingProvider(), config: cfg(),
+    });
+    const events = await loadAllEvents(ledgerDir);
+    assert.equal(events.filter(e => e.type === 'knowledge.harvested').length, 0,
+      'a provider failure must never be mistaken for a completed (empty-result) audit');
   } finally { cleanup(); }
 });
 

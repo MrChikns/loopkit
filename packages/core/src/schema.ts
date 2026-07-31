@@ -943,16 +943,39 @@ export interface KnowledgeRatifiedData {
  * knowledge.expired — a previously-ratified lesson removed from the injected set. Producers:
  * (1) the materialize step's read-time revalidation when verifyPath/Command no longer
  * resolves (`reason: 'stale'`); (2) an explicit operator retraction (`reason: 'retracted'`,
- * ADR-015 Slice 2); (3) the budget ranking (`reason: 'budget-evicted'`). EVICTED ≠ DELETED:
- * the event is appended (the ledger never mutates); the lesson simply drops out of the
- * projection's fold. A later re-ratification of the SAME contentHash resurrects it —
- * last-writer-wins between ratified/expired, keyed on contentHash.
+ * ADR-015 Slice 2). EVICTED ≠ DELETED: the event is appended (the ledger never mutates); the
+ * lesson simply drops out of the projection's fold. A later re-ratification of the SAME
+ * contentHash resurrects it — last-writer-wins between ratified/expired, keyed on contentHash.
+ *
+ * `'budget-evicted'` is a RETAINED, no-longer-produced value (WI-270 defect 2 fix): the line-
+ * budget cutoff is now projection-only (rankKnowledge in render-playbook.ts never appends this
+ * event) — flipping `live:false` on a budget cutoff made the fact permanently dead, which broke
+ * the ADR's "a budget-evicted lesson rises back into the file next beat" promise. The value
+ * stays in the union (fold.ts's LWW switch still accepts it) purely so a ledger from before this
+ * fix still folds; no current code path produces it.
  */
 export interface KnowledgeExpiredData {
   contentHash: string;
   reason: 'stale' | 'retracted' | 'budget-evicted';
   /** For 'stale': which anchor failed. */
   failedAnchor?: string;
+}
+
+/**
+ * knowledge.harvested — a durable "this merge's harvest audit completed" fact, appended on the
+ * SOURCE merge's own item (never the candidate's) for EVERY successfully parsed auditor
+ * response, including a `[]` (zero-candidate) result. This is the eligibility fact
+ * `stepKnowledgeHarvest` derives "already harvested" from — distinct from the source-stamp
+ * dedup on a candidate's OWN item (`knowledge:<sourceWi>:<contentHash>`), which only exists
+ * when at least one candidate was produced. Without this event, a merge whose audit legitimately
+ * found nothing has no record of ever being harvested and re-enters the eligible set every beat
+ * (WI-270 defect 1) — starving newer merges under the per-beat cap forever. A PROVIDER FAILURE
+ * (unparseable response / provider unavailable) must NOT append this event — only a
+ * successfully parsed response, empty or not, counts as "harvested."
+ */
+export interface KnowledgeHarvestedData {
+  /** How many candidates this parse produced (0 for the common default-reject case). */
+  candidateCount: number;
 }
 
 /**
@@ -1036,6 +1059,7 @@ export type EventDataMap = {
   'knowledge.candidate': KnowledgeCandidateData;
   'knowledge.ratified': KnowledgeRatifiedData;
   'knowledge.expired': KnowledgeExpiredData;
+  'knowledge.harvested': KnowledgeHarvestedData;
   'playbook.materialized': PlaybookMaterializedData;
 };
 
@@ -1078,7 +1102,7 @@ const KNOWN_TYPES = new Set<string>([
   'conv.started', 'conv.promoted', 'conv.closed',
   'target.registered', 'target.manifest-updated',
   'provenance.break-glass',
-  'knowledge.candidate', 'knowledge.ratified', 'knowledge.expired',
+  'knowledge.candidate', 'knowledge.ratified', 'knowledge.expired', 'knowledge.harvested',
   'playbook.materialized',
 ]);
 

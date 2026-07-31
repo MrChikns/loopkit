@@ -399,6 +399,16 @@ export interface ItemRecord {
   /** True when the item was accepted provisionally by reactor:oc6-provisional. */
   provisionalAccept?: boolean;
 
+  /**
+   * ADR-015 Slice 3 (WI-270 defect 1 fix): ts of this merge's most recent `knowledge.harvested`
+   * — a durable "the strict-auditor audit completed" fact, set for EVERY successfully parsed
+   * response including a zero-candidate `[]` result. `stepKnowledgeHarvest`'s eligibility filter
+   * reads this (not the presence of a harvested candidate item) so a merge whose audit
+   * legitimately found nothing is never re-audited — only a provider failure (unparseable /
+   * unavailable) leaves this unset, which is what makes that merge retry next beat.
+   */
+  knowledgeHarvestedAt?: string;
+
   /** SESSION MODE: live claim lease (see ItemClaim). Undefined = unclaimed. */
   claim?: ItemClaim;
 
@@ -1216,6 +1226,13 @@ export function fold(events: LedgerEvent[], opts?: FoldOptions): FoldResult {
           }
           break;
         }
+        // knowledge.harvested (ADR-015 Slice 3, WI-270 defect 1 fix): appended on the SOURCE
+        // merge's own item — always arrives on an already-terminal ('merged') item, so it must
+        // be handled here or it silently no-ops through `default`. Additive, non-transition,
+        // last-writer-wins (a re-harvest, if it ever happened, would just bump the ts).
+        case 'knowledge.harvested':
+          rec.knowledgeHarvestedAt = ev.ts;
+          break;
         default:
           // Every other event — including item.approved / item.parked / item.merged /
           // gate.* — is a no-op on an already-terminal item.

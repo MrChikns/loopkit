@@ -72,11 +72,19 @@ function makeEnv(): { repoRoot: string; ledgerDir: string; cleanup: () => void }
 // schema: new types registered + validated
 // ---------------------------------------------------------------------------
 
-test('schema: knowledge.candidate/ratified/expired + playbook.materialized are known types', () => {
+test('schema: knowledge.candidate/ratified/expired/harvested + playbook.materialized are known types', () => {
   assert.equal(isKnownType('knowledge.candidate'), true);
   assert.equal(isKnownType('knowledge.ratified'), true);
   assert.equal(isKnownType('knowledge.expired'), true);
+  assert.equal(isKnownType('knowledge.harvested'), true);
   assert.equal(isKnownType('playbook.materialized'), true);
+});
+
+test('schema: validateEvent accepts a well-formed knowledge.harvested envelope', () => {
+  const ev = makeEvent('reactor', 'WI-600', 'knowledge.harvested', { candidateCount: 0 });
+  const validated = validateEvent(ev);
+  assert.equal(validated.type, 'knowledge.harvested');
+  assert.equal((validated.data as { candidateCount: number }).candidateCount, 0);
 });
 
 test('schema: validateEvent accepts a well-formed knowledge.ratified envelope', () => {
@@ -175,6 +183,20 @@ test('fold: knowledge.expired on a never-ratified contentHash is ignored (no pha
   assert.equal(fold(events).knowledge.size, 0);
 });
 
+test('fold: knowledge.harvested sets knowledgeHarvestedAt on the SOURCE merge item (WI-270 defect 1)', () => {
+  const events: LedgerEvent[] = [
+    makeEvent('operator', 'WI-600', 'item.captured', { source: 'cli', text: 'build WI-600' }, '2026-01-01T00:00:00Z'),
+    makeEvent('reactor', 'WI-600', 'item.queued', { spec: 'x', touches: 'src/' }, '2026-01-01T00:00:01Z'),
+    makeEvent('reactor', 'WI-600', 'item.merged', {
+      commit: 'c1', sessionId: 's1', baseSha: 'a', headSha: 'b', changedFiles: ['src/x.ts'], gateCommand: 'npm test',
+    }, '2026-01-01T00:00:02Z'),
+    makeEvent('reactor', 'WI-600', 'knowledge.harvested', { candidateCount: 0 }, '2026-01-01T00:00:03Z'),
+  ];
+  const rec = fold(events).items.get('WI-600')!;
+  assert.equal(rec.state, 'merged');
+  assert.equal(rec.knowledgeHarvestedAt, '2026-01-01T00:00:03Z');
+});
+
 // ---------------------------------------------------------------------------
 // render-playbook: revalidation, ranking, rendering, hashing
 // ---------------------------------------------------------------------------
@@ -244,26 +266,145 @@ test('revalidateKnowledge: verifyCommand anchor checked via resolveCommandBinary
   assert.equal(expiredEvents.length, 1);
 });
 
-test('rankKnowledge: evicts lowest-ranked facts past maxLines (budget-evicted)', () => {
+// ---------------------------------------------------------------------------
+// WI-270 defect 4: verifyPath traversal — absolute paths and `../` escapes must fail-safe
+// ---------------------------------------------------------------------------
+
+test('revalidateKnowledge: an ABSOLUTE verifyPath is rejected as an invalid anchor (never passes through)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-repo-'));
+  try {
+    // The absolute path genuinely exists on disk (written inside repoRoot itself) — proving
+    // the rejection is about the path being absolute, not about existence.
+    const absTarget = join(base, 'real.ts');
+    writeFileSync(absTarget, 'x', 'utf8');
+    const fact = makeFact({ verifyPath: absTarget });
+    const { fresh, expiredEvents } = revalidateKnowledge([fact], base, 60);
+    assert.equal(fresh.length, 0, 'an absolute verifyPath must never be treated as a valid anchor');
+    assert.equal(expiredEvents.length, 1);
+    assert.equal((expiredEvents[0]!.data as { reason: string }).reason, 'stale');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('revalidateKnowledge: a `../` verifyPath that escapes repoRoot is rejected, even if the target exists', () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-repo-'));
+  try {
+    // Nest the "repo" one level down so `../../<base-dir-name>/target.txt` can be crafted to
+    // resolve back inside `base` (proving existence isn't what saves it) while still escaping
+    // the configured repoRoot (the nested dir).
+    const repoRoot = join(base, 'repo');
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(join(base, 'outside.txt'), 'x', 'utf8');
+    const fact = makeFact({ verifyPath: '../../outside.txt' });
+    const { fresh, expiredEvents } = revalidateKnowledge([fact], repoRoot, 60);
+    assert.equal(fresh.length, 0, 'a path escaping repoRoot via ../ must never be treated as a valid anchor');
+    assert.equal(expiredEvents.length, 1);
+    assert.equal((expiredEvents[0]!.data as { reason: string }).reason, 'stale');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('revalidateKnowledge: a `../` verifyPath that stays WITHIN repoRoot (no real escape) still resolves normally', () => {
+  const base = mkdtempSync(join(tmpdir(), 'adr015-repo-'));
+  try {
+    mkdirSync(join(base, 'src', 'nested'), { recursive: true });
+    writeFileSync(join(base, 'src', 'real.ts'), 'x', 'utf8');
+    // src/nested/../real.ts normalizes to src/real.ts — still inside repoRoot.
+    const fact = makeFact({ verifyPath: 'src/nested/../real.ts' });
+    const { fresh, expiredEvents } = revalidateKnowledge([fact], base, 60);
+    assert.equal(fresh.length, 1, 'a ../ that normalizes back inside repoRoot is not a traversal');
+    assert.equal(expiredEvents.length, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('rankKnowledge: evicts lowest-ranked facts past maxLines — PROJECTION-ONLY, no knowledge.expired event (WI-270 defect 2)', () => {
   const facts: KnowledgeFact[] = [
     makeFact({ contentHash: 'a', ratifiedAt: '2026-01-01T00:00:00Z' }),
     makeFact({ contentHash: 'b', ratifiedAt: '2026-01-02T00:00:00Z' }),
     makeFact({ contentHash: 'c', ratifiedAt: '2026-01-03T00:00:00Z' }),
   ];
-  const { kept, evictedEvents } = rankKnowledge(facts, [], 2);
+  const { kept, evicted } = rankKnowledge(facts, [], 2);
   assert.equal(kept.length, 2);
-  assert.equal(evictedEvents.length, 1);
-  assert.equal((evictedEvents[0]!.data as { reason: string }).reason, 'budget-evicted');
+  assert.equal(evicted.length, 1);
   // Recency-ranked (no usefulness signal since no merged items passed in): the two most
   // recent survive, the oldest is evicted.
   assert.deepEqual(kept.map(f => f.contentHash).sort(), ['b', 'c']);
+  assert.equal(evicted[0]!.contentHash, 'a');
+  // The fact itself is untouched — rankKnowledge returns plain KnowledgeFact objects, never a
+  // knowledge.expired event, for the evicted set (that's the whole fix: budget eviction must
+  // never durably kill a live fact).
+  assert.equal(evicted[0]!.live, true);
 });
 
-test('rankKnowledge: keeps everything when under budget (no eviction events)', () => {
+test('rankKnowledge: keeps everything when under budget (nothing evicted)', () => {
   const facts: KnowledgeFact[] = [makeFact({ contentHash: 'a' })];
-  const { kept, evictedEvents } = rankKnowledge(facts, [], 40);
+  const { kept, evicted } = rankKnowledge(facts, [], 40);
   assert.equal(kept.length, 1);
-  assert.equal(evictedEvents.length, 0);
+  assert.equal(evicted.length, 0);
+});
+
+test('rankKnowledge + materialize recovery: a budget-evicted lesson rises back into the file next beat once a higher-ranked lesson goes stale (WI-270 defect 2)', async () => {
+  // End-to-end through the reactor: rank 1..maxLines survive, rank maxLines+1 is cut. Once the
+  // TOP-ranked (most recent) lesson's anchor goes stale, the next materialize beat re-ranks the
+  // full live set and the previously budget-evicted lesson should now fit inside the budget —
+  // proving the eviction was never permanent (the old code's knowledge.expired-on-evict bug
+  // would have permanently killed it, so it could never come back regardless of budget room).
+  const { repoRoot, ledgerDir, cleanup: done } = makeEnv();
+  try {
+    mkdirSync(join(repoRoot, 'src'), { recursive: true });
+    writeFileSync(join(repoRoot, 'src', 'stays.ts'), 'x', 'utf8');
+    // Both anchors exist for beat 1, so both lessons are FRESH going into ranking — the budget
+    // (maxLines:1) is what cuts the older one, not a stale anchor.
+    writeFileSync(join(repoRoot, 'src', 'goes-stale.ts'), 'x', 'utf8');
+
+    await appendEvents(ledgerDir, [
+      // Rank 1 (most recent, survives budget) — but its own anchor will go stale.
+      makeEvent('operator', 'WI-800', 'knowledge.ratified', {
+        contentHash: 'h-recent-stale', lesson: 'Recent but about to go stale.', sourceWi: 'WI-800',
+        ratifiedBy: 'operator', verifyPath: 'src/goes-stale.ts',
+      }, '2026-01-03T00:00:00Z'),
+      // Rank 2 (older, budget-evicted under maxLines:1) — anchor holds throughout.
+      makeEvent('operator', 'WI-801', 'knowledge.ratified', {
+        contentHash: 'h-older-solid', lesson: 'Older but its anchor always holds.', sourceWi: 'WI-801',
+        ratifiedBy: 'operator', verifyPath: 'src/stays.ts',
+      }, '2026-01-01T00:00:00Z'),
+    ]);
+
+    const testCfg = (): LoopkitConfig => ({
+      ...CONFIG_DEFAULTS,
+      gateCommand: 'exit 0', gateWorkdir: '.', breakerN: 3,
+      promptsDir: '.ai/loops/prompts', notifyHook: '.ai/notify-phone.sh',
+      knowledgePromotion: { enabled: true, ttlDays: 60 },
+      playbook: { enabled: true, path: '.ai/loops/playbook.md', maxLines: 1 },
+    });
+
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: testCfg() });
+    const playbookPath = join(repoRoot, '.ai', 'loops', 'playbook.md');
+    let content = readFileSync(playbookPath, 'utf8');
+    assert.ok(content.includes('Recent but about to go stale.'), 'beat 1: the higher-ranked lesson is in the file');
+    assert.ok(!content.includes('Older but its anchor always holds.'), 'beat 1: the lower-ranked lesson is budget-evicted');
+
+    // Confirm it's still LIVE in the ledger (not knowledge.expired'd by the eviction).
+    let events = await loadAllEvents(ledgerDir);
+    assert.equal(fold(events).knowledge.get('h-older-solid')!.live, true,
+      'budget eviction must never append knowledge.expired — the fact stays live');
+
+    // Now make the top-ranked lesson's anchor go stale by deleting the file it depends on.
+    rmSync(join(repoRoot, 'src', 'goes-stale.ts'), { force: true });
+
+    await runReactor({ repoRoot, ledgerDir, autonomy: 'on', provider: null, config: testCfg() });
+    content = readFileSync(playbookPath, 'utf8');
+    events = await loadAllEvents(ledgerDir);
+    assert.equal(fold(events).knowledge.get('h-recent-stale')!.live, false, 'the recent lesson is now stale-expired');
+    assert.ok(content.includes('Older but its anchor always holds.'),
+      'beat 2: the previously budget-evicted lesson rises back into the file once room opens up');
+  } finally {
+    done();
+  }
 });
 
 test('renderPlaybookMarkdown: includes the GENERATED banner and one line per lesson', () => {

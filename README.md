@@ -138,13 +138,16 @@ its own and what needs your eyes.**
   Full boundary semantics:
   [docs/trust-boundaries.md](docs/trust-boundaries.md).
 - **Verified knowledge promotion.** The worker's `REPO PLAYBOOK` baseline is a rebuildable
-  projection, not a hand-typed file: a strict, default-reject auditor harvests candidate lessons
-  only from merges that already passed the gate, the operator ratifies each one through the
-  same approve/reject verbs used everywhere else on the plane, and a deterministic read-time
-  check expires a lesson once its cited file or command no longer exists. No lesson reaches a
-  prompt without a gate-proven source and a human sign-off. It's off by default
-  (`knowledgePromotion.enabled`); see
-  [ADR-015](docs/decisions/ADR-015-verified-knowledge-promotion.md).
+  projection, not a hand-typed file. A harvested lesson is gate-proven, audited, and
+  operator-ratified: a strict, default-reject auditor harvests candidates only from merges that
+  already passed the gate, and the operator ratifies each one through the same approve/reject
+  verbs used everywhere else on the plane before it ever reaches a prompt. An imported lesson —
+  the one-time `loopctl knowledge import` migration of a pre-existing hand-curated playbook — is
+  explicitly operator-ratified only, by the act of running the command, never gate-derived or
+  audited. Either way, a deterministic check on every materialize beat expires a lesson once its
+  cited file or command no longer exists. With the flag off (`knowledgePromotion.enabled`,
+  default false) the playbook file is left exactly as a human last committed it — untouched, not
+  projected. See [ADR-015](docs/decisions/ADR-015-verified-knowledge-promotion.md).
 
 ## Get pinged when it needs you
 

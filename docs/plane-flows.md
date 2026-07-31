@@ -167,7 +167,7 @@ flowchart TD
   never queued, so it re-enters this same routing (WI-177). Intake-only slicing stays the deliberate
   trade; what changed is that the remainder no longer depends on you reading a run directory.
 - ✅ A reply that steers an in-flight item appends `item.respec`, which amends both the item's `spec`
-  and its acceptance criteria (`packages/core/src/fold.ts:1609`<!--cite:foldRespec-->), and every
+  and its acceptance criteria (`packages/core/src/fold.ts:1626`<!--cite:foldRespec-->), and every
   operator-facing surface renders the amended pair — never the superseded capture text. Criteria are
   **replaced wholesale, not merged**, so a promise you withdrew really leaves the screen: accepting a
   slice against a bar nobody is still making is the failure this rule exists to prevent. (This page
@@ -315,7 +315,7 @@ flowchart TD
 - **`item.blocked` / `blockedOn` is not the scheduling DAG.** It is an older pathology repair
   relationship on an already parked victim. The reactor releases that victim when its repair item
   **merges**
-  (`packages/core/src/beats/reactor.ts:2442`<!--cite:blockedVictimRelease-->). The plane creates these
+  (`packages/core/src/beats/reactor.ts:2461`<!--cite:blockedVictimRelease-->). The plane creates these
   links itself: when the pathologist decides a park was caused by a plane bug rather than the item's
   own code, it captures a repair item and blocks the victim on it — Plate 08.
 - **A pathology blocker that cannot merge does not strand the victim silently.** If the repair is missing
@@ -323,7 +323,7 @@ flowchart TD
   `decision` after **24**<!--pin:blockedWaitTimeoutHours--> hours with the blocker's state attached.
   A live, recovering, planning, held or decision-blocked repair keeps waiting and points you to the
   blocker; age alone does not create a second decision
-  (`packages/core/src/beats/reactor.ts:2536`<!--cite:blockedVictimTimeout-->).
+  (`packages/core/src/beats/reactor.ts:2555`<!--cite:blockedVictimTimeout-->).
 - **A hold is not a failure.** `parked/hold` never enters pathology, never ages into Stuck, and
   never moves automatically. Stuck means a breaker-tripped ops park or build execution with no
   transition for more than six hours; decision, decomposition, queue wait, and ordinary ops
@@ -534,13 +534,13 @@ and are promoted only by a manual config change after burn-in.
 
 - **The plane files its own bugs.** When the pathologist classifies a park as a plane infrastructure
   bug it allocates a new work item, queues it, and blocks the victim on it
-  (`packages/core/src/beats/reactor.ts:2758`<!--cite:repairItemCapture-->). That never reaches your desk
+  (`packages/core/src/beats/reactor.ts:2777`<!--cite:repairItemCapture-->). That never reaches your desk
   as a decision; it reaches the board as work.
 - A repeated *identical* failure fingerprint trips a thrashing park regardless of the retry counters —
   "same cause again" is a different signal from "ran out of retries".
 - Running alongside on every autonomy-enabled reactor beat: orphaned-build detection,
   crashed-worker reaping, stale session-claim reaping
-  (`packages/core/src/beats/reactor.ts:4116`<!--cite:staleClaimReap-->), and a leaked-worktree sweep.
+  (`packages/core/src/beats/reactor.ts:4138`<!--cite:staleClaimReap-->), and a leaked-worktree sweep.
 - 🔵 The worktree sweeper used to force-delete directories containing **uncommitted work**, with no
   salvage, on a clock that never noticed edits in subdirectories. It now refuses a dirty tree, spares
   anything you have claimed, and measures staleness from real activity.
@@ -595,7 +595,7 @@ flowchart LR
 **The windows.** `auto` accepts after **2**<!--pin:autoAfterHours--> hours, `optional` after
 **48**<!--pin:optionalAfterHours-->, `review` after **168**<!--pin:reviewAfterHours--> — seven days.
 `must` never auto-accepts at all
-(`packages/core/src/beats/reactor.ts:4721`<!--cite:mustNeverAutoAccepts-->).
+(`packages/core/src/beats/reactor.ts:4743`<!--cite:mustNeverAutoAccepts-->).
 
 Those last two are **starting** windows, not fixed ones: the reactor self-tunes them from your own
 verdict history — a clean-accept streak shrinks the window, a reported problem grows it — bounded by a
@@ -612,7 +612,7 @@ inferred green. `must` remains manual regardless of deployment truth.
 
 - **Plane health.** If the reactor beat, the dispatch beat or the instance probes are not affirmatively
   `met`, non-`auto` acceptance is withheld and a visible reason is appended once, on the transition
-  (`packages/core/src/beats/reactor.ts:4367`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
+  (`packages/core/src/beats/reactor.ts:4389`<!--cite:acceptWithholdKeys-->). **Unknown is not healthy** —
   a probe that errors withholds, because absent evidence is not green evidence. The `auto` tier
   bypasses this *plane-health* gate because there is nothing to test, but it still must satisfy the
   deployment prerequisite above.
@@ -692,7 +692,7 @@ flowchart TD
 - Current merges fold to five explicit states: `not-configured`, `pending`, `succeeded`, `failed`
   and `timed-out`; a legacy merge with no configuration evidence remains honestly **unknown**.
   Explicit lifecycle success sets compatibility `deployed` true
-  (`packages/core/src/fold.ts:923`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
+  (`packages/core/src/fold.ts:933`<!--cite:foldDeploySucceeded-->). These are data-only receipts:
   none changes the item's merged/accepted state.
 - ✅ **The `deployed` flag on `item.merged` is uniformly `false`, on every lane.** A merge observes
   that code landed, never that it deployed; `deploy.succeeded` / `deploy.failed` are the sole
@@ -713,7 +713,7 @@ flowchart TD
   amber at **0.8**<!--pin:atRiskFraction--> of the same hour; without a deploy root it reads
   `unknown`.
 - ⚪ **There is no automatic rollback anywhere.** A merge's `certification.rollback` is a string the
-  worker wrote and you read (`packages/core/src/fold.ts:847`<!--cite:certificationRollback-->). Nothing
+  worker wrote and you read (`packages/core/src/fold.ts:857`<!--cite:certificationRollback-->). Nothing
   executes it.
 
 ---

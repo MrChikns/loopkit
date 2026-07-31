@@ -56,10 +56,13 @@ projection of it.
 **The playbook stops being a source file and becomes a pure, rebuildable projection of
 ratified knowledge events. Knowledge is extracted from gate-proven merges, curated by a
 default-reject strict auditor, ratified by the operator through the existing approve/reject
-verbs, materialized by the reactor, and revalidated at read time before it is ever injected.**
-No knowledge line reaches a worker prompt without having (a) come from a merge that passed
-the gate, (b) survived a strict-auditor rejection pass, (c) been approved by a human, and
-(d) passed a cheap deterministic freshness check at injection time.
+verbs, materialized by the reactor, and revalidated on every materialize beat before the file
+is rewritten.** No harvested knowledge line reaches a worker prompt without having (a) come
+from a merge that passed the gate, (b) survived a strict-auditor rejection pass, (c) been
+approved by a human, and (d) passed a cheap deterministic freshness check the last time the
+reactor rewrote the file. (WI-270 note: dispatch injects whatever the file held after that
+last materialize beat — the freshness check runs on the reactor's own cadence, not at the
+moment a build prompt reads the file.)
 
 This is one new closed loop mapped onto machinery the plane already has — the ADR-009
 promotion/dedup pattern, the ADR-007 approve/reject verbs, and the calibration step's
@@ -223,7 +226,7 @@ ADR-009 rejection of second parsers.
 |---|---|---|---|
 | **Harvest / extract** | new `stepKnowledgeHarvest` in `reactor.ts`, slotted after `stepPortabilityPromotion` — both harvest from merged items; runs before route so a fresh candidate is a routable item this beat | **LLM**, capped | Same shape as `stepMergeJudge`: fold → filter eligible (`state==='merged'`, has `mergeGateCommand`, not already harvested by source-stamp) → sensitivity-scoped provider (fail-closed) → per-beat cap (e.g. 5) → append. Prompt is the strict auditor (below). |
 | **Curate (default-reject)** | inside the harvest prompt | **LLM** | The strict-auditor prompt (per the default-reject curation norm; cf. arXiv 2603.15666) instructs: *most merges teach nothing generalizable; emit `[]` unless a lesson is (a) execution-proven by this merge's gate, (b) durable beyond this one item, (c) not already obvious from the repo's contributing guide.* Default output is the empty set. |
-| **Dedup / contradiction** | tail of `stepKnowledgeHarvest` | **Deterministic** | `contentHash` set from all prior `knowledge.candidate` + `knowledge.ratified`, exactly like `promotedPairs` in `stepPortabilityPromotion`. A candidate whose normalized hash exists is dropped; a candidate that *negates* a live ratified lesson is flagged in the park reason for the operator, never auto-resolved. |
+| **Dedup / contradiction** | tail of `stepKnowledgeHarvest` | **Deterministic** | `contentHash` set from every currently-LIVE ratified fact, plus every candidate whose own item is still pending (parked, undecided) or was rejected (rejection is terminal — never re-harvested). A hash whose only history is ratified-then-stale-expired is deliberately excluded, so it stays re-harvestable (see "Read-time safety" below — WI-270 fixed an earlier version of this set that blocked exactly that resurrection). A candidate whose normalized hash is in the set is dropped; one that *negates* a live ratified lesson is flagged in the park reason for the operator, never auto-resolved. |
 | **Park for ratification** | end of harvest step | **Deterministic** | Each surviving candidate gets its own `WI-NNN` via `item.captured` (source-stamped) + `item.parked{ parkKind:'decision' }` — the same shape as the decision-park branch of `stepPortabilityPromotion`. This routes it to the console decision desk + the decision-park notifier. |
 | **Ratify** | **operator**, then `stepApplyVerbs` | **Human gate**, then deterministic | Operator runs `approve`/`reject` (ADR-007). `stepApplyVerbs` gains a small clause: when it processes an `item.approved` on an item whose park was a knowledge candidate, it **also appends `knowledge.ratified`** in the same locked append. Per **GovMem's negative result, there is NO auto-approve path for knowledge in v1** — `stepAutoApprove` already skips `parkKind:'decision'`, and knowledge parks inherit that. |
 | **Materialize** | new `stepPlaybookMaterialize`, slotted near end, after apply-verbs (so this beat's fresh ratifications land) | **Deterministic projection** | The one new capability. Folds `knowledge.ratified − knowledge.expired`, revalidates, ranks, writes the file idempotently, appends `playbook.materialized` only on change. Mirrors `render-lane-matrix.ts`'s "GENERATED — do not hand-edit" banner + full-file rewrite. |
@@ -242,14 +245,17 @@ cheap, deterministic, on every beat that has anything to write:
   falls back to a TTL (default 60 days, config) measured from its `knowledge.ratified` ts —
   expired the same way. A stale lesson is re-surfaceable: nothing stops a future merge
   re-harvesting the pattern if it is still true.
-- **The line budget is a ranking, not a filter on the ledger.** All ratified-and-fresh
-  lessons are ranked by **recency × usefulness**, where usefulness is a cheap ledger-derived
-  signal (how many later merges touch the same `verifyPath`/area, i.e. how live the touched
-  surface is), and only the **top `maxLines`** are written to the file. Lessons past the
-  cutoff get `knowledge.expired{reason:'budget-evicted'}` **only in the projection sense** —
-  evicted ≠ deleted: the ratified event stays in the ledger forever, and if a higher-ranked
-  lesson later expires, a budget-evicted one rises back into the file next beat. This is the
-  direct mitigation for context bloat against a hard 40-line cap.
+- **The line budget is a ranking, not a filter on the ledger — and not a ledger event either.**
+  All ratified-and-fresh lessons are ranked by **recency × usefulness**, where usefulness is a
+  cheap ledger-derived signal (how many later merges touch the same `verifyPath`/area, i.e. how
+  live the touched surface is), and only the **top `maxLines`** are written to the file. Lessons
+  past the cutoff are simply not rendered this beat — no `knowledge.expired` is appended for
+  them (WI-270 fixed an earlier version that did append one, which flipped the fact's `live` to
+  `false` permanently and broke the "rises back next beat" promise below, since a dead fact never
+  re-enters the ratified-and-fresh set this ranking reads). The fact stays fully live in the
+  ledger, so if a higher-ranked lesson later expires stale, a budget-evicted one rises back into
+  the file on the very next materialize beat that has room for it. This is the direct mitigation
+  for context bloat against a hard 40-line cap.
 - **Idempotent write.** The step hashes the rendered file and rewrites only on change (no-op
   beats write nothing and append no `playbook.materialized`), so the beat stays quiet and the
   git working tree is not churned every 30s.
@@ -316,8 +322,11 @@ fixtures — no model needed.
 **Slice 4 (optional) — Migrate the existing hand-curated playbook into the ledger.**
 Today's `.ai/loops/playbook.md` is hand-authored; once Slice 1 makes the file a projection,
 a one-time `loopctl knowledge import` reads current non-comment lines and appends a
-`knowledge.ratified{method:'imported'}` per line (operator-run, so the human gate is honored
-by the act of running it), after which the file is never hand-edited again.
+`knowledge.ratified{ratifiedBy:'operator-import'}` per line (matching the shipped field —
+`KnowledgeRatifiedData` has no `method` field; provenance is carried through `ratifiedBy`
+instead, distinguishing an import from an ordinary operator approve-a-candidate ratification.
+Operator-run, so the human gate is honored by the act of running it), after which the file is
+never hand-edited again.
 - *Tests:* import is idempotent (re-run appends nothing new by hash); post-import materialize
   reproduces the operator's curated set.
 
